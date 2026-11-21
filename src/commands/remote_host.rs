@@ -31,6 +31,7 @@ use crate::{RemoteHostArgs, RemoteHostCommand};
 pub(crate) const CONTROL_PROTOCOL: u32 = 1;
 pub(crate) const HOST_MARKER: &str = "ORX_REMOTE_HOST=";
 pub(crate) const ATTACHED_MARKER: &str = "ORX_REMOTE_ATTACHED=1";
+pub(crate) const HOST_NOT_RESPONDING: &str = "The persistent OpenResearch host is not responding.";
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 const START_TIMEOUT: Duration = Duration::from_secs(60);
@@ -452,7 +453,8 @@ async fn stop_preview(chat: &ChatHost, auth: &RemoteAuth) -> StopPreview {
         active_turn_count: chat.busy_sessions().await.len(),
         queued_message_count: chat.queued_count(),
         pending_permission_count: chat.pending_permission_count(),
-        active_run_count: Store::open()
+        // Read-only: opening for writing queues behind every chat writer, past the control timeout.
+        active_run_count: Store::open_read_only(crate::store::data_dir())
             .and_then(|store| store.count_active_runs())
             .unwrap_or(0),
         attachment_count: auth.attachment_count(),
@@ -665,7 +667,7 @@ async fn control_exchange(data_dir: &Path, request: &ControlRequest) -> Result<C
     .await
     .map_err(|elapsed| {
         crate::error::Error::new(elapsed)
-            .context("The persistent OpenResearch host is not responding. Try again in a moment.")
+            .context(format!("{HOST_NOT_RESPONDING} Try again in a moment."))
     })?
 }
 

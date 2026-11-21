@@ -8281,6 +8281,18 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_read_only_store_counts_runs_while_a_writer_holds_the_lock() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-read-only-store").unwrap();
+        let writer = Store::open_at(dir.path().to_path_buf()).unwrap();
+        writer.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let started = std::time::Instant::now();
+        let reader = Store::open_read_only(dir.path().to_path_buf()).unwrap();
+        assert_eq!(reader.count_active_runs().unwrap(), 0);
+        assert!(started.elapsed() < BUSY_TIMEOUT);
+    }
+
+    #[test]
     fn schema_setup_rolls_back_when_permission_migration_fails() {
         let dir = crate::local::git::TemporaryDirectory::new("orx-migration-rollback").unwrap();
         let store = Store::open_at(dir.path().to_path_buf()).unwrap();

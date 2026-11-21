@@ -244,6 +244,7 @@ import { discoveredPapers, linkedPapers, paperKey, type CitedPaper, type PaperMe
 import { ChatLitSources, useChatLitSources } from "./LitSourcesPicker";
 import type { LitSource } from "./LitSourceLogo";
 import { ChatImageScope, Md } from "./Md";
+import { ImageMenu } from "./ImageMenu";
 import { ChatLinksContext, type ChatLinks } from "./ChatLinks";
 import { CITED_ID, messageRef } from "../agentMessages";
 import { PlanStrip } from "./PlanStrip";
@@ -3980,9 +3981,11 @@ export const Message = memo(function Message({
           {images.length > 0 && (
             <div className="msg-images flex flex-wrap gap-1.5 mt-2 first:mt-0 [&_img]:max-w-55 [&_img]:max-h-40 [&_img]:border [&_img]:border-border-variant [&_img]:rounded-xs [&_img]:block">
               {images.map((a, i) => (
-                <a key={i} href={a.src} target="_blank" rel="noreferrer">
-                  <img src={a.src} alt={a.name} />
-                </a>
+                <ImageMenu key={i} src={a.src} name={a.name}>
+                  <a href={a.src} target="_blank" rel="noreferrer">
+                    <img src={a.src} alt={a.name} />
+                  </a>
+                </ImageMenu>
               ))}
             </div>
           )}
@@ -5134,7 +5137,8 @@ const Transcript = memo(function Transcript({
   useLayoutEffect(() => {
     const scroll = scrollRef.current;
     const row = focusedRow ? scroll?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(focusedRow)}"]`) : null;
-    if (!scroll || !row || row.contains(document.activeElement)) return;
+    // Focus in a row's portaled menu or viewer still marks the row, which keeps it mounted, but stays where it is.
+    if (!scroll || !row || row.contains(document.activeElement) || !scroll.contains(document.activeElement)) return;
     row.focus({ preventScroll: true });
     const viewport = scroll.getBoundingClientRect();
     const bounds = row.getBoundingClientRect();
