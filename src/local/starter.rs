@@ -772,6 +772,7 @@ mod tests {
             run_command: Some("python train.py --steps 10".into()),
             paper_id: None,
             icon: None,
+            proposal: None,
             created_at: 0,
             updated_at: 0,
         }

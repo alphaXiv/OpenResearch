@@ -198,6 +198,28 @@ pub async fn run(args: UpArgs) -> Result<()> {
     };
     // Plan-mode turns hand this port to the `orx mcp` permission bridge.
     state.chat.set_up_port(actual_port);
+    {
+        let lifecycle = state.project_lifecycle.clone();
+        let moving = state.data_dir_move_in_progress.clone();
+        state
+            .chat
+            .set_project_change_guard(Box::new(move |project| {
+                let change = lifecycle.begin_delete(project)?;
+                // Checked after claiming: a move that raised its flag first counts this change.
+                let moving = moving.load(Ordering::SeqCst);
+                (!moving).then(|| Box::new(change) as Box<dyn Send>)
+            }));
+    }
+    // One dashboard owns the data directory, so any move still recorded was cut short.
+    let recovered = tokio::task::spawn_blocking(|| match Store::open() {
+        Ok(store) => local::projects::recover_project_moves(&store),
+        Err(error) => {
+            eprintln!("orx up: could not open the store to recover project moves: {error}")
+        }
+    });
+    if let Err(error) = recovered.await {
+        eprintln!("orx up: recovering interrupted project moves stopped: {error}");
+    }
     // Before any queue, notice or lease sweep can take a quit turn's slot.
     state.chat.resume_quit_turns().await;
     {
@@ -2149,6 +2171,12 @@ async fn create_scratch_project(State(state): State<AppState>) -> ApiResult {
 struct ChatProjectReq {
     name: String,
     path: String,
+    /// The project the asker saw and whether it was a chat without a project;
+    /// older dashboards leave both out.
+    project: Option<String>,
+    scratch: Option<bool>,
+    /// The tool call id of the agent proposal confirmed, `""` for none; older dashboards leave it out.
+    proposal: Option<String>,
 }
 
 /// Makes a chat a project of its own, now or once its turn ends.
@@ -2158,17 +2186,15 @@ async fn move_chat_to_project(
     Json(req): Json<ChatProjectReq>,
 ) -> ApiResult {
     reject_if_moving(&state)?;
-    let project_id = Store::open()?
-        .get_chat_session(&id)?
-        .ok_or_else(|| not_found("chat session"))?
-        .project_id;
-    let _changing = state
-        .project_lifecycle
-        .begin_delete(&project_id)
-        .ok_or_else(|| bad_request("The project is busy with another change; try again."))?;
     let moved = state
         .chat
-        .move_to_new_project(&id, &req.name, &req.path)
+        .move_to_new_project(
+            &id,
+            &req.name,
+            &req.path,
+            req.project.as_deref().zip(req.scratch),
+            req.proposal.as_deref(),
+        )
         .await
         .map_err(bad_request)?;
     Ok(Json(match moved {
@@ -2177,13 +2203,21 @@ async fn move_chat_to_project(
     }))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CancelChatProjectMoveQ {
+    /// The request the asker saw; older dashboards cancel whichever is waiting.
+    requested_at: Option<i64>,
+}
+
 async fn cancel_chat_project_move(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(q): Query<CancelChatProjectMoveQ>,
 ) -> ApiResult {
-    if !state.chat.cancel_project_move(&id).await? {
+    if !state.chat.cancel_project_move(&id, q.requested_at).await? {
         return Err(bad_request(
-            "No move is waiting for this chat; it may have already started.",
+            "No move is waiting for this chat; it may have started or been replaced.",
         ));
     }
     Ok(Json(json!({ "ok": true })))
@@ -2283,7 +2317,7 @@ async fn initialize_project_git(
         local::git::initialize_repository(path)?;
         local::git::validate_project_repository(path)?;
         project.baseline_branch = local::git::require_current_branch(path)?;
-        store.update_local_project(&project)?;
+        store.set_project_baseline_branch(&project.id, &project.baseline_branch)?;
         Ok(Json(project_git_json(&project, github_status)))
     })
     .await
@@ -2354,10 +2388,10 @@ async fn create_independent_project_repository(
             source_repository.as_ref(),
         )?;
     }
+    store.set_project_github_repository(&project.id, &owner, &repo)?;
     project.github_owner = owner;
     project.github_repo = repo;
     project.github_sync_enabled = false;
-    store.update_local_project(&project)?;
     Ok(project)
 }
 
@@ -2408,8 +2442,8 @@ async fn push_project_for_sync(
             .map_err(|error| anyhow!("Git push task failed: {error}"))??;
     }
 
+    Store::open()?.set_project_github_sync(&project.id, true)?;
     project.github_sync_enabled = true;
-    Store::open()?.update_local_project(&project)?;
     Ok((project, github_status))
 }
 
@@ -2464,8 +2498,8 @@ async fn disable_project_github(
     let mut project = store
         .get_local_project(&id)?
         .ok_or_else(|| not_found("project"))?;
+    store.set_project_github_sync(&project.id, false)?;
     project.github_sync_enabled = false;
-    store.update_local_project(&project)?;
     let github_status = local::github::status().await;
     Ok(Json(json!({
         "project": project_json(&project),
@@ -3030,23 +3064,24 @@ async fn update_project(
     if let Some(Some(icon)) = &req.icon {
         validate_project_icon(icon)?;
     }
+    let name = req.name.as_deref().map(str::trim);
+    if name.is_some_and(str::is_empty) {
+        return Err(bad_request("name cannot be empty"));
+    }
+    let run_command = req
+        .run_command
+        .as_ref()
+        .map(|cmd| cmd.as_deref().filter(|c| !c.trim().is_empty()));
     let store = Store::open()?;
-    let mut project = store
-        .get_local_project(&id)?
-        .ok_or_else(|| not_found("project"))?;
-    if let Some(name) = req.name {
-        if name.trim().is_empty() {
-            return Err(bad_request("name cannot be empty"));
-        }
-        project.name = name.trim().to_string();
+    if store.get_local_project(&id)?.is_none() {
+        return Err(not_found("project"));
     }
-    if let Some(cmd) = req.run_command {
-        project.run_command = cmd.filter(|c| !c.trim().is_empty());
-    }
-    if let Some(icon) = req.icon {
-        project.icon = icon;
-    }
-    store.update_local_project(&project)?;
+    store.edit_local_project(
+        &id,
+        name,
+        run_command,
+        req.icon.as_ref().map(Option::as_ref),
+    )?;
     // Re-read: update bumps updated_at, which is also what fires the SSE
     // project.updated diff.
     let project = store
@@ -13423,6 +13458,7 @@ mod tests {
             run_command: None,
             paper_id: None,
             icon: None,
+            proposal: None,
             created_at: 0,
             updated_at: 0,
         };

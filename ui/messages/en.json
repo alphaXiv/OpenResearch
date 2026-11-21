@@ -2491,6 +2491,7 @@
   "create_project_confirm": "Create project",
   "create_project_folder_has_files": "This folder already has files. Choose a new location.",
   "create_project_created": "Created",
+  "create_project_not_created": "Not created",
   "create_project_review": "Review…",
   "activity_proposed_project": "Proposed project {name}",
   "chat_delete_scratch_session_confirm": "Delete “{title}”?\n\nThis chat has no project, so its transcript, side chats and files will be permanently removed.",

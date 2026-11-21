@@ -2491,6 +2491,7 @@
   "create_project_confirm": "Tạo dự án",
   "create_project_folder_has_files": "Thư mục này đã có tệp. Chọn một vị trí mới.",
   "create_project_created": "Đã tạo",
+  "create_project_not_created": "Chưa tạo",
   "create_project_review": "Xem lại…",
   "activity_proposed_project": "Đã đề xuất dự án {name}",
   "chat_delete_scratch_session_confirm": "Xóa “{title}”?\n\nCuộc trò chuyện này không có dự án nên bản ghi, các cuộc trò chuyện phụ và tệp sẽ bị xóa vĩnh viễn.",

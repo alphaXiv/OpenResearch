@@ -4928,8 +4928,10 @@ const Transcript = memo(function Transcript({
     return rows;
   }, [visibleMessages, delegates]);
   const proposalsByRow = useMemo(() => new Map(visibleMessages.flatMap((group, row) => {
-    const proposals = group.flatMap((message) => message.parts.flatMap((part) =>
-      part.type === "tool" ? toolActivity(part).projectProposal ?? [] : []));
+    const proposals = group.flatMap((message) => message.parts.flatMap((part) => {
+      const proposal = part.type === "tool" ? toolActivity(part).projectProposal : undefined;
+      return proposal ? [{ id: part.id, proposal }] : [];
+    }));
     return proposals.length ? [[row, proposals] as const] : [];
   })), [visibleMessages]);
   // forkPositions indexes only non-local ids, so a local bearer would page as 0/1.
@@ -5270,8 +5272,8 @@ const Transcript = memo(function Transcript({
           )}
           {proposalsByRow.has(item.index) && (
             <div className="mt-3 flex flex-col gap-2">
-              {proposalsByRow.get(item.index)?.map((proposal, index) => (
-                <ProjectProposalCard key={index} proposal={proposal} proposedAt={visibleMessages[item.index][0].createdAt} project={project} session={session} />
+              {proposalsByRow.get(item.index)?.map(({ id, proposal }) => (
+                <ProjectProposalCard key={id} id={id} proposal={proposal} proposedAt={visibleMessages[item.index][0].createdAt} project={project} session={session} />
               ))}
             </div>
           )}

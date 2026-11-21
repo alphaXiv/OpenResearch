@@ -188,17 +188,12 @@ fn propose(name: &str, path: Option<&str>) -> Result<()> {
         return Err(anyhow!("Give the project a name with --name."));
     }
     let place = match path {
-        Some(path) => {
-            let target = expand_path(path)?;
-            if target.exists() && (!target.is_dir() || std::fs::read_dir(&target)?.next().is_some())
-            {
-                return Err(anyhow!(
-                    "{} already exists and is not an empty folder; pass another --path.",
-                    target.display()
-                ));
-            }
-            format!("at {}", target.display())
-        }
+        Some(path) => format!(
+            "at {}",
+            crate::local::projects::new_project_place(name, path)?
+                .1
+                .display()
+        ),
         None => "in ~/OpenResearch".to_string(),
     };
     println!(

@@ -2491,6 +2491,7 @@
   "create_project_confirm": "Proje oluştur",
   "create_project_folder_has_files": "Bu klasörde zaten dosyalar var. Yeni bir konum seçin.",
   "create_project_created": "Oluşturuldu",
+  "create_project_not_created": "Oluşturulmadı",
   "create_project_review": "İncele…",
   "activity_proposed_project": "{name} projesini önerdi",
   "chat_delete_scratch_session_confirm": "“{title}” silinsin mi?\n\nBu sohbetin projesi yok, bu yüzden konuşma dökümü, yan sohbetleri ve dosyaları kalıcı olarak kaldırılacak.",
