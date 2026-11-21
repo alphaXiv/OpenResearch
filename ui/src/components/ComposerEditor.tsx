@@ -37,7 +37,7 @@ import { type CitedMessage, type HarnessId, type SkillInfo } from "../api";
 import { fmtBytes, ltr } from "../i18n";
 import { CITED_ID, refLabel } from "../agentMessages";
 import { commandDisplayName } from "../composerCommands";
-import { ATTACHMENT_KINDS, isPictureType, type ComposerAttachment } from "../composerStash";
+import { ATTACHMENT_KINDS, ATTACHMENT_TOKEN, isPictureType, type ComposerAttachment } from "../composerStash";
 import { PAPER_LINK, splitMentionPath } from "../fileMentions";
 import { livePreview, pointerSelection, revealChanged, revealedSpan } from "../markdownLivePreview";
 import { m } from "../paraglide/messages.js";
@@ -224,6 +224,7 @@ class ChipWidget extends WidgetType {
         img.className = "block h-auto max-h-24 w-auto max-w-60";
         span.append(img);
       } else {
+        span.title = name;
         const card = document.createElement("span");
         card.className = "contents";
         span.append(card);
@@ -252,7 +253,7 @@ class ChipWidget extends WidgetType {
   }
 }
 
-const ATTACHMENT_AT = new RegExp(String.raw`^\[(?:${ATTACHMENT_KINDS}) #\d+\] ?`);
+const ATTACHMENT_AT = new RegExp(`^${ATTACHMENT_TOKEN.source} ?`);
 
 /** The corner X on an attachment chip: deletes its token, and with it the attachment. */
 function removeButton(view: EditorView, chip: HTMLElement, name: string) {

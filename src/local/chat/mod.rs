@@ -1112,7 +1112,7 @@ fn basename(name: &str) -> &str {
     name.rsplit(['/', '\\']).next().unwrap_or(name)
 }
 
-/// The extensions agents read as pictures, matching the composer's `isPictureType`.
+/// The extensions agents read as pictures, matching the composer's `PICTURE_FILE`.
 fn is_picture_ext(ext: &str) -> bool {
     matches!(ext, "png" | "jpg" | "gif" | "webp")
 }
@@ -6938,13 +6938,19 @@ impl ChatHost {
             // First *non-empty* line: a message that opens with a blank line
             // would otherwise write no placeholder at all, leaving `title` NULL
             // so every later message re-ran the whole first-message path.
-            let first_line = display_text
+            // The composer cites each attachment as `[Image #n]`, `[PDF #n]` or `[File #n]`; none names the chat.
+            static ATTACHMENT_TOKEN: std::sync::LazyLock<regex::Regex> =
+                std::sync::LazyLock::new(|| {
+                    regex::Regex::new(r"\[(?:Image|PDF|File) #\d+\] ?").unwrap()
+                });
+            let titled_text = ATTACHMENT_TOKEN.replace_all(display_text, "");
+            let first_line = titled_text
                 .lines()
                 .find(|l| !l.trim().is_empty())
                 .unwrap_or("")
                 .trim();
-            // Text only: an image-only message has nothing to name from.
-            title_seed = (!first_line.is_empty()).then(|| display_text.to_string());
+            // Text only: an attachment-only message has nothing to name from.
+            title_seed = (!first_line.is_empty()).then(|| titled_text.to_string());
             let mut title: String = first_line.chars().take(64).collect();
             if first_line.chars().count() > 64 {
                 title = title.trim_end().to_string();

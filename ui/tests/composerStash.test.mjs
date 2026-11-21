@@ -75,6 +75,7 @@ test("a sent message hides its attachment tokens but keeps the user's spacing", 
   assert.equal(withoutAttachmentTokens("[Image #1] [File #2] What does this show?"), "What does this show?");
   assert.equal(withoutAttachmentTokens("see [Image #1] here"), "see here");
   assert.equal(withoutAttachmentTokens("[PDF #1]\n```\ndef f():\n    return  1\n```"), "```\ndef f():\n    return  1\n```");
+  assert.equal(withoutAttachmentTokens("[File #1]\n    indented"), "    indented");
 });
 
 test("a seeded composer carries the text without the attachments it cites", () => {

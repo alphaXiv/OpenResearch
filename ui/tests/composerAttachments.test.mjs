@@ -26,7 +26,7 @@ async function composer(value) {
   return {
     editor: EditorView.findFromDOM(field),
     // What each chip shows: an image's alt text, or a file card's name.
-    chips: () => [...field.querySelectorAll("[data-chip]")].map((chip) => chip.querySelector("img")?.alt ?? chip.querySelector(".truncate")?.textContent),
+    chips: () => [...field.querySelectorAll("[data-chip]")].map((chip) => chip.querySelector("img")?.alt ?? chip.title),
     remove: (name) => act(async () => field.querySelector(`[aria-label*="${name}"]`).click()),
     changes,
   };

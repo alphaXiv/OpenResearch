@@ -20,7 +20,7 @@ export function nextAttachmentId(): number {
 export const isPictureType = (mediaType: string) => /^image\/(png|jpeg|gif|webp)$/.test(mediaType);
 
 /** A saved attachment's file name, by the extensions the server gives pictures. */
-export const PICTURE_FILE = /\.(png|jpe?g|gif|webp)$/i;
+export const PICTURE_FILE = /\.(png|jpg|gif|webp)$/i;
 
 export function attachmentToken(attachment: Pick<ComposerAttachment, "id" | "mediaType">): string {
   const kind = attachment.mediaType === "application/pdf" ? "PDF" : isPictureType(attachment.mediaType) ? "Image" : "File";
@@ -34,7 +34,8 @@ export const ATTACHMENT_TOKEN = new RegExp(String.raw`\[(?:${ATTACHMENT_KINDS}) 
 /** A message as its bubble shows it beside the attachments: each token goes, with one space beside it. */
 export function withoutAttachmentTokens(text: string): string {
   const token = ATTACHMENT_TOKEN.source;
-  return text.replace(new RegExp(`${token} ?| ?${token}`, "g"), "").trim();
+  // Lines the tokens leave empty at the start go, but the first kept line keeps its indentation.
+  return text.replace(new RegExp(`${token} ?| ?${token}`, "g"), "").replace(/^(?:[ \t]*\n)+/, "").trimEnd();
 }
 
 /** The attachments a draft cites, in order of first mention, with each token

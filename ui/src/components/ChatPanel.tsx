@@ -3671,24 +3671,6 @@ function messageHasVisibleContent(m: ChatMessage, activePermissionId?: string | 
  * in ChatPanel). `Transcript` below adds a second boundary for the other hot
  * path — composer keystrokes re-render ChatPanel itself, and the transcript
  * memo stops those from touching the rows at all. */
-/** A file as a data URL; a picture is also decoded, so its chip shows at full size the moment it mounts. */
-function readAttachment(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const { result } = reader;
-      if (typeof result !== "string") return reject(new Error(`unexpected read result for ${file.name}`));
-      if (!isPictureType(file.type)) return resolve(result);
-      const preview = new Image();
-      preview.src = result;
-      // A failed decode still attaches; the chip shows whatever the browser can.
-      preview.decode().catch(() => {}).finally(() => resolve(result));
-    };
-    reader.onerror = () => reject(reader.error ?? new Error(`could not read ${file.name}`));
-    reader.readAsDataURL(file);
-  });
-}
-
 /** Resolve an `image` (attachment) part into what the transcript renders: a
  * source URL, whether it's an image (inline image vs file chip), and a name. */
 function attachmentPartView(p: ChatPart, chatAttachmentUrl: (name: string) => string): { src: string; isImage: boolean; name: string } {
@@ -4005,7 +3987,7 @@ export const Message = memo(function Message({
           {files.length > 0 && (
             <div className="msg-files flex flex-wrap gap-1.5 mt-2 first:mt-0">
               {files.map((a, i) => (
-                <a key={i} className={`msg-file no-underline [&:hover]:border-border-hover-strong ${FILE_CARD_CLASS}`} href={a.src} target="_blank" rel="noreferrer">
+                <a key={i} className={`msg-file no-underline [&:hover]:border-border-hover-strong ${FILE_CARD_CLASS}`} title={a.name} href={a.src} target="_blank" rel="noreferrer">
                   <FileCardContent name={a.name} />
                 </a>
               ))}
@@ -6108,6 +6090,26 @@ const STARTER_TONES = [
 const STARTER_GRID_CLASS =
   "mt-7 grid w-full max-w-readable grid-cols-1 gap-3 sm:grid-cols-2";
 
+/** A file as a data URL; a picture is also decoded, so its chip shows at full size the moment it mounts. */
+function readAttachment(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const { result } = reader;
+      if (typeof result !== "string") return reject(new Error(`unexpected read result for ${file.name}`));
+      // An empty file reads as a bare `data:`; the send path needs the comma before its (empty) base64.
+      if (!result.includes(",")) return resolve(`data:${file.type || "application/octet-stream"};base64,`);
+      if (!isPictureType(file.type)) return resolve(result);
+      const preview = new Image();
+      preview.src = result;
+      // A failed decode still attaches; the chip shows whatever the browser can.
+      preview.decode().catch(() => {}).finally(() => resolve(result));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error(`could not read ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
 export function ChatPanel({
   projectId,
   projectName,
@@ -6747,13 +6749,15 @@ export function ChatPanel({
     const folders: string[] = [];
     for (const item of Array.from(transfer.items)) {
       if (item.kind !== "file") continue;
-      const entry = item.webkitGetAsEntry();
+      // Not every webview implements entries; without one, a folder fails its read and says so.
+      const entry = typeof item.webkitGetAsEntry === "function" ? item.webkitGetAsEntry() : null;
       const file = item.getAsFile();
       if (entry?.isDirectory) folders.push(entry.name);
       else if (file) files.push(file);
     }
     addFiles(files);
-    if (folders.length > 0) setAttachError(m.chat_attachment_folder({ name: ltr(folders[0]) }));
+    // After addFiles, so a size refusal from the same drop isn't hidden behind it.
+    if (folders.length > 0) setAttachError((current) => current ?? m.chat_attachment_folder({ name: ltr(folders[0]) }));
   }
 
   const dropFiles = useRef<(transfer: DataTransfer) => void>(() => {});
@@ -9839,7 +9843,7 @@ export function ChatPanel({
           <div inert={connection !== null} className={`composer-frame flex flex-col min-h-0 rounded-xl bg-surface${connection ? " opacity-60" : ""}`} data-onboarding="composer">
             <div className={`composer-box relative flex flex-col min-h-0 rounded-xl border ${bashMode && !asking ? "border-accent-amber" : "border-border"} bg-background shadow-control-subtle`}>
               {draggingFiles && !asking && (
-                <div aria-hidden="true" className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-xl border-2 border-dashed border-accent bg-background/85 text-accent">
+                <div aria-hidden="true" className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-xl border-2 border-dashed border-focus bg-background/85 text-accent-blue-strong">
                   <Plus size={18} />
                   <span className="text-sm font-medium">{m.chat_drop_to_attach()}</span>
                 </div>
@@ -10067,11 +10071,11 @@ export function ChatPanel({
                     }}
                   />
                   {!asking && (
-                    <Tooltip interactive content={m.chat_panel_attach_a_pdf_or_image()}>
+                    <Tooltip interactive content={m.chat_panel_attach_files()}>
                       <IconButton
                         type="button"
                         className="composer-attach"
-                        aria-label={m.chat_panel_attach_a_pdf_or_image()}
+                        aria-label={m.chat_panel_attach_files()}
                         onClick={() => fileInputRef.current?.click()}
                       >
                         <Paperclip size={16} />
