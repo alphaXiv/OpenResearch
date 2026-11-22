@@ -644,14 +644,16 @@ impl Store {
             if grouped.is_empty() {
                 grouped.insert((None, None, [false; 5]), Vec::new());
             }
-            let delivery: Option<String> = self
+            let (delivery, chat): (Option<String>, Option<String>) = self
                 .conn
                 .query_row(
-                    "SELECT delivery_state FROM chat_turns WHERE id = ?1",
+                    "SELECT delivery_state, session_id FROM chat_turns WHERE id = ?1",
                     [turn_id],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
-                .optional()?;
+                .optional()?
+                .unwrap_or_default();
+            let chat_ref = chat.as_deref().and_then(crate::telemetry::chat_ref);
             let mut reports = Vec::new();
             if !suppressed {
                 for ((model, provider, _), samples) in grouped {
@@ -681,6 +683,7 @@ impl Store {
                     let mut properties = serde_json::to_value(&usage)?;
                     properties["reportId"] = serde_json::json!(report_id);
                     properties["harness"] = serde_json::json!(harness);
+                    properties["chatRef"] = serde_json::json!(chat_ref);
                     let (attribution, reason) = chat_attribution(
                         &harness,
                         model.as_deref(),
