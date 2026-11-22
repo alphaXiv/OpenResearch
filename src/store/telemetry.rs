@@ -468,6 +468,7 @@ impl Store {
                 // A resumed process that didn't restore the session's totals counts from zero.
                 if reset {
                     baseline.clear();
+                    tx.execute("UPDATE native_usage_baselines SET totals_json = '{}' WHERE execution_id = ?1 AND prefix = ?2", params![execution_id, prefix])?;
                 }
                 // The aggregate counts every request: its models replace their messages, and any
                 // other model keeps only its identity.
@@ -1517,6 +1518,16 @@ mod tests {
         turn("2-restored", Some("native"), sample(220, 30, 300));
         // An older Claude starts a resumed session from zero.
         turn("3-from-zero", Some("native"), sample(50, 5, 40));
+        // A later snapshot in the same attempt keeps counting from zero past the old totals.
+        store
+            .replace_native_usage_aggregate(
+                "3-from-zero",
+                "a:",
+                "claude-code",
+                "native",
+                &sample(300, 40, 350),
+            )
+            .unwrap();
 
         let costs: Vec<(String, i64)> = store
             .conn
@@ -1533,7 +1544,7 @@ mod tests {
             vec![
                 ("1-first".into(), 100),
                 ("2-restored".into(), 200),
-                ("3-from-zero".into(), 40)
+                ("3-from-zero".into(), 350)
             ]
         );
     }
