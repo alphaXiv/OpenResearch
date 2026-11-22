@@ -340,7 +340,7 @@ fn id_token_nonce(id_token: &str) -> Option<String> {
     jwt_claim(id_token, "nonce")
 }
 
-fn jwt_claim(token: &str, name: &str) -> Option<String> {
+pub(crate) fn jwt_claim(token: &str, name: &str) -> Option<String> {
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(token.split('.').nth(1)?)
         .ok()?;
