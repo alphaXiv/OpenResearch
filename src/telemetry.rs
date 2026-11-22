@@ -1002,6 +1002,24 @@ pub(crate) fn accounting_reports_enabled() -> bool {
     is_enabled(flag())
 }
 
+/// A chat's id in usage reports: the same for each of its turns, and not the chat's own id.
+pub(crate) fn chat_ref(chat_id: &str) -> Option<String> {
+    if !is_enabled(flag()) {
+        return None;
+    }
+    Some(hashed_chat_ref(&install_id()?, chat_id))
+}
+
+fn hashed_chat_ref(install_id: &str, chat_id: &str) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(format!("{install_id}:{chat_id}"));
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    uuid::Builder::from_random_bytes(bytes)
+        .into_uuid()
+        .to_string()
+}
+
 pub(crate) fn pending_event_payload(
     event: &str,
     properties: serde_json::Value,
@@ -1943,6 +1961,25 @@ mod tests {
     }
 
     #[test]
+    fn a_chat_ref_is_stable_per_chat_and_hides_the_chat_id() {
+        if !crate::config::in_test_child(TELEMETRY_ENV) {
+            return;
+        }
+        let chat = "chat_d4ebbf67-e2b6-4a9a-a51e-67d8a47608cb";
+        let first = hashed_chat_ref("install", chat);
+        assert_eq!(hashed_chat_ref("install", chat), first);
+        assert_ne!(hashed_chat_ref("install", "chat_other"), first);
+        assert_ne!(hashed_chat_ref("other-install", chat), first);
+        assert!(!first.contains("d4ebbf67"));
+        // openresearch.sh accepts only a UUID here.
+        assert!(uuid::Uuid::parse_str(&first).is_ok());
+
+        // Telemetry is off in tests: no ref, and no install id minted for one.
+        assert_eq!(chat_ref(chat), None);
+        assert!(load_settings().and_then(|s| s.install_id).is_none());
+    }
+
+    #[test]
     fn install_id_is_stable() {
         if !crate::config::in_test_child(TELEMETRY_ENV) {
             return;
@@ -2431,6 +2468,7 @@ mod tests {
                 "cli-release-contract-test",
                 json!({
                     "reportId": uuid::Uuid::new_v4().to_string(), "harness": "acp:custom",
+                    "chatRef": uuid::Uuid::new_v4().to_string(),
                     "model": null, "provider": null, "inputTokens": 10, "outputTokens": 5,
                     "cacheReadTokens": null, "cacheWriteTokens": null, "reasoningTokens": null,
                     "totalTokens": 15, "outcome": "done", "coverage": "complete",
