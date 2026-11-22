@@ -653,9 +653,9 @@ impl Store {
                 )
                 .optional()?
                 .unwrap_or_default();
-            let chat_ref = chat.as_deref().and_then(crate::telemetry::chat_ref);
             let mut reports = Vec::new();
             if !suppressed {
+                let chat_ref = chat.as_deref().and_then(crate::telemetry::chat_ref);
                 for ((model, provider, _), samples) in grouped {
                     let sum = |field: fn(&TokenUsage) -> Option<u64>| -> Option<u64> {
                         if samples.is_empty() {
