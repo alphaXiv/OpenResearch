@@ -9805,6 +9805,7 @@ fn chat_active_runs_json(store: &Store) -> Result<Value> {
     Ok(json!(rows))
 }
 
+/// Active runs only, as older pages read it; `chat_shown_runs` is the projection that keeps ended ones.
 async fn chat_active_runs() -> ApiResult {
     Ok(Json(chat_active_runs_json(&Store::open()?)?))
 }

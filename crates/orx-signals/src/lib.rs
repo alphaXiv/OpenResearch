@@ -1,3 +1,6 @@
+//! The signal fold: a run's log read into a bounded checkpoint of progress, measures and tables.
+//! The host and the laptop run the same fold, so either can continue the other's checkpoint.
+
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{
     de::{self, MapAccess, SeqAccess, Visitor},
@@ -10,6 +13,8 @@ mod patterns;
 pub use patterns::{Config, Hit, Pattern, PatternError, Patterns, Tally};
 
 pub const MAX_FRAME: usize = 64 * 1024;
+/// Publication refuses a larger snapshot, so every reducer and cell store stays within its
+/// component bounds or reduces deterministically before publishing.
 pub const MAX_SNAPSHOT: usize = 16 * 1024 * 1024;
 pub const MAX_TABLES: usize = 16;
 pub const MAX_ROW_COLUMNS: usize = 64;

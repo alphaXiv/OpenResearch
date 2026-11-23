@@ -11,8 +11,8 @@ The laptop's dashboard opens a remote machine as a workspace, from a host saved 
 - **The laptop serves the UI.** Only `/api` reaches the remote, so one version's UI drives another version's API.
 - **The session holds the credential.** The gateway adds the bearer token to API requests, events, file resources and websockets, and drops the browser's own credentials; the page never sees the token. The local API's guard protects these paths ([dashboard](dashboard.md)).
 - **Accounts stay on the laptop.** The gateway answers account and paper library routes itself. Agent installs and sign-ins belong to each machine, and agent setup runs on the host from an allowlist (`src/commands/up/harness_setup.rs`).
-- **The laptop lends its alphaXiv sign-in to the host's agents.** While attached, it forwards its access token to the host (`PUT /_orx/alphaxiv`, outside `/api` so no page reaches it) and renews it early so the host's copy always has minutes to spare. The refresh token never leaves the laptop, because two machines refreshing one sign-in retire each other's tokens. The host keeps the copy owner-only beside its own sign-in, which wins, accepts it only for its own alphaXiv API, and never refreshes it. Signing out on the laptop withdraws it and a new host starts without one, but detaching does not: a host whose laptop went offline keeps library access for at most one access-token lifetime (an hour at alphaXiv), and its agents keep their tools, which then ask the user to reconnect (`src/alphaxiv.rs`).
-- **A host signs itself in with a code.** alphaXiv sends a sign-in back only to a browser on the machine that started it, over a loopback redirect, so `orx login` inside SSH, or with `--device`, shows a link and code to approve in a browser on any device instead (RFC 8628, `src/alphaxiv.rs`). The device code itself never leaves the host.
+- **The laptop lends its alphaXiv sign-in to the host's agents.** While attached, it forwards a short-lived access token on a route outside `/api`, so no page reaches it. The refresh token never leaves the laptop, because two machines refreshing one sign-in retire each other's tokens; a host's own sign-in wins over a lent one. Signing out on the laptop withdraws it; detaching does not, so a host keeps it until it expires (`src/alphaxiv.rs`).
+- **A host signs itself in with a code.** alphaXiv sends a sign-in back only to a browser on the machine that started it, so `orx login` inside SSH shows a link and code to approve on any device instead.
 - **The host refuses what only makes sense locally:** those account routes, file pickers, self-update, data-directory moves, the general settings command runner. A route that acts on the machine in front of the user joins the forbidden list in `src/commands/up.rs`.
 
 **orx never runs a remote binary another user could have replaced.** It resolves `orx` once through the login environment and then runs that exact path, so a non-interactive `PATH` cannot pick another binary. A candidate must be owned by the user or root, with neither it nor its directory writable by anyone else. A rejected candidate is reported, not treated as missing, and a repairing `chmod` runs only when the user asks. Installing or updating `orx` is a step the user confirms, with its paths visible and changeable.
@@ -23,9 +23,9 @@ The laptop's dashboard opens a remote machine as a workspace, from a host saved 
 
 - **A host is added the way the user already reaches it:** a hostname, an alias, `user@host:port`, or a pasted `ssh …` command, which becomes the `Host` block that makes `ssh <alias>` connect the same way. Options that shape one session (forwards, a remote command) are dropped; options orx can't keep are refused by name.
 - **The alias stays the key.** Engine state, the auth breaker, the route pin and compute settings all name a host by alias, so a saved host is indistinguishable from a configured one. An alias saved in orx means one thing in both lists, so a conflicting second definition is refused; a saved alias overrides the same alias in `~/.ssh/config`, for orx only.
-- **The machine switcher lists the saved remotes,** connected or not. Disconnect ends the session and keeps the entry; Forget removes the entry and its session, and leaves the persistent host running.
+- **Forgetting a remote never stops its host.** A saved remote stays listed until the user forgets it, which ends its session and leaves the [persistent host](#the-persistent-host) running.
 - **Two lists, one file each:** `remotes` for Connect to remote, `compute` for SSH and Slurm compute, which also lists `~/.ssh/config`. A machine for agents and one only for runs are set up in different places, each pointing at the other.
-- **Passwords are saved, one try at a time.** A password or key passphrase that let a login through is kept in the system credential store under the alias; one-time codes and host-key answers never are. Each attempt answers a saved password once and a passphrase twice (a ProxyJump hop decrypts the key again), and a failed login drops the saved answers it used, so the user is asked next time, and the [auth breaker](#transport-and-the-auth-breaker) still opens on failure. On Unix it also logs an interactive host's ended master back in once without a click; on Windows the SSH service holds the login instead. Removing a host forgets its password once no list still names it. Linux needs `secret-tool` and a keyring; without them orx asks every time.
+- **Passwords are saved, one try at a time.** A password or key passphrase that let a login through is kept in the system credential store under the alias (`src/local/keychain.rs`); one-time codes and host-key answers never are. A saved answer is offered only within one login attempt, a failed login forgets it, Linux without `secret-tool` asks every time, and the [auth breaker](#transport-and-the-auth-breaker) still opens on failure (`src/engine/transport/askpass.rs`).
 
 ## The persistent host
 
@@ -53,7 +53,7 @@ The laptop and the remote run whatever versions they were last updated to.
 - **Control protocol** (`src/commands/remote_host.rs`): the control channel's shape. A mismatch reports the host as incompatible.
 - **Host protocol** (`crates/orx-host-proto`): Hello requires the exact version and binary SHA. The engine uploads its own `orx-host`, so `serve` never skews; only wrappers and files outlive a version.
 
-**Installing or updating a remote puts the laptop's own build there,** so the protocols match by construction. Only production builds ([desktop](desktop.md)) install: a stable laptop runs the release installer for its version, and a canary, which shares its version number with a stable release, downloads its own headless CLI from the canary release, checks it against the published SHA-256 and renames it over the binary path the stable installer would use. The probe also reads the remote's build ID (`orx version --build-id`, the version or canary tag), so a build already in place is not installed again and the dashboard can say which build a host runs. The canary release keeps only the latest seven builds, so a laptop whose build is gone asks the user to update it. A development build asks for a binary of the same branch, since no public release speaks its protocol.
+**Installing or updating a remote puts the laptop's own build there,** so the protocols match by construction. Only production builds ([desktop](desktop.md)) install: a stable laptop runs the release installer for its version, and a canary, which shares its version number with a stable release, downloads its own headless CLI from the canary release, checks it against the published SHA-256 and renames it over the binary path the stable installer would use. The probe also reads the remote's build ID (`orx version --build-id`, the version or canary tag), so a build already in place is not installed again and the dashboard can say which build a host runs. Old canaries are pruned, so a laptop whose build is gone asks the user to update it. A development build asks for a binary of the same branch, since no public release speaks its protocol.
 
 **Any change to the remote API or the control channel's shape is a protocol change: bump the number,** and keep the laptop able to tell the user what to do with a mismatched peer. It reads a peer's protocols from the host descriptor and `orx version --dashboard-protocol`. A route only the laptop itself calls and can do without, like alphaXiv forwarding, is additive instead: the laptop recognizes an older host's answer and tells the user to update it.
 
@@ -96,13 +96,14 @@ Jobs are submitted with `--no-requeue`, named by the run ID so a lost submission
 
 - Idle → Connecting → Live.
 - Connecting → Backoff on a network failure.
-- Connecting → NeedsAuth on an authentication or host-key failure, a changed route or a dead master. A managed rental host's key refusals back off for two minutes first, since sshd and the key sync can lag a fresh box, which has no Connect.
+- Connecting → NeedsAuth on an authentication or host-key failure, a changed route or a dead master.
 - Live → Backoff on EOF, a missed reply deadline or a clock jump.
-- Backoff → Connecting when the jittered retry, persisted per root, comes due. Managed rental hosts cap the delay at a minute, so an outage still leaves collection attempts within the rental's grace.
+- Backoff → Connecting when the jittered retry, persisted per root, comes due.
 - Any state → NeedsAuth when the alias's breaker opens; only Connect clears it.
-- A managed rental host is forgotten, connection and state, once no unfinished run or pending log collection uses it.
 
-**After an authentication failure, no automatic login.** Repeated logins lock accounts and trip MFA, so the breaker is one per SSH alias, shared by its roots and kept in the store. Only the user's Connect closes it; a retry resets a key host's backoff and nothing more.
+An OpenResearch box is a key-only host orx rents and forgets once nothing needs it; it has no Connect, so it retries on a tighter schedule and gives a fresh box time to accept its key before the breaker opens (`src/engine/transport/mod.rs`).
+
+**After an authentication failure, no automatic login.** Repeated logins lock accounts and trip MFA, so the breaker is one per SSH alias, shared by its roots and kept in the store. Only the user's Connect closes it, except that on Unix a saved password logs an ended master back in once; a retry resets a key host's backoff and nothing more.
 
 - **First contact is one batch-mode attempt.** Success classifies the alias as a key host, which then connects with no click. A network failure before authentication backs off like any key host. Anything that could have reached authentication marks the host interactive with the breaker open, and a first attempt interrupted by a crash opens the breaker too.
 - **Interactive hosts keep an authenticated master on Unix.** Connect relays passphrase, password and host-key prompts to the dashboard or CLI, answering a password from the credential store first ([saved hosts](#saved-hosts)). Key hosts keep a master only when the run engine is off or an active SSH or Slurm run uses the alias.
@@ -113,24 +114,10 @@ Workspace tunnels and probes take a separate path (`src/jobs/ssh.rs`): batch mod
 
 **Plain ssh can share an authenticated master.** On OpenSSH 8.4 and later, a live master is published through a managed file, `~/.ssh/openresearch_config`, which the user's SSH config may include; orx never adds that line (`src/jobs/ssh/sharing.rs`). A `Match … exec` check selects the socket only while its pinned route matches and the socket exists; without a live master, `ssh` authenticates as usual and never starts an engine login.
 
-**On Windows the SSH service holds the login,** because Win32-OpenSSH cannot multiplex. Connect starts each root's `ssh` inside the detached `orx ssh-service` (`src/jobs/ssh/service/hold.rs`), reached on loopback with the token in its owner-only directory, and `orx up` talks to orx-host through it. A restarted or updated server reattaches with no prompt while the control protocol matches; the older orx-host then serves, and wraps new runs, until the login ends. It ends when the user signs out of Windows, Connect replaces it, its route changes, or no server has attached for 24 hours. Plain `ssh` does not share it, and Connect still logs in the transports existing 0.2.x runs need, so a second MFA prompt may be required.
+**On Windows the SSH service holds the login,** because Win32-OpenSSH cannot multiplex. Connect starts each root's `ssh` inside the detached `orx ssh-service` (`src/jobs/ssh/service/hold.rs`), reached on loopback with the token in its owner-only directory, and `orx up` talks to orx-host through it. A restarted or updated server reattaches with no prompt while the control protocol matches; the older orx-host then serves, and wraps new runs, until the login ends. It ends when the user signs out of Windows, Connect replaces it, its route changes, or no server has attached for a long while. Plain `ssh` does not share it, and Connect still logs in the transports existing 0.2.x runs need, so a second MFA prompt may be required.
 
 A seeded chaos tier (`src/engine/runtime/chaos.rs`) holds the engine, transport and `orx-host` to these rules under faults over real SSH; its module comment says how to run and replay it.
 
 ## Advisory run signals
 
-Native `serve` scans declared `::orx::` records and detected progress from each
-watched run's log, including Slurm jobs on the shared filesystem. Local runs
-use that scanner directly without a local serve process. The checkpoint lives
-in the host root's `run-signals/` and uses a nonblocking per-run lock: a competing scanner gets WouldBlock.
-A summary with a `signals` field advertises snapshot support for that connection.
-The workspace waits for that advertisement before sending configuration or
-fetching changed revisions in pages of at most 1 MiB under one generation and
-revision, then publishes the verified checkpoint locally. Inspection, change
-feeds and page resets carry the host's clock (`answered_at`), so the workspace
-knows how current the data is and how far apart the two clocks are. An older
-serve without `signals` uses the frozen byte-page log API with a bounded
-replay budget and folds patterns on the workspace's clock. Watchers and stop
-rules run on the workspace.
-
-A terminal checkpoint remains readable after its raw log is gone. Native support with no log and no checkpoint reports unavailable; absent support remains the older-peer fallback. Host cleanup removes the run's signal checkpoint, lock and abandoned generations along with the run directory.
+**Run signals are folded where the log lives.** A native `serve` scans each watched run's log, Slurm jobs' included, for declared `::orx::` records and detected progress, and keeps the fold as a checkpoint in the host root, so the workspace pulls a bounded snapshot instead of the whole log and a finished run keeps its signals after its log is gone. Local runs use the same scanner in process. A connection advertises snapshots by a `signals` field in its summary; against an older `serve` the workspace reads the log through the frozen byte-page API and folds it itself. Answers carry the host's clock, so the workspace knows how current they are. Watchers and stop rules always run on the workspace, and signals never change a run's lifecycle ([FROZEN.md](../crates/orx-host-proto/FROZEN.md)).
