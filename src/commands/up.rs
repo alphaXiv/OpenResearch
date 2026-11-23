@@ -13686,14 +13686,18 @@ mod tests {
                 let Json(reply) = agent_tools::agent_tools(State(state), Json(request))
                     .await
                     .unwrap();
-                reply["content"][0]["text"].as_str().unwrap().to_string()
+                reply
             }
         };
 
         let refused = answer("chat_user").await;
-        assert!(refused.contains("only the user answers"), "{refused}");
+        assert_eq!(refused["isError"], true, "{refused}");
+        // No agent holds either turn, so a delegate's answer fails only in delivery.
         let delegated = answer("chat_delegate").await;
-        assert!(!delegated.contains("only the user answers"), "{delegated}");
+        assert_ne!(
+            refused["content"], delegated["content"],
+            "the user's chat refuses before delivery"
+        );
     }
 
     #[tokio::test]
