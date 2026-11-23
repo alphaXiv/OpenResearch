@@ -457,7 +457,7 @@ impl Store {
             .collect();
         if active && !samples.is_empty() {
             if let Some(baseline) = baseline {
-                let baseline: std::collections::BTreeMap<String, NativeTotal> =
+                let mut baseline: std::collections::BTreeMap<String, NativeTotal> =
                     serde_json::from_str(&baseline)?;
                 let reset = samples.iter().any(|(model, _, usage, _)| {
                     baseline.get(model).map(|total| &total.usage).is_some_and(|previous| {
@@ -465,70 +465,70 @@ impl Store {
                             || matches!((usage.output_tokens, previous.output_tokens), (Some(now), Some(before)) if now < before)
                     })
                 });
+                // A resumed process that didn't restore the session's totals counts from zero.
                 if reset {
-                    tx.execute("UPDATE native_usage_baselines SET totals_json = NULL WHERE execution_id = ?1 AND prefix = ?2", params![execution_id, prefix])?;
-                    tx.execute("UPDATE chat_usage_samples SET complete = 0 WHERE execution_id = ?1 AND substr(sample_id, 1, length(?2)) = ?2", params![execution_id, prefix])?;
-                } else {
-                    // The aggregate counts every request: its models replace their messages, and any
-                    // other model keeps only its identity.
-                    let models: Vec<_> = samples.iter().map(|(model, _, _, _)| model).collect();
-                    tx.execute("DELETE FROM chat_usage_samples WHERE execution_id = ?1 AND substr(sample_id, 1, length(?2)) = ?2 AND (model IS NULL OR model IN (SELECT value FROM json_each(?3)))", params![execution_id, prefix, serde_json::to_string(&models)?])?;
-                    tx.execute("UPDATE chat_usage_samples SET usage_json = ?3, complete = 0, cost_micros = NULL, cost_currency = NULL WHERE execution_id = ?1 AND substr(sample_id, 1, length(?2)) = ?2", params![execution_id, prefix, serde_json::to_string(&TokenUsage::default())?])?;
-                    for (model, provider, usage, cost) in samples {
-                        let zero = NativeTotal {
-                            usage: TokenUsage {
-                                input_tokens: Some(0),
-                                output_tokens: Some(0),
-                                cache_read_tokens: Some(0),
-                                cache_write_tokens: Some(0),
-                                reasoning_tokens: Some(0),
-                            },
-                            cost: cost.as_ref().map(|cost| Cost {
-                                micros: 0,
-                                currency: cost.currency.clone(),
-                            }),
-                        };
-                        let previous = baseline.get(model).unwrap_or(&zero);
-                        let cost = cost
-                            .as_ref()
-                            .zip(previous.cost.as_ref())
-                            .and_then(|(now, before)| now.since(before));
-                        let previous = &previous.usage;
-                        if usage == previous {
-                            continue;
-                        }
-                        let delta = TokenUsage {
-                            input_tokens: usage
-                                .input_tokens
-                                .and_then(|n| n.checked_sub(previous.input_tokens?)),
-                            output_tokens: usage
-                                .output_tokens
-                                .and_then(|n| n.checked_sub(previous.output_tokens?)),
-                            cache_read_tokens: usage
-                                .cache_read_tokens
-                                .and_then(|n| n.checked_sub(previous.cache_read_tokens?)),
-                            cache_write_tokens: usage
-                                .cache_write_tokens
-                                .and_then(|n| n.checked_sub(previous.cache_write_tokens?)),
-                            reasoning_tokens: usage
-                                .reasoning_tokens
-                                .and_then(|n| n.checked_sub(previous.reasoning_tokens?)),
-                        };
-                        let sample_id = format!("{prefix}aggregate:{model}");
-                        self.record_usage_sample(
-                            execution_id,
-                            &sample_id,
-                            harness,
-                            Some(model),
-                            provider.as_deref(),
-                            &delta,
-                            match &cost {
-                                Some(cost) => SampleCost::Reported(cost),
-                                None => SampleCost::Unreported { one_request: false },
-                            },
-                        )?;
-                        tx.execute("UPDATE chat_usage_samples SET complete = ?3 WHERE execution_id = ?1 AND sample_id = ?2", params![execution_id, sample_id, delta.input_tokens.is_some() && delta.output_tokens.is_some()])?;
+                    baseline.clear();
+                    tx.execute("UPDATE native_usage_baselines SET totals_json = '{}' WHERE execution_id = ?1 AND prefix = ?2", params![execution_id, prefix])?;
+                }
+                // The aggregate counts every request: its models replace their messages, and any
+                // other model keeps only its identity.
+                let models: Vec<_> = samples.iter().map(|(model, _, _, _)| model).collect();
+                tx.execute("DELETE FROM chat_usage_samples WHERE execution_id = ?1 AND substr(sample_id, 1, length(?2)) = ?2 AND (model IS NULL OR model IN (SELECT value FROM json_each(?3)))", params![execution_id, prefix, serde_json::to_string(&models)?])?;
+                tx.execute("UPDATE chat_usage_samples SET usage_json = ?3, complete = 0, cost_micros = NULL, cost_currency = NULL WHERE execution_id = ?1 AND substr(sample_id, 1, length(?2)) = ?2", params![execution_id, prefix, serde_json::to_string(&TokenUsage::default())?])?;
+                for (model, provider, usage, cost) in samples {
+                    let zero = NativeTotal {
+                        usage: TokenUsage {
+                            input_tokens: Some(0),
+                            output_tokens: Some(0),
+                            cache_read_tokens: Some(0),
+                            cache_write_tokens: Some(0),
+                            reasoning_tokens: Some(0),
+                        },
+                        cost: cost.as_ref().map(|cost| Cost {
+                            micros: 0,
+                            currency: cost.currency.clone(),
+                        }),
+                    };
+                    let previous = baseline.get(model).unwrap_or(&zero);
+                    let cost = cost
+                        .as_ref()
+                        .zip(previous.cost.as_ref())
+                        .and_then(|(now, before)| now.since(before));
+                    let previous = &previous.usage;
+                    if usage == previous {
+                        continue;
                     }
+                    let delta = TokenUsage {
+                        input_tokens: usage
+                            .input_tokens
+                            .and_then(|n| n.checked_sub(previous.input_tokens?)),
+                        output_tokens: usage
+                            .output_tokens
+                            .and_then(|n| n.checked_sub(previous.output_tokens?)),
+                        cache_read_tokens: usage
+                            .cache_read_tokens
+                            .and_then(|n| n.checked_sub(previous.cache_read_tokens?)),
+                        cache_write_tokens: usage
+                            .cache_write_tokens
+                            .and_then(|n| n.checked_sub(previous.cache_write_tokens?)),
+                        reasoning_tokens: usage
+                            .reasoning_tokens
+                            .and_then(|n| n.checked_sub(previous.reasoning_tokens?)),
+                    };
+                    let sample_id = format!("{prefix}aggregate:{model}");
+                    self.record_usage_sample(
+                        execution_id,
+                        &sample_id,
+                        harness,
+                        Some(model),
+                        provider.as_deref(),
+                        &delta,
+                        match &cost {
+                            Some(cost) => SampleCost::Reported(cost),
+                            None => SampleCost::Unreported { one_request: false },
+                        },
+                    )?;
+                    tx.execute("UPDATE chat_usage_samples SET complete = ?3 WHERE execution_id = ?1 AND sample_id = ?2", params![execution_id, sample_id, delta.input_tokens.is_some() && delta.output_tokens.is_some()])?;
                 }
             }
             tx.execute("INSERT INTO native_usage_totals (harness, native_scope, totals_json) VALUES (?1, ?2, ?3) ON CONFLICT(harness, native_scope) DO UPDATE SET totals_json = excluded.totals_json", params![harness, native_scope, serde_json::to_string(&totals)?])?;
@@ -644,16 +644,18 @@ impl Store {
             if grouped.is_empty() {
                 grouped.insert((None, None, [false; 5]), Vec::new());
             }
-            let delivery: Option<String> = self
+            let (delivery, chat): (Option<String>, Option<String>) = self
                 .conn
                 .query_row(
-                    "SELECT delivery_state FROM chat_turns WHERE id = ?1",
+                    "SELECT delivery_state, session_id FROM chat_turns WHERE id = ?1",
                     [turn_id],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
-                .optional()?;
+                .optional()?
+                .unwrap_or_default();
             let mut reports = Vec::new();
             if !suppressed {
+                let chat_ref = chat.as_deref().and_then(crate::telemetry::chat_ref);
                 for ((model, provider, _), samples) in grouped {
                     let sum = |field: fn(&TokenUsage) -> Option<u64>| -> Option<u64> {
                         if samples.is_empty() {
@@ -681,6 +683,7 @@ impl Store {
                     let mut properties = serde_json::to_value(&usage)?;
                     properties["reportId"] = serde_json::json!(report_id);
                     properties["harness"] = serde_json::json!(harness);
+                    properties["chatRef"] = serde_json::json!(chat_ref);
                     let (attribution, reason) = chat_attribution(
                         &harness,
                         model.as_deref(),
@@ -1480,21 +1483,19 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn claude_usage_starts_at_zero_for_each_process() {
-        let dir = crate::local::git::TemporaryDirectory::new("orx-process-usage").unwrap();
+    #[test]
+    fn a_resumed_claude_counts_only_its_new_usage() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-resumed-usage").unwrap();
         let store = Store::open_at(dir.path().to_path_buf()).unwrap();
-
-        let sample = |input, output, read, write, micros| {
+        let sample = |input, output, micros| {
             vec![(
                 "claude-haiku-5-5".to_string(),
                 None,
                 TokenUsage {
                     input_tokens: Some(input),
                     output_tokens: Some(output),
-                    cache_read_tokens: Some(read),
-                    cache_write_tokens: Some(write),
+                    cache_read_tokens: Some(0),
+                    cache_write_tokens: Some(0),
                     reasoning_tokens: Some(0),
                 },
                 Some(Cost {
@@ -1503,61 +1504,31 @@ mod tests {
                 }),
             )]
         };
+        let turn = |execution: &str, scope: Option<&str>, totals: Vec<_>| {
+            store
+                .begin_usage_execution(execution, &format!("{execution}-turn"), "claude-code")
+                .unwrap();
+            store
+                .begin_native_usage_attempt(execution, "a:", "claude-code", scope)
+                .unwrap();
+            store
+                .replace_native_usage_aggregate(execution, "a:", "claude-code", "native", &totals)
+                .unwrap();
+        };
 
-        store
-            .begin_usage_execution("old", "old-turn", "claude-code")
-            .unwrap();
-        store
-            .begin_native_usage_attempt("old", "a:", "claude-code", None)
-            .unwrap();
+        turn("1-first", None, sample(100, 10, 100));
+        // Claude restores the session's totals on --resume.
+        turn("2-restored", Some("native"), sample(220, 30, 300));
+        // An older Claude starts a resumed session from zero.
+        turn("3-from-zero", Some("native"), sample(50, 5, 40));
+        // A later snapshot in the same attempt keeps counting from zero past the old totals.
         store
             .replace_native_usage_aggregate(
-                "old",
+                "3-from-zero",
                 "a:",
                 "claude-code",
                 "native",
-                &sample(100, 10, 0, 100, 100),
-            )
-            .unwrap();
-
-        let (host, client) = crate::local::claude::tests::echo_worker("process-usage").await;
-        crate::local::claude::tests::serve_turn(&host, &client).await;
-
-        store
-            .begin_usage_execution("fresh", "fresh-turn", "claude-code")
-            .unwrap();
-        store.conn.execute_batch("PRAGMA query_only = ON").unwrap();
-        assert!(client
-            .begin_usage_attempt(&store, "fresh", "a:", Some("native"))
-            .is_err());
-        store.conn.execute_batch("PRAGMA query_only = OFF").unwrap();
-
-        client
-            .begin_usage_attempt(&store, "fresh", "a:", Some("native"))
-            .unwrap();
-        store
-            .replace_native_usage_aggregate(
-                "fresh",
-                "a:",
-                "claude-code",
-                "native",
-                &sample(120, 20, 120, 0, 200),
-            )
-            .unwrap();
-
-        store
-            .begin_usage_execution("next", "next-turn", "claude-code")
-            .unwrap();
-        client
-            .begin_usage_attempt(&store, "next", "a:", Some("native"))
-            .unwrap();
-        store
-            .replace_native_usage_aggregate(
-                "next",
-                "a:",
-                "claude-code",
-                "native",
-                &sample(140, 30, 120, 20, 300),
+                &sample(300, 40, 350),
             )
             .unwrap();
 
@@ -1574,13 +1545,11 @@ mod tests {
         assert_eq!(
             costs,
             vec![
-                ("fresh".into(), 200),
-                ("next".into(), 100),
-                ("old".into(), 100)
+                ("1-first".into(), 100),
+                ("2-restored".into(), 200),
+                ("3-from-zero".into(), 350)
             ]
         );
-
-        host.shutdown().await;
     }
 
     #[test]
@@ -1707,9 +1676,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             serde_json::from_str::<TokenUsage>(&json).unwrap(),
-            usage(12, 3)
+            usage(20, 4)
         );
-        assert!(!complete);
+        assert!(complete);
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

@@ -146,7 +146,7 @@ fn tools(harness: &str) -> Value {
         },
         {
             "name": "send",
-            "description": "Send a message to a chat you delegated to, or to any chat whose permissions are no broader than yours, such as the chat that delegated to you or a side chat's parent. It runs as that chat's next turn, or joins its running turn when its agent accepts steering. Refs such as `msg_3fa9c1d2` in the message expand to the messages they cite.",
+            "description": "Send a message to any chat, such as one you delegated to, the chat that delegated to you, or a side chat's parent. It runs as that chat's next turn, or joins its running turn when its agent accepts steering. Refs such as `msg_3fa9c1d2` in the message expand to the messages they cite.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "chatId": chat_id, "message": { "type": "string" }, "clientRequestId": request_id },
@@ -307,7 +307,6 @@ async fn call(
         "send" => {
             let store = Store::open()?;
             let target = chat(&store, text(args, "chatId")?)?;
-            reachable(&store, caller, &target)?;
             let written = text(args, "message")?;
             let message = format!(
                 "{ORX_MESSAGE_PREFIX}Message from chat `{}`:\n\n{}",
@@ -347,7 +346,6 @@ async fn call(
         "answer" => {
             let store = Store::open()?;
             let target = chat(&store, text(args, "chatId")?)?;
-            reachable(&store, caller, &target)?;
             let prompt_id = text(args, "promptId")?;
             let pending = delegation::pending_prompt(&store, &target.id)?
                 .filter(|pending| pending.id == prompt_id)
@@ -753,20 +751,4 @@ fn chat(store: &Store, id: &str) -> Result<StoredChatSession> {
     store
         .get_chat_session(id)?
         .ok_or_else(|| anyhow!("No chat `{id}` exists."))
-}
-
-/// Chats `caller` may change: those it is linked to by a delegation or a
-/// side chat, and any other whose permissions are no broader than its own.
-/// A chat may steer its own delegates, and any chat that can do no more
-/// unasked than it can; a narrower chat steering a broader one would widen it.
-fn reachable(store: &Store, caller: &StoredChatSession, target: &StoredChatSession) -> Result<()> {
-    let delegated = store.delegation(&target.id)?.parent.as_deref() == Some(caller.id.as_str());
-    if delegated || delegation::within_reach(caller, target) {
-        Ok(())
-    } else {
-        bail!(
-            "Chat `{}` may do more without asking than this chat, so only the user can steer it.",
-            target.id
-        )
-    }
 }

@@ -55,6 +55,7 @@ pub(crate) mod compute_settings;
 mod harness_setup;
 pub(crate) mod model_feed;
 mod network;
+mod project_settings;
 mod search;
 mod usage;
 use compute_settings::*;
@@ -197,6 +198,28 @@ pub async fn run(args: UpArgs) -> Result<()> {
     };
     // Plan-mode turns hand this port to the `orx mcp` permission bridge.
     state.chat.set_up_port(actual_port);
+    {
+        let lifecycle = state.project_lifecycle.clone();
+        let moving = state.data_dir_move_in_progress.clone();
+        state
+            .chat
+            .set_project_change_guard(Box::new(move |project| {
+                let change = lifecycle.begin_delete(project)?;
+                // Checked after claiming: a move that raised its flag first counts this change.
+                let moving = moving.load(Ordering::SeqCst);
+                (!moving).then(|| Box::new(change) as Box<dyn Send>)
+            }));
+    }
+    // One dashboard owns the data directory, so any move still recorded was cut short.
+    let recovered = tokio::task::spawn_blocking(|| match Store::open() {
+        Ok(store) => local::projects::recover_project_moves(&store),
+        Err(error) => {
+            eprintln!("orx up: could not open the store to recover project moves: {error}")
+        }
+    });
+    if let Err(error) = recovered.await {
+        eprintln!("orx up: recovering interrupted project moves stopped: {error}");
+    }
     // Before any queue, notice or lease sweep can take a quit turn's slot.
     state.chat.resume_quit_turns().await;
     {
@@ -694,6 +717,11 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
                 .patch(update_project)
                 .delete(delete_project),
         )
+        .route(
+            "/api/projects/{id}/settings",
+            get(project_settings::project_settings)
+                .patch(project_settings::update_project_settings),
+        )
         .route("/api/projects/{id}/open", post(open_project))
         .route("/api/projects/{id}/git", get(project_git_status))
         .route(
@@ -1045,6 +1073,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         .route(
             "/api/chat/sessions",
             get(list_chat_sessions).post(create_chat_session),
+        )
+        .route(
+            "/api/chat/sessions/{id}/lit-sources",
+            get(project_settings::chat_lit_sources).put(project_settings::set_chat_lit_sources),
         )
         .route(
             "/api/chat/sessions/{id}",
@@ -2144,6 +2176,12 @@ async fn create_scratch_project(State(state): State<AppState>) -> ApiResult {
 struct ChatProjectReq {
     name: String,
     path: String,
+    /// The project the asker saw and whether it was a chat without a project;
+    /// older dashboards leave both out.
+    project: Option<String>,
+    scratch: Option<bool>,
+    /// The tool call id of the agent proposal confirmed, `""` for none; older dashboards leave it out.
+    proposal: Option<String>,
 }
 
 /// Makes a chat a project of its own, now or once its turn ends.
@@ -2153,17 +2191,15 @@ async fn move_chat_to_project(
     Json(req): Json<ChatProjectReq>,
 ) -> ApiResult {
     reject_if_moving(&state)?;
-    let project_id = Store::open()?
-        .get_chat_session(&id)?
-        .ok_or_else(|| not_found("chat session"))?
-        .project_id;
-    let _changing = state
-        .project_lifecycle
-        .begin_delete(&project_id)
-        .ok_or_else(|| bad_request("The project is busy with another change; try again."))?;
     let moved = state
         .chat
-        .move_to_new_project(&id, &req.name, &req.path)
+        .move_to_new_project(
+            &id,
+            &req.name,
+            &req.path,
+            req.project.as_deref().zip(req.scratch),
+            req.proposal.as_deref(),
+        )
         .await
         .map_err(bad_request)?;
     Ok(Json(match moved {
@@ -2172,13 +2208,21 @@ async fn move_chat_to_project(
     }))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CancelChatProjectMoveQ {
+    /// The request the asker saw; older dashboards cancel whichever is waiting.
+    requested_at: Option<i64>,
+}
+
 async fn cancel_chat_project_move(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(q): Query<CancelChatProjectMoveQ>,
 ) -> ApiResult {
-    if !state.chat.cancel_project_move(&id).await? {
+    if !state.chat.cancel_project_move(&id, q.requested_at).await? {
         return Err(bad_request(
-            "No move is waiting for this chat; it may have already started.",
+            "No move is waiting for this chat; it may have started or been replaced.",
         ));
     }
     Ok(Json(json!({ "ok": true })))
@@ -2278,7 +2322,7 @@ async fn initialize_project_git(
         local::git::initialize_repository(path)?;
         local::git::validate_project_repository(path)?;
         project.baseline_branch = local::git::require_current_branch(path)?;
-        store.update_local_project(&project)?;
+        store.set_project_baseline_branch(&project.id, &project.baseline_branch)?;
         Ok(Json(project_git_json(&project, github_status)))
     })
     .await
@@ -2349,10 +2393,10 @@ async fn create_independent_project_repository(
             source_repository.as_ref(),
         )?;
     }
+    store.set_project_github_repository(&project.id, &owner, &repo)?;
     project.github_owner = owner;
     project.github_repo = repo;
     project.github_sync_enabled = false;
-    store.update_local_project(&project)?;
     Ok(project)
 }
 
@@ -2403,8 +2447,8 @@ async fn push_project_for_sync(
             .map_err(|error| anyhow!("Git push task failed: {error}"))??;
     }
 
+    Store::open()?.set_project_github_sync(&project.id, true)?;
     project.github_sync_enabled = true;
-    Store::open()?.update_local_project(&project)?;
     Ok((project, github_status))
 }
 
@@ -2459,8 +2503,8 @@ async fn disable_project_github(
     let mut project = store
         .get_local_project(&id)?
         .ok_or_else(|| not_found("project"))?;
+    store.set_project_github_sync(&project.id, false)?;
     project.github_sync_enabled = false;
-    store.update_local_project(&project)?;
     let github_status = local::github::status().await;
     Ok(Json(json!({
         "project": project_json(&project),
@@ -3025,23 +3069,24 @@ async fn update_project(
     if let Some(Some(icon)) = &req.icon {
         validate_project_icon(icon)?;
     }
+    let name = req.name.as_deref().map(str::trim);
+    if name.is_some_and(str::is_empty) {
+        return Err(bad_request("name cannot be empty"));
+    }
+    let run_command = req
+        .run_command
+        .as_ref()
+        .map(|cmd| cmd.as_deref().filter(|c| !c.trim().is_empty()));
     let store = Store::open()?;
-    let mut project = store
-        .get_local_project(&id)?
-        .ok_or_else(|| not_found("project"))?;
-    if let Some(name) = req.name {
-        if name.trim().is_empty() {
-            return Err(bad_request("name cannot be empty"));
-        }
-        project.name = name.trim().to_string();
+    if store.get_local_project(&id)?.is_none() {
+        return Err(not_found("project"));
     }
-    if let Some(cmd) = req.run_command {
-        project.run_command = cmd.filter(|c| !c.trim().is_empty());
-    }
-    if let Some(icon) = req.icon {
-        project.icon = icon;
-    }
-    store.update_local_project(&project)?;
+    store.edit_local_project(
+        &id,
+        name,
+        run_command,
+        req.icon.as_ref().map(Option::as_ref),
+    )?;
     // Re-read: update bumps updated_at, which is also what fires the SSE
     // project.updated diff.
     let project = store
@@ -3316,9 +3361,6 @@ struct CreateRunReq {
 
 impl CreateRunReq {
     fn into_run_args(self) -> crate::ExpRunArgs {
-        let mut backend = self.backend;
-        let mut flavor = self.flavor;
-        local::apply_compute_default(&mut backend, &mut flavor);
         crate::ExpRunArgs {
             estimate: false,
             invocation_context: self.invocation_context,
@@ -3326,8 +3368,8 @@ impl CreateRunReq {
             exp_id: self.experiment_id,
             disk: self.disk,
             provider: self.provider,
-            backend: Some(backend.unwrap_or_else(|| "local".to_string())),
-            flavor,
+            backend: self.backend,
+            flavor: self.flavor,
             org: self.org,
             host: self.host,
             container: self.container,
@@ -7116,6 +7158,39 @@ struct StoredAgentSelectionReq {
     reasoning_level: Option<String>,
 }
 
+/// An agent choice checked against the agents orx knows; its model is already resolved.
+fn stored_agent_selection(selection: StoredAgentSelectionReq) -> Result<StoredAgentSelection> {
+    if !local::harness::is_chat_harness(&selection.harness) {
+        return Err(anyhow!("unknown agent: {}", selection.harness));
+    }
+    let nonempty = |value: Option<String>| value.filter(|item| !item.trim().is_empty());
+    let permission_mode = nonempty(selection.permission_mode);
+    let service_tier = nonempty(selection.service_tier);
+    if permission_mode
+        .as_deref()
+        .is_some_and(|mode| local::harness::permission_mode_for(&selection.harness, mode).is_none())
+    {
+        return Err(anyhow!("invalid permission mode for the selected agent"));
+    }
+    if service_tier
+        .as_deref()
+        .is_some_and(|tier| local::harness::service_tier_for(&selection.harness, tier).is_none())
+    {
+        return Err(anyhow!("invalid speed for the selected agent"));
+    }
+    if let Some(id) = &selection.profile {
+        local::agent_profiles::home(id, &selection.harness)?;
+    }
+    Ok(StoredAgentSelection {
+        profile: selection.profile,
+        harness: selection.harness.clone(),
+        model: nonempty(selection.model),
+        service_tier,
+        permission_mode: preferred_permission_mode(&selection.harness, permission_mode),
+        reasoning_level: nonempty(selection.reasoning_level),
+    })
+}
+
 async fn set_ui_state(
     State(state): State<AppState>,
     Json(mut req): Json<SetUiStateReq>,
@@ -7226,35 +7301,7 @@ async fn set_ui_state(
         let store = Store::open()?;
         let selection = req
             .preferred_agent
-            .map(|selection| {
-                if !local::harness::is_chat_harness(&selection.harness) {
-                    return Err(anyhow!("unknown agent: {}", selection.harness));
-                }
-                let nonempty = |value: Option<String>| value.filter(|item| !item.trim().is_empty());
-                let permission_mode = nonempty(selection.permission_mode);
-                let service_tier = nonempty(selection.service_tier);
-                if permission_mode.as_deref().is_some_and(|mode| {
-                    local::harness::permission_mode_for(&selection.harness, mode).is_none()
-                }) {
-                    return Err(anyhow!("invalid permission mode for the selected agent"));
-                }
-                if service_tier.as_deref().is_some_and(|tier| {
-                    local::harness::service_tier_for(&selection.harness, tier).is_none()
-                }) {
-                    return Err(anyhow!("invalid speed for the selected agent"));
-                }
-                if let Some(id) = &selection.profile {
-                    local::agent_profiles::home(id, &selection.harness)?;
-                }
-                Ok(StoredAgentSelection {
-                    profile: selection.profile,
-                    harness: selection.harness.clone(),
-                    model: nonempty(selection.model),
-                    service_tier,
-                    permission_mode: preferred_permission_mode(&selection.harness, permission_mode),
-                    reasoning_level: nonempty(selection.reasoning_level),
-                })
-            })
+            .map(stored_agent_selection)
             .transpose()?;
         if let Some(completed) = req.tour_completed {
             store.set_tour_completed(completed)?;
@@ -10161,6 +10208,20 @@ struct CreateChatSessionReq {
     plan_mode: bool,
     reasoning_level: Option<String>,
     autonomy: Option<Autonomy>,
+    /// Sources a draft turned off before its first message.
+    #[serde(default)]
+    disabled_lit_sources: Option<Vec<String>>,
+}
+
+/// The autonomy a new chat gets when its request names none: its project's, else the last one used.
+fn project_autonomy(store: &Store, project_id: &str) -> Result<String> {
+    let own = store.project_settings(project_id)?.autonomy;
+    let autonomy = own
+        .as_deref()
+        .and_then(Autonomy::from_id)
+        .or(store.ui_state()?.preferred_autonomy)
+        .unwrap_or_default();
+    Ok(autonomy.id().to_string())
 }
 
 async fn selected_chat_model(
@@ -10270,6 +10331,7 @@ fn new_chat_settings(
         plan_mode: false,
         reasoning_level,
         autonomy: Some(preferences.preferred_autonomy.unwrap_or(Autonomy::Agentic)),
+        disabled_lit_sources: None,
     })
 }
 
@@ -10348,8 +10410,25 @@ async fn create_chat_session(
         }
     }
     if req.harness.is_none() {
-        let preferences = store.ui_state()?;
-        req = new_chat_settings(req.project_id, preferences, &catalog).map_err(bad_request)?;
+        let mut preferences = store.ui_state()?;
+        let project = store.project_settings(&req.project_id)?;
+        if let Some(autonomy) = project.autonomy.as_deref().and_then(Autonomy::from_id) {
+            preferences.preferred_autonomy = Some(autonomy);
+        }
+        let pinned = project.agent;
+        let from_project = pinned.is_some();
+        if pinned.is_some() {
+            preferences.preferred_agent = pinned;
+        }
+        let disabled_lit_sources = req.disabled_lit_sources.take();
+        req = new_chat_settings(req.project_id, preferences, &catalog).map_err(|error| {
+            if from_project {
+                bad_request("This project's agent for new chats is unavailable. Check its installation and sign-in, or choose another agent in Project settings.")
+            } else {
+                bad_request(error)
+            }
+        })?;
+        req.disabled_lit_sources = disabled_lit_sources;
     }
     let harness = req
         .harness
@@ -10387,6 +10466,12 @@ async fn create_chat_session(
         req.model.as_deref(),
     )
     .map_err(bad_request)?;
+    let disabled_lit_sources = req
+        .disabled_lit_sources
+        .map(project_settings::lit_sources)
+        .transpose()
+        .map_err(bad_request)?;
+    let session_project = req.project_id.clone();
     let session = StoredChatSession {
         profile_id: req.profile,
         id: format!("chat_{}", uuid::Uuid::new_v4()),
@@ -10406,7 +10491,10 @@ async fn create_chat_session(
         context_usage_json: None,
         bootstrap_context: None,
         goal: None,
-        autonomy: req.autonomy.map(|autonomy| autonomy.id().to_string()),
+        autonomy: Some(match req.autonomy {
+            Some(autonomy) => autonomy.id().to_string(),
+            None => project_autonomy(&store, &session_project)?,
+        }),
         active_leaf_id: None,
         side_parent_session_id: None,
         side_parent_leaf_id: None,
@@ -10414,6 +10502,9 @@ async fn create_chat_session(
         updated_at: now_ms(),
     };
     store.create_chat_session(&session)?;
+    if let Some(disabled) = &disabled_lit_sources {
+        store.set_chat_lit_sources(&session.id, Some(disabled))?;
+    }
     state.chat.emit_session(Some(session.clone())).await;
     Ok(Json(
         json!({ "session": state.chat.session_json(&session, false).await }),
@@ -11275,13 +11366,13 @@ async fn select_chat_branch(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// Raw bytes of a chat attachment (image or PDF), by bare file name.
+/// Raw bytes of a chat attachment, by bare file name.
 async fn chat_attachment(
     Path(name): Path<String>,
     method: Method,
     headers: HeaderMap,
 ) -> std::result::Result<Response, ApiError> {
-    // Names are server-minted (att-<uuid>__<name>.<ext>); anything else is rejected.
+    // Names are server-minted (att-<uuid>__<name>[.<ext>]); anything else is rejected.
     if !name
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
@@ -13593,6 +13684,7 @@ mod tests {
             run_command: None,
             paper_id: None,
             icon: None,
+            proposal: None,
             created_at: 0,
             updated_at: 0,
         };

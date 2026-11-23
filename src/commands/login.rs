@@ -125,8 +125,18 @@ async fn keep(
     .await;
     if kept.is_err() {
         crate::alphaxiv::revoke(&tokens).await;
+    } else if is_team_email(&id_token) {
+        // alphaXiv's own team stays out of product analytics, as with `orx telemetry off`.
+        if let Err(error) = crate::telemetry::set_persisted_disabled(true) {
+            eprintln!("Could not turn off usage analytics for this alphaXiv account: {error}");
+        }
     }
     kept
+}
+
+fn is_team_email(id_token: &str) -> bool {
+    crate::alphaxiv::jwt_claim(id_token, "email")
+        .is_some_and(|email| email.trim().to_ascii_lowercase().ends_with("@alphaxiv.org"))
 }
 
 /// Waits for alphaXiv to send the browser back, keeps the sign-in, and tells
@@ -327,6 +337,7 @@ mod tests {
         redirect_uri: String,
         challenge: String,
         nonce: String,
+        email: String,
         issued: usize,
         revoked: Vec<String>,
         linked_by: Vec<String>,
@@ -356,8 +367,9 @@ mod tests {
         assert!(form["resource"].ends_with("/mcp/v1"));
         upstream.issued += 1;
         let n = upstream.issued;
-        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(json!({ "sub": "ax-1", "nonce": upstream.nonce }).to_string());
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            json!({ "sub": "ax-1", "nonce": upstream.nonce, "email": upstream.email }).to_string(),
+        );
         Json(json!({
             "access_token": format!("access-{n}"),
             "refresh_token": format!("refresh-{n}"),
@@ -568,6 +580,7 @@ mod tests {
         assert!(page.contains(&format!("href=\"{api}\">Open alphaXiv</a>")));
         assert_eq!(load_credentials().await.unwrap().unwrap().token, "pat-1");
         assert_eq!(stored_refresh_token(), "refresh-1");
+        assert!(crate::telemetry::preference_enabled());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -586,8 +599,10 @@ mod tests {
 
         // Replacing tokens revokes the ones they replace.
         upstream.lock().unwrap().link_failure = None;
+        upstream.lock().unwrap().email = "Someone@AlphaXiv.org".into();
         let (linked, status, _) = trip(&upstream, &api, Some("pat-1")).await;
         assert_eq!(linked.unwrap().token, "pat-1");
+        assert!(!crate::telemetry::preference_enabled());
         assert_eq!(status, StatusCode::OK);
         assert_eq!(stored_refresh_token(), "refresh-3");
         assert_eq!(upstream.lock().unwrap().revoked, ["refresh-2", "refresh-1"]);

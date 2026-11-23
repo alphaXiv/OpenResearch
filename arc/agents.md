@@ -296,7 +296,7 @@ A delegator subscribes to its delegates. A delegate the user keeps stops reporti
 
 **Messages travel by reference.** A user message reaches its agent tagged with a short ref, unless a slash command needs its leading `/`. A ref in a task or message expands to the cited message, its chat and its attachments, so a delegate reads the user's own words rather than a paraphrase.
 
-**Reach follows permissions.** An agent can read any chat. It can message or answer its own delegates and any chat whose permission mode orx can read and is no broader than its own, because a narrower chat steering a broader one would widen it. It can stop only its own delegates. Agents answer questions; approvals stay with the user.
+**Any agent can reach any chat.** It can read, message or answer any chat, and stop only its own delegates; what the receiving agent does with a message is left to that chat's permission mode. Agents answer questions; approvals stay with the user.
 
 **Nesting is deliberate.** By default a delegate cannot delegate. A delegation can allow it, a setting changes the default, and every delegate is told how many levels down it is.
 

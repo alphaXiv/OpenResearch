@@ -413,6 +413,7 @@ mod tests {
             run_command: None,
             paper_id: None,
             icon: None,
+            proposal: None,
             created_at: 0,
             updated_at: 0,
         }

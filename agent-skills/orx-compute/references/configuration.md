@@ -29,14 +29,20 @@ orx compute configure slurm --clear sbatch-arg --clear request-one-task
 orx compute connect slurm --host cluster
 orx compute configure k8s --context research --namespace experiments
 orx compute configure ray --address http://127.0.0.1:8265
-orx compute default set slurm --flavor h100:1
-orx compute default clear
+orx compute default set slurm --flavor h100:1   # this chat's project only
+orx compute default clear                       # project follows the machine's default again
+orx compute default set modal --flavor A10G --machine   # every project without its own
 orx compute catalog --gpu H100_SXM --count 1 --json
 ```
 
 Use `--help` on each command for flags. Supplied fields change; omitted fields
-stay unchanged. `--clear <field>` explicitly removes a setting. `status` is a
-configuration summary, not proof of connectivity. `test` returns `ready` and
+stay unchanged. `--clear <field>` explicitly removes a setting. Backend configuration
+is machine-wide; the default target is per project, and a project without its
+own follows the machine's (`status` reports both as `projectDefault` and
+`configuredDefaultBackend`). A project can also bill its own Slurm account,
+partition and QoS and use its own Kubernetes namespace (`projectSlurm`,
+`projectK8sNamespace`); the user sets those in Project settings. Change the machine's only when the user asks for
+every project. `status` is a configuration summary, not proof of connectivity. `test` returns `ready` and
 exits nonzero when prerequisites fail. Its checks do not launch training jobs.
 Modal checks the local SDK and credential presence; it does not verify token
 validity with Modal.

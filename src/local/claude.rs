@@ -373,8 +373,6 @@ pub struct ClaudeClient {
     config: std::sync::Mutex<SpawnConfig>,
     /// The inherited model stays fixed even when the catalog resolves its alias differently.
     invocation_model: Option<String>,
-    /// Compaction can serve a turn before this process records any usage.
-    usage_started: AtomicBool,
     auth_generation: u64,
     started_at: Instant,
     terminated: AtomicBool,
@@ -395,24 +393,6 @@ impl ClaudeClient {
     /// The config this child is currently running under.
     pub fn config(&self) -> SpawnConfig {
         self.config.lock().unwrap().clone()
-    }
-
-    pub(crate) fn begin_usage_attempt(
-        &self,
-        store: &crate::store::Store,
-        execution: &str,
-        prefix: &str,
-        native_scope: Option<&str>,
-    ) -> Result<()> {
-        let native_scope = if self.usage_started.load(Ordering::Relaxed) {
-            native_scope
-        } else {
-            None
-        };
-
-        store.begin_native_usage_attempt(execution, prefix, "claude-code", native_scope)?;
-        self.usage_started.store(true, Ordering::Relaxed);
-        Ok(())
     }
 
     pub fn auth_generation(&self) -> u64 {
@@ -1056,7 +1036,6 @@ async fn spawn_client(
         turn: std::sync::Mutex::new(TurnSlot::new(started_at)),
         config: std::sync::Mutex::new(config),
         invocation_model,
-        usage_started: AtomicBool::new(false),
         auth_generation,
         started_at,
         terminated: AtomicBool::new(false),
@@ -1689,7 +1668,7 @@ impl ClaudeHost {
                 "Claude is still finishing a background task. Wait for its reply, or ask Claude to stop the task."
             ));
         }
-        self.kill_session_for(session_id, "fork-switched", false)
+        self.kill_session_for(session_id, "stopped-idle", false)
             .await;
         Ok(())
     }
@@ -1816,7 +1795,6 @@ pub(crate) mod tests {
             turn: std::sync::Mutex::new(TurnSlot::new(idle_since)),
             config: std::sync::Mutex::new(cfg(None, None, None, false)),
             invocation_model: None,
-            usage_started: AtomicBool::new(false),
             auth_generation: 0,
             started_at,
             terminated: AtomicBool::new(false),

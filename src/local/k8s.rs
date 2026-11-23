@@ -18,6 +18,16 @@ use crate::store::{LaunchSpec, Store};
 /// Manifest path on the experiment branch when `--manifest` is omitted.
 const DEFAULT_MANIFEST: &str = ".orx/k8s.yaml";
 
+/// The machine's Kubernetes settings with the namespace of the run's project, if it set one.
+pub fn settings_for(args: &crate::ExpRunArgs) -> Result<k8s::K8sSettings> {
+    let mut settings = k8s::load_settings()?.unwrap_or_default();
+    if let Some(namespace) = crate::local::experiment_project_settings(&args.exp_id)?.k8s_namespace
+    {
+        settings.namespace = namespace;
+    }
+    Ok(settings)
+}
+
 pub async fn launch_spec(
     args: &crate::ExpRunArgs,
     source: &SourceSnapshot,
@@ -35,7 +45,7 @@ pub async fn launch_spec(
             "--image doesn't apply to --backend k8s — set the image in the manifest."
         ));
     }
-    let settings = k8s::load_settings()?.unwrap_or_default();
+    let settings = settings_for(args)?;
     let manifest_path = args
         .manifest
         .clone()

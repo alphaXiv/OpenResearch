@@ -3240,10 +3240,10 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
     let auth_generation = client.auth_generation();
     let bridge_active = client.config().bridge_active;
     if let Some(execution) = ctx.usage_execution_id() {
-        client.begin_usage_attempt(
-            &crate::store::Store::open()?,
+        crate::store::Store::open()?.begin_native_usage_attempt(
             execution,
             &format!("claude-{}:", ctx.attempt_count_for_usage()),
+            "claude-code",
             ctx.native_session_id.as_deref(),
         )?;
     }

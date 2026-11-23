@@ -23,7 +23,7 @@ community implementation, clone it, then import that checkout in `orx up`.
 Set the project's run command once before launching experiments:
 
 ```sh
-orx project edit <localProjectId> --run-command '<command>'
+orx project edit --run-command '<command>'
 ```
 
 ## Add an experiment node
@@ -32,15 +32,15 @@ orx project edit <localProjectId> --run-command '<command>'
 
 ```sh
 # First node in an empty project: the baseline root.
-orx create-experiment <localProjectId> --title "Baseline"
+orx create-experiment --title "Baseline"
 
 # Child node branched from an existing experiment.
-orx create-experiment <localProjectId> --title "Larger batch" \
+orx create-experiment --title "Larger batch" \
   --parent <localExperimentId> \
   --description "Increase batch size and compare throughput and loss."
 
 # Explicit additional root when the project already has one.
-orx create-experiment <localProjectId> --title "Alternative baseline" --baseline
+orx create-experiment --title "Alternative baseline" --baseline
 ```
 
 - The first parentless node is the baseline. Later parentless nodes attach to

@@ -12,7 +12,7 @@ pub mod agent_lifecycle;
 pub mod agent_profiles;
 pub mod agent_skills;
 #[cfg(test)]
-mod agent_text;
+pub(crate) mod agent_text;
 pub mod autonomy;
 pub mod bash;
 pub mod browser_cookies;
@@ -140,17 +140,85 @@ pub fn run_labels(
     ]))
 }
 
-/// Fill a local-mode launch's backend/flavor from the persisted default
-/// (Settings → Compute) when the caller didn't pass them. Explicit args always
-/// win; see `resolve_compute_default` for the exact precedence.
-pub fn apply_compute_default(backend: &mut Option<String>, flavor: &mut Option<String>) {
+/// Fill a launch's backend/flavor from the project's default compute target when
+/// the caller didn't pass them. Explicit args always win; see
+/// `resolve_compute_default` for the exact precedence.
+pub fn apply_compute_default(
+    store: &Store,
+    project_id: &str,
+    backend: &mut Option<String>,
+    flavor: &mut Option<String>,
+) -> Result<()> {
     let (b, f) = resolve_compute_default(
         backend.take(),
         flavor.take(),
-        crate::config::compute_default(),
+        compute_default(store, project_id)?.map(|target| target.value),
     );
     *backend = b;
     *flavor = f;
+    Ok(())
+}
+
+/// A project's default compute target and whether the project or the machine set it.
+#[derive(Debug, Clone)]
+pub struct ComputeTarget {
+    pub value: (String, Option<String>),
+    pub project: bool,
+}
+
+/// The default compute target for the project's runs: its own, else the machine's.
+pub fn compute_default(store: &Store, project_id: &str) -> Result<Option<ComputeTarget>> {
+    Ok(match store.project_settings(project_id)?.compute {
+        Some(own) => Some(ComputeTarget {
+            value: (own.backend, own.flavor),
+            project: true,
+        }),
+        None => crate::config::compute_default().map(|value| ComputeTarget {
+            value,
+            project: false,
+        }),
+    })
+}
+
+/// The settings of the project an experiment belongs to; none for an experiment the store doesn't hold.
+pub fn experiment_project_settings(exp_id: &str) -> Result<crate::store::ProjectSettings> {
+    let store = Store::open_for_reading()?;
+    match store.get_local_experiment(exp_id)? {
+        Some(experiment) => store.project_settings(&experiment.project_id),
+        None => Ok(Default::default()),
+    }
+}
+
+/// Literature sources turned off for a chat: its own choice, else its project's, else the machine's.
+pub fn disabled_lit_sources(
+    store: &Store,
+    chat: Option<&str>,
+    project_id: Option<&str>,
+) -> Result<Vec<String>> {
+    if let Some(own) = chat
+        .map(|chat| store.chat_lit_sources(chat))
+        .transpose()?
+        .flatten()
+    {
+        return Ok(own);
+    }
+    let project = match project_id {
+        Some(id) => store.project_settings(id)?.disabled_lit_sources,
+        None => None,
+    };
+    Ok(project.unwrap_or_else(crate::config::disabled_lit_sources))
+}
+
+/// [`disabled_lit_sources`] for the chat or project this command runs in.
+pub fn disabled_lit_sources_here() -> Result<Vec<String>> {
+    let store = Store::open_for_reading()?;
+    let project = resolve::current_project(&store)?;
+    let chat = crate::local::chat::launching_chat_session();
+    disabled_lit_sources(
+        &store,
+        chat.as_deref(),
+        project.as_ref().map(|project| project.id.as_str()),
+    )
 }
 
 /// Pure precedence rule for the default compute target:
@@ -280,6 +348,69 @@ mod tests {
             resolve_compute_default(None, Some("h100".into()), dflt("modal", Some("a10g"))),
             (Some("modal".into()), Some("h100".into()))
         );
+    }
+
+    #[test]
+    fn a_project_default_and_sources_override_the_machine_until_cleared() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        crate::config::set_compute_default(Some("modal".into()), Some("A10G".into())).unwrap();
+        crate::telemetry::set_disabled_lit_sources(vec!["biorxiv".into()]).unwrap();
+        let store = Store::open().unwrap();
+        let launch = |backend: Option<&str>| {
+            let (mut backend, mut flavor) = (backend.map(Into::into), None);
+            apply_compute_default(&store, "p", &mut backend, &mut flavor).unwrap();
+            (backend, flavor)
+        };
+        assert_eq!(launch(None), (Some("modal".into()), Some("A10G".into())));
+        assert_eq!(
+            disabled_lit_sources(&store, None, Some("p")).unwrap(),
+            ["biorxiv"]
+        );
+
+        let mut project = super::agent_text::sample_project();
+        project.id = "p".into();
+        store.create_local_project(&project).unwrap();
+        store
+            .update_project_settings("p", |settings| {
+                settings.compute = Some(crate::store::ComputeDefault {
+                    backend: "slurm".into(),
+                    flavor: Some("h100:1".into()),
+                });
+                settings.disabled_lit_sources = Some(Vec::new());
+            })
+            .unwrap();
+        assert_eq!(launch(None), (Some("slurm".into()), Some("h100:1".into())));
+        assert_eq!(launch(Some("modal")), (Some("modal".into()), None));
+        assert!(compute_default(&store, "p").unwrap().unwrap().project);
+        assert!(disabled_lit_sources(&store, None, Some("p"))
+            .unwrap()
+            .is_empty());
+        let mut chat = crate::store::tests::chat_session_fixture("chat");
+        chat.project_id = "p".into();
+        store.create_chat_session(&chat).unwrap();
+        assert!(disabled_lit_sources(&store, Some("chat"), Some("p"))
+            .unwrap()
+            .is_empty());
+        let pubmed = ["pubmed".to_string()];
+        assert!(store.set_chat_lit_sources("chat", Some(&pubmed)).unwrap());
+        assert_eq!(
+            disabled_lit_sources(&store, Some("chat"), Some("p")).unwrap(),
+            pubmed
+        );
+        assert!(!store
+            .set_chat_lit_sources("missing", Some(&pubmed))
+            .unwrap());
+        assert_eq!(
+            disabled_lit_sources(&store, None, None).unwrap(),
+            ["biorxiv"]
+        );
+
+        store
+            .update_project_settings("p", |settings| *settings = Default::default())
+            .unwrap();
+        assert_eq!(launch(None), (Some("modal".into()), Some("A10G".into())));
     }
 
     #[test]

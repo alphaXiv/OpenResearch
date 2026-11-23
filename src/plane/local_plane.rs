@@ -21,7 +21,7 @@ pub struct LocalPlane {
 impl LocalPlane {
     /// The resolved project row, or an error when called on a plane built by a
     /// different keyed resolver.
-    fn project(&self) -> Result<&LocalProject> {
+    pub(crate) fn project(&self) -> Result<&LocalProject> {
         self.project
             .as_ref()
             .ok_or_else(|| anyhow!("internal: local plane missing its project row"))
@@ -101,24 +101,25 @@ impl LocalPlane {
     }
 
     pub async fn edit_project(&self, edit: ProjectEdit) -> Result<()> {
-        let mut project = self.project()?.clone();
-        let name = edit.name;
-        let run_command = edit.run_command;
-        if name.is_none() && run_command.is_none() {
+        let id = &self.project()?.id;
+        let name = edit.name.as_deref().map(str::trim);
+        if name.is_none() && edit.run_command.is_none() {
             return Err(anyhow!(
                 "Nothing to change. Pass at least one of --name or --run-command."
             ));
         }
-        if let Some(name) = name {
-            if name.trim().is_empty() {
-                return Err(anyhow!("--name cannot be empty."));
-            }
-            project.name = name.trim().to_string();
+        if name.is_some_and(str::is_empty) {
+            return Err(anyhow!("--name cannot be empty."));
         }
-        if let Some(cmd) = run_command {
-            project.run_command = Some(cmd).filter(|c| !c.trim().is_empty());
-        }
-        self.store.update_local_project(&project)?;
+        let run_command = edit
+            .run_command
+            .as_deref()
+            .map(|cmd| Some(cmd).filter(|c| !c.trim().is_empty()));
+        self.store.edit_local_project(id, name, run_command, None)?;
+        let project = self
+            .store
+            .get_local_project(id)?
+            .ok_or_else(|| anyhow!("Project {id} was not found."))?;
 
         println!("\u{2713} Project updated.");
         println!("  id:      {}", project.id);
@@ -368,10 +369,15 @@ impl LocalPlane {
     pub async fn launch(&self, mut args: ExpRunArgs) -> Result<()> {
         // Resolved before validation so e.g. `--host box1` with a default of `ssh` is valid,
         // and before telemetry records the backend.
-        crate::local::apply_compute_default(&mut args.backend, &mut args.flavor);
+        let experiment = self.experiment()?;
+        crate::local::apply_compute_default(
+            &self.store,
+            &experiment.project_id,
+            &mut args.backend,
+            &mut args.flavor,
+        )?;
         let backend = args.backend.get_or_insert_with(|| "local".into()).clone();
         crate::compute::validate_run_args(&args)?;
-        let experiment = self.experiment()?;
         warn_unreachable_trackio(&self.store, &experiment.project_id, &backend)?;
         if let Some(warning) = self
             .store
@@ -1241,6 +1247,48 @@ mod tests {
         assert!(is_db_locked(&busy_snapshot));
 
         assert!(!is_db_locked(&anyhow!("some other error")));
+    }
+
+    #[tokio::test]
+    async fn an_edit_that_read_the_project_before_its_promotion_keeps_the_new_folder() {
+        let root = std::env::temp_dir().join(format!("orx-plane-edit-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(root.join("data")).unwrap();
+        let scratch = crate::local::projects::scratch_project(&store).unwrap();
+        let target = root.join("Fibonacci");
+        let promoted = crate::local::projects::promote_scratch_project(
+            &store,
+            &scratch,
+            "owner",
+            None,
+            &crate::local::projects::ask(
+                &store,
+                "owner",
+                "Fibonacci",
+                target.to_str().unwrap(),
+                None,
+            ),
+        )
+        .unwrap();
+
+        let plane = LocalPlane {
+            store,
+            project: Some(scratch.clone()),
+            experiment: None,
+            id: scratch.id.clone(),
+        };
+        plane
+            .edit_project(ProjectEdit {
+                name: None,
+                run_command: Some("python fib.py".into()),
+            })
+            .await
+            .unwrap();
+
+        let read = plane.store.get_local_project(&scratch.id).unwrap().unwrap();
+        assert_eq!(read.name, "Fibonacci");
+        assert_eq!(read.repo_path, promoted.repo_path);
+        assert_eq!(read.run_command.as_deref(), Some("python fib.py"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
