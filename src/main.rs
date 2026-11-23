@@ -236,6 +236,18 @@ enum AlphaXivCommand {
         #[arg(long)]
         json: bool,
     },
+    /// List the alphaXiv tools, or show one tool's arguments.
+    Tools {
+        /// A tool to describe.
+        name: Option<String>,
+    },
+    /// Call an alphaXiv tool.
+    Call {
+        /// The tool, from `orx alphaxiv tools`.
+        name: String,
+        /// Its arguments as a JSON object, or `-` to read them from stdin.
+        arguments: Option<String>,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -1678,6 +1690,10 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Logout => commands::logout::run().await,
         Command::Alphaxiv(args) => match args.command {
             AlphaXivCommand::Library { json } => alphaxiv::print_library(json).await,
+            AlphaXivCommand::Tools { name } => commands::alphaxiv_mcp::print_tools(name).await,
+            AlphaXivCommand::Call { name, arguments } => {
+                commands::alphaxiv_mcp::call(&name, arguments).await
+            }
         },
         Command::Projects(args) => commands::projects::run(args).await,
         Command::Orgs(args) => commands::orgs::run(args).await,

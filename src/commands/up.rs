@@ -49,7 +49,7 @@ use crate::updates;
 use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
 use crate::{browser, UpArgs};
 
-mod agent_tools;
+pub(crate) mod agent_tools;
 pub(crate) mod api_v2;
 pub(crate) mod compute_settings;
 mod harness_setup;

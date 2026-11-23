@@ -1,6 +1,6 @@
 ---
 name: orx-create
-description: "Initialize a project with `orx up` and add experiment nodes with `orx create-experiment`. Use when starting a project or experiment, when the tree is empty, or when choosing a baseline, parent, or run command."
+description: "Start a project or add experiment nodes. Use when the project or its tree is empty, or when choosing a baseline, a parent or the run command."
 ---
 
 ## Start a project

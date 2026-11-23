@@ -71,6 +71,15 @@ impl GateEnv {
     }
 }
 
+/// Claude's `--permission-prompt-tool`, listed only to a chat holding a gate token.
+pub(crate) fn approve_tool() -> Value {
+    json!({
+        "name": "approve",
+        "description": "Ask the orx user to approve a tool call",
+        "inputSchema": { "type": "object", "additionalProperties": true },
+    })
+}
+
 pub async fn run() -> Result<()> {
     let env = GateEnv::from_env()?;
     // The long-poll deliberately blocks for as long as the user thinks; only
@@ -127,11 +136,7 @@ pub async fn run() -> Result<()> {
             Some("tools/list") => {
                 let mut tools = Vec::new();
                 if env.token.is_some() {
-                    tools.push(json!({
-                        "name": "approve",
-                        "description": "Ask the orx user to approve a tool call",
-                        "inputSchema": { "type": "object", "additionalProperties": true },
-                    }));
+                    tools.push(approve_tool());
                 }
                 // An unreachable `orx up` leaves only `approve`: the agent
                 // keeps working without orchestration rather than failing.

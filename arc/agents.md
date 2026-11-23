@@ -76,8 +76,8 @@ OpenCode runs local inference over connections to OpenAI-compatible servers (`sr
 
 ## What orx gives an agent
 
-- **The playbook.** `SYSTEM_PROMPT.md`, rendered with the project's state for every harness, travels through each agent's instruction channel: a system-prompt file, developer instructions, a config entry, or a worktree file the first turn points to.
-- **Skills.** Bundled (`agent-skills/`) and user-uploaded skills are written into the worktree's native skills folder before each turn, so they never drift from the binary.
+- **The playbook.** `SYSTEM_PROMPT.md`, rendered with the project's state for every harness, travels through each agent's instruction channel: a system-prompt file, developer instructions, a config entry, or a worktree file the first turn points to. Every turn reads all of it, so it carries only what every turn needs and routes the rest to skills and to files written beside it (`agent-playbook/`).
+- **Skills.** Bundled (`agent-skills/`) and user-uploaded skills are written into the worktree's native skills folder before each turn, so they never drift from the binary. An agent sees each skill's description until it loads the skill, and a skill's `references/` only when its body sends it there, so what most turns read stays short.
 - **The `orx` CLI.** The running `orx`'s directory goes first on `PATH` and stays there after the user's startup files, so the agent runs the dashboard's version. The environment names the chat, the dashboard and its data directory, which is how `orx exp run` records its chat and every `orx` the agent runs opens the store the dashboard serves.
 - **alphaXiv tools.** `orx alphaxiv-mcp` (`src/commands/alphaxiv_mcp.rs`) gives agents an allowlist of research tools; tokens stay in orx ([storage](storage.md)), and on an SSH host the attached laptop's sign-in counts ([remote](remote.md)).
 - **Saved variables.** The agent starts with `~/.openresearch/env` and its project's variables over it. Through `orx mcp` it can ask the user for more on a card in its chat (`src/local/chat/env_request.rs`); a secret's value never enters the transcript.

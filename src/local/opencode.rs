@@ -34,6 +34,10 @@ pub(crate) use runtime::{
 /// so rewriting the file retargets a running server without a restart.
 pub(crate) const PLAYBOOK_REL: &str = ".openresearch/agent/autoresearch-local.md";
 
+/// Image and path details the playbook sends the agent to, written beside it.
+const CHAT_FORMAT_REL: &str = ".openresearch/agent/chat-format.md";
+pub(super) const CHAT_FORMAT: &str = include_str!("../../agent-playbook/chat-format.md");
+
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 const COMPACTION_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -287,6 +291,7 @@ pub(super) fn playbook_md(project: &LocalProject, state: &ProjectState) -> Strin
         .replace("{compute_bullet}", &compute_bullet)
         .replace("{artifacts}", &artifacts)
         .replace("{project_state}", &project_state)
+        .replace("{chat_format}", CHAT_FORMAT_REL)
 }
 
 /// Keep the files we drop into the checkout out of `git status` / accidental
@@ -357,6 +362,9 @@ pub fn ensure_playbook(
     let project_state = ProjectState::load(&project.id)?;
     std::fs::write(&playbook, playbook_md(project, &project_state))
         .map_err(|e| anyhow!("Could not write {}: {}", playbook.display(), e))?;
+    let chat_format = workdir.join(CHAT_FORMAT_REL);
+    std::fs::write(&chat_format, CHAT_FORMAT)
+        .map_err(|e| anyhow!("Could not write {}: {}", chat_format.display(), e))?;
     // Modular skills, written fresh beside the playbook (same freshness
     // semantics) so this session's agent discovers them natively.
     if let Some(dir) = session_skills_dir {

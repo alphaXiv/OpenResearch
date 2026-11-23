@@ -23,7 +23,7 @@ Before running anything:
 1. Confirm the compute. The user should name where runs execute — a configured `~/.ssh/config` host alias (`orx exp run --backend ssh --host <alias>`), another `orx` backend (`hf` or `modal` with a flavor, `k8s` with a committed manifest), or the local machine. If unspecified, use the configured default compute target when one is set (omit `--backend` to launch there); otherwise ask before launching anything.
 2. Read the paper. If the args name no paper, infer it from the current repository — read the README, docs, and code, and if the repo clearly corresponds to an identifiable paper, reproduce that one; only ask the user if none can be identified. If it's on alphaXiv, `orx paper <id>` gives a structured report (`--full` for raw text); use the `orx-lit-review` retrieval workflow to find it. Otherwise ask the user for a PDF or link.
 3. Plan to the user's compute window. When the caller supplies an absolute deadline and available accelerator capacity, treat both as authoritative: keep the available GPUs occupied with scientifically useful parallel variants, seeds, ablations, controls, or profiling runs; refill freed capacity after each completion; and stop early when the target claims are adequately evaluated. Interpret capacity by total GPUs across in-flight runs, not by raw run count. Do not invent or maintain a GPU-hour ledger unless the user explicitly asks for one. For vague small-budget language such as "for a little bit," prefer published-checkpoint evaluation and targeted checks. Larger windows may support broader sweeps, added seeds, fine-tuning, or retraining, but they make training eligible, not mandatory.
-4. Optional tracking: if the user wants metrics logged, use Trackio as the orx-compute skill describes, so the charts show beside each run. Use Weights & Biases only when the user asks for it — check `wandb login` / `WANDB_API_KEY` and log each run to a project named after the paper. Don't require either.
+4. Optional tracking: if the user wants metrics logged, use Trackio as `orx-compute`'s `references/tracking.md` describes, so the charts show beside each run. Use Weights & Biases only when the user asks for it — check `wandb login` / `WANDB_API_KEY` and log each run to a project named after the paper. Don't require either.
 
 Workflow:
 1. Enumerate the paper's main empirical claims (headline table/figure results first). Unless the user specifies, focus on the main illustrative claim of the paper.
@@ -82,17 +82,17 @@ const WRITE_PAPER_TEMPLATE: &str = r#"Draft a paper or preprint on this project'
 
 Scope: {request}
 
-Load the `orx-paper` skill first (`orx skill paper`) and follow it — it carries a
-preamble that compiles, the environment-to-package table that is the usual cause
-of a failed build, and the file-citation rule.
+Load the `orx-paper` skill first (`orx skill paper`) and follow it; its
+`references/preamble.md` carries a preamble that compiles and the
+environment-to-package table that is the usual cause of a failed build.
 
 Check `.orx/latex-templates/` before writing a preamble. If the user has uploaded
 exactly one template, use it; if several, ask which unless the scope above names
-one; if none, use the skill's default preamble.
+one; if none, use the default in `orx-paper`'s `references/preamble.md`.
 
 Method:
 1. Ground the paper in what actually ran. Read the tree with `orx project view`, then use `orx logs` to locate each file and read every number
-   you intend to report from it (the `orx-logs` skill covers this). Never
+   you intend to report from it (the `orx-results` skill covers this). Never
    write a metric you have not read
    out of a run; if something is not measured yet, say so in the text.
 2. Load `orx-lit-review`, retrieve real related work with `orx discover`, and
@@ -102,8 +102,8 @@ Method:
    — a copy in the artifacts directory is not compiled.
 4. Structure it as abstract, introduction, method, experiments (a table of
    measured results), related work, conclusion, and an inline `thebibliography`.
-5. Link the finished file using the session playbook's evidence-and-links contract
-   so the user can open the rendered document.
+5. Link the finished file with the playbook's file tag so the user can open the
+   rendered document.
 6. If the build fails, read the first line of the log beginning with `!` — it
    names the problem and the source line — fix the source, and build again. Do
    not hand back a document that does not compile.

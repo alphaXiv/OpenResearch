@@ -963,7 +963,7 @@ pub(crate) fn xdg_config_home() -> PathBuf {
 /// invocation; the body only points the agent at the bundled guide.
 pub(super) const CLAUDE_SKILL: &str = r#"---
 name: orx
-description: Drive automated ML research on OpenResearch with the `orx` CLI — create experiments, launch and monitor runs on compute, analyze local results and logs, and search literature. Use whenever the user wants to understand, explain, explore, or work on an OpenResearch project, run experiments, do auto-research, or mentions orx or OpenResearch.
+description: Drive ML research with OpenResearch's `orx` CLI. Use whenever the user works on or asks about an OpenResearch project, runs experiments or auto-research, or mentions orx or OpenResearch.
 ---
 
 # OpenResearch (`orx`)
@@ -978,11 +978,10 @@ session** instead of relying on this file or prior memory.
 orx skill
 ```
 
-This prints the current manual — the cardinal rules and a command
-quick-reference — followed by a **bundled index of modules**. Read it before taking
-any action. For the detail on a specific area, run `orx skill <name>` to print
-that module (e.g. `orx skill experiment-tree`, `orx skill compute`); the same
-command reads that module directly from the installed CLI.
+This prints the current manual followed by a **bundled index of modules**, each
+with when to load it. Read it before taking any action, then run
+`orx skill <name>` for the module that matches the task (e.g.
+`orx skill experiment-tree`, `orx skill compute`).
 
 ## 2. Carry out the user's research goal
 
@@ -1004,8 +1003,8 @@ compute or account command reports `Not logged in`, ask the user to run
 /// Codex doesn't expand it).
 pub(super) const CODEX_PROMPT: &str = r#"Drive automated ML research on OpenResearch using the `orx` CLI.
 
-Start by running `orx skill` to load the current operating manual — the cardinal
-rules, a command quick-reference, and a bundled index of modules. Always read it
+Start by running `orx skill` to load the current operating manual and its
+bundled index of modules. Always read it
 at the start of a session rather than relying on memory. Pull up a
 module's detail with `orx skill <name>` (e.g. `orx skill experiment-tree`,
 `orx skill compute`).

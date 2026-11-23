@@ -1,6 +1,6 @@
 ---
 name: orx-git
-description: "Read, edit, commit, and diff experiment code; coordinate shared worktrees and preserve frozen branch history. Use before branch work, when starting work alongside other sessions, comparing nodes, preparing a run, repairing a provisional node, or diagnosing stale code."
+description: "Work with experiment branches and shared worktrees. Use before committing, branching, comparing experiments, or editing a worktree another chat shares."
 ---
 
 Git records every experiment. GitHub publication may be enabled for collaborator

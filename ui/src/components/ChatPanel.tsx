@@ -978,6 +978,8 @@ const GUIDE_LABELS: Record<string, [done: () => string, progress: () => string]>
   "orx-lit-review": [m.activity_guide_lit_review, m.activity_guide_lit_review_progress],
   "orx-logs": [m.activity_guide_logs, m.activity_guide_logs_progress],
   "orx-paper": [m.activity_guide_paper, m.activity_guide_paper_progress],
+  "orx-project-admin": [m.activity_guide_project, m.activity_guide_project_progress],
+  "orx-python-env": [m.activity_guide_python, m.activity_guide_python_progress],
   "orx-reports": [m.activity_guide_reports, m.activity_guide_reports_progress],
   "orx-results": [m.activity_guide_results, m.activity_guide_results_progress],
 };

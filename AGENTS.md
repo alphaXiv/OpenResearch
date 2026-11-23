@@ -12,7 +12,7 @@ OpenResearch turns the coding agents a researcher already has (Claude Code, Code
 | `src/client.rs`, `src/config.rs` | The openresearch.sh client, credentials, settings paths. |
 | `src/updates*` | Self-update for the CLI and the desktop apps. |
 | `ui/` | The dashboard: React, TanStack Router and Query, Paraglide messages. |
-| `agent-skills/`, `SKILL.md`, `SYSTEM_PROMPT.md` | What orx tells agents, compiled into the binary. |
+| `agent-skills/`, `agent-playbook/`, `SKILL.md`, `SYSTEM_PROMPT.md` | What orx tells agents, compiled into the binary; `node scripts/agent-surface.mjs` maps it. |
 | `macos/`, `windows/`, `linux/`, `demo/` | Packaging and the onboarding demo. |
 
 ## Rules that matter most

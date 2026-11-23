@@ -1,6 +1,6 @@
 ---
 name: orx-feedback
-description: "Report product feedback about OpenResearch itself with `orx feedback`. Use when the user expresses frustration with an OpenResearch feature or bug, says a feature would be nice to have, or you hit a meaningful limitation or bug in the orx CLI, the agent harness, or the app. Not for research results, the user's own code, or minor nits."
+description: "Report feedback about OpenResearch itself. Use when the user is frustrated with or wishes for an OpenResearch feature, or you hit a real bug in orx or the app."
 ---
 
 # Report product feedback
