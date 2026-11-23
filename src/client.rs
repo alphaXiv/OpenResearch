@@ -212,6 +212,16 @@ pub struct SandboxEnvelope {
     pub rental_lease: Option<RentalLeaseCapability>,
 }
 
+/// What OpenResearch charged a box over its whole life, in USD cents.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxBill {
+    pub amount_cents: u64,
+    /// The box is torn down, so nothing more is charged.
+    #[serde(rename = "final")]
+    pub is_final: bool,
+}
+
 /// `GET /sandboxes` — each row is a `Sandbox` (the extra `connections` the
 /// dashboard renders is ignored on deserialize).
 #[derive(Debug, Clone, Deserialize)]
@@ -555,6 +565,20 @@ pub async fn create_sandbox(
 /// openresearch backend polls this while its box goes provisioning → online.
 pub async fn get_sandbox(creds: &Credentials, sandbox_id: &str) -> Result<SandboxEnvelope> {
     api_get(creds, &format!("/sandboxes/{}", sandbox_id)).await
+}
+
+/// What a box was charged, torn-down boxes included — `GET /sandboxes/{id}/bill`. None for a
+/// box OpenResearch doesn't bill, such as one on the org's own provider key.
+pub async fn get_sandbox_bill(
+    creds: &Credentials,
+    sandbox_id: &str,
+) -> Result<Option<SandboxBill>> {
+    #[derive(Deserialize)]
+    struct Envelope {
+        bill: Option<SandboxBill>,
+    }
+    let envelope: Envelope = api_get(creds, &format!("/sandboxes/{}/bill", sandbox_id)).await?;
+    Ok(envelope.bill)
 }
 
 /// Tear a box down (destroys the provider instance) — `DELETE /sandboxes/{id}`.

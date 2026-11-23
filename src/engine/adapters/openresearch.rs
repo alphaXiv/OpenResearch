@@ -56,7 +56,7 @@ impl LegacyTransport {
     }
 }
 
-fn descriptor(handle: &Handle) -> Result<&BackendDescriptor> {
+pub(crate) fn descriptor(handle: &Handle) -> Result<&BackendDescriptor> {
     match handle {
         Handle::OpenResearch { descriptor } | Handle::Legacy { descriptor }
             if descriptor.kind == "openresearch_job" =>

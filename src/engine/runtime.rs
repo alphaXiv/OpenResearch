@@ -247,6 +247,7 @@ impl Runtime {
         {
             tokio::spawn(crate::local::prices::keep_fresh());
             tokio::spawn(crate::local::spend::keep_modal_bills(self.data_dir.clone()));
+            tokio::spawn(crate::local::spend::keep_box_bills(self.data_dir.clone()));
         }
     }
 

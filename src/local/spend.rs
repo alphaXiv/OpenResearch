@@ -5,8 +5,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::Duration;
 
-use crate::error::Result;
+use crate::engine::adapters::openresearch;
+use crate::engine::handle_of;
+use crate::error::{anyhow, Result};
 use crate::jobs::modal;
+use crate::jobs::openresearch::is_not_found_error;
 use crate::local::usage::{AgentSpend, BackendSpend, ChatCompute, PlanUsage, UsageReport};
 use crate::store::{BilledRun, Cost, Store};
 
@@ -25,6 +28,8 @@ const BILL_SETTLE: i64 = HOUR;
 const REPORT_SPAN: i64 = 7 * 24 * HOUR;
 /// Runs that ended longer ago keep their estimate, since a sandbox runs at most a day.
 const BILL_WINDOW: i64 = REPORT_SPAN - 24 * HOUR;
+/// Box runs that ended longer ago keep their estimate; a box is torn down minutes after its run.
+const BOX_BILL_WINDOW: i64 = 24 * HOUR;
 
 /// The currency of a row with nothing priced in it: every price source orx reads is in dollars.
 const UNPRICED_CURRENCY: &str = "USD";
@@ -233,6 +238,65 @@ pub(crate) async fn keep_modal_bills(data_dir: std::path::PathBuf) {
             }
         };
         tokio::time::sleep(crate::config::paced(wait)).await;
+    }
+}
+
+/// Reads what OpenResearch charged each finished run's box, from its creation to its release,
+/// once the box is torn down. A box without a bill keeps its estimate: one on the org's own
+/// provider key, or any box on a server older than bills.
+pub(crate) async fn read_box_bills(data_dir: &Path, now: i64) -> Result<()> {
+    let boxes = {
+        let store = Store::open_at(data_dir.to_path_buf())?;
+        let mut boxes = Vec::new();
+        for run in store.unbilled_runs("openresearch_job", now - BOX_BILL_WINDOW)? {
+            let handle = store.get_run(&run.id)?.as_ref().and_then(handle_of);
+            let sandbox = handle.as_ref().and_then(|handle| {
+                let descriptor = openresearch::descriptor(handle).ok()?;
+                Some(descriptor.openresearch_ref().ok()?.1.to_owned())
+            });
+            if let Some(sandbox) = sandbox {
+                boxes.push((run.id, sandbox));
+            }
+        }
+        boxes
+    };
+    if boxes.is_empty() {
+        return Ok(());
+    }
+
+    let creds = crate::config::load_credentials()
+        .await?
+        .ok_or_else(|| anyhow!("Not signed in to OpenResearch. Run `orx login`."))?;
+    let mut bills = Vec::new();
+    for (run_id, sandbox) in boxes {
+        match crate::client::get_sandbox_bill(&creds, &sandbox).await {
+            Ok(Some(bill)) if bill.is_final => bills.push((run_id, bill.amount_cents)),
+            Ok(_) => {}
+            Err(error) if is_not_found_error(&error.to_string()) => {}
+            Err(error) => {
+                eprintln!("orx up: run {run_id}: could not read what box {sandbox} cost: {error:#}")
+            }
+        }
+    }
+
+    let store = Store::open_at(data_dir.to_path_buf())?;
+    for (run_id, cents) in bills {
+        let cost = Cost {
+            micros: cents * 10_000,
+            currency: "USD".into(),
+        };
+        store.record_run_bill(&run_id, &cost)?;
+    }
+    Ok(())
+}
+
+/// Reads OpenResearch's box bills while `orx up` runs.
+pub(crate) async fn keep_box_bills(data_dir: std::path::PathBuf) {
+    loop {
+        if let Err(error) = read_box_bills(&data_dir, crate::store::now_ms()).await {
+            eprintln!("orx up: could not read what OpenResearch boxes cost: {error:#}");
+        }
+        tokio::time::sleep(crate::config::paced(Duration::from_secs(15 * 60))).await;
     }
 }
 
@@ -504,6 +568,94 @@ mod tests {
         assert_eq!(week.compute[0].unpriced, 1);
         let compute = chat_compute(&store, "chat", NOW).unwrap().unwrap();
         assert_eq!((compute.cost_micros, compute.unpriced), (3_500_000, 1));
+        drop((store, conn));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A torn-down box counts what OpenResearch billed it, payload or not; a box without a final
+    /// bill, or on a server older than bills, keeps its estimate.
+    #[tokio::test]
+    async fn a_torn_down_box_counts_what_openresearch_billed() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        use axum::response::IntoResponse;
+        let app = axum::Router::new().route(
+            "/sandboxes/{id}/bill",
+            axum::routing::get(
+                |axum::extract::Path(id): axum::extract::Path<String>| async move {
+                    let bill = match id.as_str() {
+                        "sb_ran" | "sb_never_ran" => {
+                            serde_json::json!({"amountCents": 412, "final": true})
+                        }
+                        "sb_releasing" => serde_json::json!({"amountCents": 100, "final": false}),
+                        "sb_own_key" => serde_json::Value::Null,
+                        "sb_broken" => return axum::http::StatusCode::BAD_GATEWAY.into_response(),
+                        _ => return axum::http::StatusCode::NOT_FOUND.into_response(),
+                    };
+                    axum::Json(serde_json::json!({ "bill": bill })).into_response()
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        crate::config::save_credentials(&crate::config::Credentials {
+            api_url,
+            token: "pat".into(),
+        })
+        .await
+        .unwrap();
+
+        let dir = std::env::temp_dir().join(format!("orx-box-bills-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let conn = rusqlite::Connection::open(dir.join("orx.db")).unwrap();
+        let now = crate::store::now_ms();
+        let ended = now - HOUR;
+        // `sb_old` stands for any box on an older server, which has no bill route.
+        for (sandbox, status, started) in [
+            ("sb_ran", "done", Some(ended - HOUR)),
+            ("sb_never_ran", "failed", None),
+            ("sb_releasing", "done", Some(ended - HOUR)),
+            ("sb_own_key", "done", Some(ended - HOUR)),
+            ("sb_broken", "done", Some(ended - HOUR)),
+            ("sb_old", "done", Some(ended - HOUR)),
+        ] {
+            let descriptor = crate::jobs::BackendDescriptor::parse(
+                &serde_json::json!({"kind": "openresearch_job", "namespace": "org", "jobId": sandbox})
+                    .to_string(),
+            )
+            .unwrap();
+            let handle = crate::engine::handle::Handle::OpenResearch {
+                descriptor: Box::new(descriptor.clone()),
+            };
+            conn.execute(
+                "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, created_at, updated_at,
+                                   ended_at, chat_session_id, launch_spec, started_at, price_json)
+                 VALUES (?1, 'e', 'p', ?2, ?3, ?4, ?4, ?4, 'chat', ?5, ?6, ?7)",
+                params![
+                    sandbox,
+                    status,
+                    crate::engine::handle::backend_json(sandbox, Some(&handle), &descriptor).unwrap(),
+                    ended,
+                    serde_json::json!({"kind": "openresearch_job", "options": {}}).to_string(),
+                    started,
+                    started.map(|_| serde_json::json!({"amountMicros": 1_000_000, "per": "hour",
+                                                       "currency": "USD", "source": "test",
+                                                       "quotedAt": 1})
+                    .to_string()),
+                ],
+            )
+            .unwrap();
+        }
+        let compute = |store: &Store| {
+            let compute = chat_compute(store, "chat", now).unwrap().unwrap();
+            (compute.cost_micros, compute.unpriced)
+        };
+        assert_eq!(compute(&store), (5_000_000, 1));
+
+        read_box_bills(&dir, now).await.unwrap();
+        assert_eq!(compute(&store), (2 * 4_120_000 + 4 * 1_000_000, 0));
         drop((store, conn));
         std::fs::remove_dir_all(dir).unwrap();
     }
