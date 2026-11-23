@@ -1385,8 +1385,8 @@ class Workspace:
         assert_eq!(quote.currency, "USD");
     }
 
-    /// A run in its own app is billed once Modal settles its last hour; one in the shared app
-    /// keeps its estimate.
+    /// A run in its own app is billed once Modal settles its last hour; one in the shared app, or
+    /// whose app the report doesn't name, keeps its estimate.
     #[cfg(not(windows))]
     #[tokio::test]
     async fn a_run_in_its_own_app_is_billed_what_modal_reports() {
@@ -1422,7 +1422,7 @@ class Workspace:
         let conn = rusqlite::Connection::open(data.join("orx.db")).unwrap();
         for (id, app, status, ended) in [
             ("settled", "orx-settled", "done", now - 3 * hour),
-            ("free", "orx-free", "failed", now - 3 * hour),
+            ("unnamed", "orx-unnamed", "failed", now - 3 * hour),
             ("recent", "orx-recent", "done", now - hour),
             ("shared", "openresearch", "done", now - 3 * hour),
             ("running", "orx-running", "running", now - 3 * hour),
@@ -1454,8 +1454,7 @@ class Workspace:
             billed("settled").map(|json| serde_json::from_str::<Value>(&json).unwrap()),
             Some(json!({"micros": 1_750_000, "currency": "USD"}))
         );
-        assert!(billed("free").unwrap().contains(r#""micros":0"#));
-        for id in ["recent", "shared", "running"] {
+        for id in ["unnamed", "recent", "shared", "running"] {
             assert_eq!(billed(id), None, "{id}");
         }
         drop((store, conn));

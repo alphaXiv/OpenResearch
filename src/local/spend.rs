@@ -195,7 +195,8 @@ fn share(micros: u64, (start, end): (i64, i64), (from, to): (i64, i64)) -> u64 {
 }
 
 /// Reads what Modal billed each finished run that had an app of its own, once Modal has
-/// settled its last hour. An app the settled report doesn't name cost nothing.
+/// settled its last hour. A run whose app the report doesn't name, as when the token now reaches
+/// another workspace, keeps its estimate.
 pub(crate) async fn read_modal_bills(data_dir: &Path, now: i64) -> Result<()> {
     let settled = (now - BILL_SETTLE).div_euclid(HOUR) * HOUR;
     let runs: Vec<_> = Store::open_at(data_dir.to_path_buf())?
@@ -209,10 +210,9 @@ pub(crate) async fn read_modal_bills(data_dir: &Path, now: i64) -> Result<()> {
     let billed = modal::billed_by_app(since.max(now - REPORT_SPAN + HOUR)).await?;
     let store = Store::open_at(data_dir.to_path_buf())?;
     for run in runs {
-        let micros = run
-            .app
-            .and_then(|app| billed.get(&app).copied())
-            .unwrap_or(0);
+        let Some(&micros) = run.app.and_then(|app| billed.get(&app)) else {
+            continue;
+        };
         let cost = Cost {
             micros,
             currency: "USD".into(),

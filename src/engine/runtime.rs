@@ -757,7 +757,13 @@ impl Runtime {
                 };
                 let backend = self.backend(&run)?;
                 let watched = WatchedRun { id: run.id, handle };
-                if let Some(quote) = backend.quote(&watched, &launch).await? {
+                let quote = tokio::time::timeout(
+                    Duration::from_secs(120),
+                    backend.quote(&watched, &launch),
+                )
+                .await
+                .unwrap_or_else(|_| Err(anyhow!("no answer within 2 minutes")))?;
+                if let Some(quote) = quote {
                     self.store()?.record_run_price(&run_id, &quote)?;
                 }
                 Ok::<_, crate::error::Error>(())
