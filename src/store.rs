@@ -1755,6 +1755,7 @@ impl Store {
             "ALTER TABLE ui_state ADD COLUMN model_sightings TEXT",
             "ALTER TABLE runs ADD COLUMN waiting_reason TEXT",
             "ALTER TABLE runs ADD COLUMN price_json TEXT",
+            "ALTER TABLE runs ADD COLUMN billed_json TEXT",
             "ALTER TABLE runs ADD COLUMN monitor_config_json TEXT",
             "ALTER TABLE runs ADD COLUMN stop_context_json TEXT",
             "ALTER TABLE chat_usage_samples ADD COLUMN cost_micros INTEGER",
