@@ -2,7 +2,6 @@ import { WorkspaceDomContext } from "./WorkspaceDom";
 import { Activity, useCallback, useEffect, useRef, useState } from "react";
 import { QueryClientProvider, useQuery, type QueryClient } from "@tanstack/react-query";
 import { RouterProvider } from "@tanstack/react-router";
-import type { RemoteSessionInfo } from "./api";
 import { createWorkspace, WorkspaceContext } from "./workspace";
 import { createQueryClient } from "./queries/client";
 import { createWorkspaceRouter } from "./router";
@@ -10,8 +9,11 @@ import { MachineSelectionContext } from "./machineSelection";
 import { askBeforeClosing } from "./closeDialog";
 import { QueryDevtools } from "./components/QueryDevtools";
 import { ServerStopped, UpdateHandoff } from "./components/UpdateBanner";
-import { Button, showAlert, Spinner } from "./components/ui";
+import { Button, Spinner } from "./components/ui";
+import { mutCreateRemoteSession } from "./queries/settings";
+import { getThemePreference } from "./theme";
 import { m } from "./paraglide/messages.js";
+import { getLocale } from "./paraglide/runtime.js";
 
 function createMachine(queryClient: QueryClient, id: string, initialLocation = "/") {
   const workspace = createWorkspace(
@@ -172,16 +174,27 @@ function MachineWorkspaces({
     refetchInterval: 2_000,
     refetchIntervalInBackground: true,
   });
+  const savedHostsQuery = useQuery({
+    ...owner.queries.listRemoteHostsQuery(),
+    enabled: canSwitch,
+  });
   const sessions = sessionsQuery.data ?? [];
+  const hosts = (savedHostsQuery.data ?? []).map((saved) => saved.host);
   const workspacesRef = useRef(workspaces);
   workspacesRef.current = workspaces;
 
-  function selectRemote(session: RemoteSessionInfo) {
-    if (session.status === "disconnected" && session.error === null && !session.canStartNewHost) {
-      void owner.api.reconnectRemoteSession(session.id).catch((error: unknown) =>
-        showAlert(error instanceof Error ? error.message : String(error), "error"),
-      );
-    }
+  async function connect(host: string) {
+    const session = await mutCreateRemoteSession.runAsHeadlessPromise(owner, host, {
+      theme: getThemePreference(),
+      locale: getLocale(),
+    }, {});
+    // A poll already in flight predates the session and would close its workspace.
+    const sessionsKey = owner.queries.listRemoteSessionsQuery().queryKey;
+    await owner.queryClient.cancelQueries({ queryKey: sessionsKey });
+    owner.setScopedQueryData(sessionsKey, (current) => [
+      ...(current ?? []).filter((entry) => entry.id !== session.id),
+      session,
+    ]);
     setWorkspaces((current) =>
       current.has(session.id)
         ? current
@@ -295,9 +308,11 @@ function MachineWorkspaces({
         owner,
         activeId,
         sessions,
+        hosts,
+        hostsError: savedHostsQuery.error?.message ?? null,
         canSwitch,
         selectLocal: () => setActiveId("local"),
-        selectRemote,
+        connect,
       }}
     >
       {canSwitch && <UpdateHandoff workspace={owner} />}

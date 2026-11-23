@@ -57,6 +57,7 @@ import {
   mutSaveVercelSetup,
   mutSetAutoUpdate,
   mutSetComputeDefault,
+  mutUpdateProjectSettings,
   mutSetEnvVar,
   mutSetGithubForNewProjects,
   mutSetReleaseChannel,
@@ -82,6 +83,7 @@ import {
   Moon,
   Plus,
   RefreshCw,
+  RotateCcw,
   Settings,
   SquareTerminal,
   Sun,
@@ -98,6 +100,11 @@ import {
   timeAgo,
   type EngineHost,
   type ComputeSettings,
+  type ComputeDefault,
+  type ProjectSettingsEdit,
+  type ProjectSettings,
+  type Autonomy,
+  DEFAULT_AUTONOMY,
   type ComputeTargetId,
   type ComputeTargetSummary,
   type EnvVar,
@@ -127,7 +134,9 @@ import {
   type InstalledCli,
   AlphaXivNotConnectedError,
   FieldErrors,
+  reasoningFor,
 } from "../api";
+import { selectionHarness } from "../modelSelection";
 
 import { releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
 import { useColoredMarkdown, useThemePreference, type ThemePreference } from "../theme";
@@ -135,13 +144,15 @@ import { useChatWidth, type ChatWidth } from "../chatWidth";
 import { m } from "../paraglide/messages.js";
 import { autoDir, fmtBytes, fmtClock, ltr } from "../i18n";
 import { setLocale, useLocale } from "../locale";
-import { isLocale, type Locale } from "../paraglide/runtime.js";
+import { getLocale, isLocale, type Locale } from "../paraglide/runtime.js";
 import { TokenForm } from "./GitTokenForm";
 import { renderNote } from "./agentNote";
 import { claudeProviderLabel } from "./claudeProvider";
 import { BackendBadge, BackendLogo } from "./BackendLogos";
 import { ProgressBar } from "./ProgressBar";
-import { OptionPicker } from "./ModelPicker";
+import { ModelPicker, OptionPicker } from "./ModelPicker";
+import { LIT_SOURCES, LitSourcesList, useProjectLitSources } from "./LitSourcesPicker";
+import { LIT_SOURCE_NAME } from "./LitSourceLogo";
 import { useDebouncedValue } from "./NewProjectForm";
 import { Popover } from "@base-ui/react/popover";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
@@ -2710,45 +2721,148 @@ const TARGET_USAGE: Partial<Record<ComputeTargetId, () => string>> = {
 
 const CUSTOM_FLAVOR_ID = "__custom__";
 
-function isCustomFlavor(backend: ComputeTargetId, flavor: string) {
-  return Boolean(flavor && !(FLAVOR_SUGGESTIONS[backend] ?? []).includes(flavor));
+function isCustomFlavor(backend: string, flavor: string) {
+  return Boolean(flavor && !(FLAVOR_SUGGESTIONS[backend as ComputeTargetId] ?? []).includes(flavor));
 }
 
-function DefaultDestinationEditor({
+function machineDefault(settings: ComputeSettings): ComputeDefault {
+  return {
+    backend: settings.configuredDefaultBackend ?? settings.defaultBackend ?? "local",
+    flavor: settings.configuredDefaultFlavor ?? settings.defaultFlavor,
+  };
+}
+
+function computeLabel(target: ComputeDefault) {
+  const destination = TARGET_LABELS[target.backend]();
+  return target.flavor ? `${destination} · ${target.flavor}` : destination;
+}
+
+/** A project setting that follows the default until the project sets its own. */
+function ProjectSettingRow({
+  title,
+  own,
+  defaultValue,
+  onReset,
+  children,
+}: {
+  title: string;
+  own: boolean;
+  /** How the default reads, for the line under an overridden setting. */
+  defaultValue: string;
+  onReset: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <div className={cn(PROJECT_DEFAULT_ROW_CLASS_NAME, "items-start")}>
+      <div className="min-w-0">
+        <div className="flex items-center gap-2">
+          <span dir="auto" className="project-default-title text-base font-medium">{title}</span>
+          {own && <Badge size="small">{m.project_setting_changed()}</Badge>}
+        </div>
+        <p>
+          {own ? m.project_setting_default_is({ value: defaultValue }) : m.project_setting_uses_default()}
+        </p>
+        {own && (
+          <Button type="button" variant="ghost" size="small" className="mt-2 -ms-2" onClick={onReset}>
+            <RotateCcw size={12} />{m.project_setting_reset()}
+          </Button>
+        )}
+      </div>
+      <div className="flex min-w-0 shrink-0 justify-end">{children}</div>
+    </div>
+  );
+}
+
+function ProjectComputeDefault({ settings, project, title }: { settings: ComputeSettings; project: Project; title: string }) {
+  const workspace = useWorkspace();
+  const own = settings.projectDefault ?? null;
+  const fallback = machineDefault(settings);
+  const save = (compute: ComputeDefault | null) =>
+    mutUpdateProjectSettings.runAsHeadlessPromise(workspace, project.id, { compute }, {});
+  return (
+    <ProjectSettingRow title={title} own={own !== null} defaultValue={computeLabel(fallback)} onReset={() => void save(null).catch(showSaveError)}>
+      <DestinationPicker settings={settings} value={own} fallback={fallback} label={title} onSave={save} />
+    </ProjectSettingRow>
+  );
+}
+
+function showSaveError(error: unknown) {
+  showAlert(error instanceof Error ? error.message : String(error), "error");
+}
+
+/** Where new runs go: the project's own default when one is open, then the one for all projects. */
+function DefaultComputeSection({ settings, project }: { settings: ComputeSettings; project: Project | null }) {
+  const workspace = useWorkspace();
+  const saveMachine = (target: ComputeDefault | null) =>
+    mutSetComputeDefault.runAsHeadlessPromise(workspace, { backend: target?.backend ?? null, flavor: target?.flavor ?? null }, {});
+  return (
+    <section className="mb-8">
+      <h2 className="mt-0 mx-0 mb-2 text-lg">{m.settings_page_default_destination()}</h2>
+      <div className={SETTINGS_CARD_CLASS_NAME}>
+        {project && <ProjectComputeDefault settings={settings} project={project} title={project.name} />}
+        <div className={cn(PROJECT_DEFAULT_ROW_CLASS_NAME, "items-start")}>
+          <div className="min-w-0">
+            <div className="project-default-title text-base font-medium">{m.settings_compute_all_projects()}</div>
+            <p>{m.settings_compute_all_projects_note()}</p>
+          </div>
+          <div className="flex min-w-0 shrink-0 justify-end">
+            <DestinationPicker settings={settings} value={machineDefault(settings)} label={m.settings_compute_all_projects()} onSave={saveMachine} />
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+const DEFAULT_TARGET_ID = "__default__";
+
+/**
+ * Picks a default compute target. With `fallback`, the first choice follows it and
+ * saves as `null`; `value` is null while it does.
+ */
+function DestinationPicker({
   settings,
-  projectId,
+  value,
+  fallback,
+  label,
+  onSave,
 }: {
   settings: ComputeSettings;
-  projectId?: string;
+  value: ComputeDefault | null;
+  fallback?: ComputeDefault;
+  label: string;
+  onSave: (target: ComputeDefault | null) => Promise<unknown>;
 }) {
-  const workspace = useWorkspace();
-
-  const savedBackend = settings.configuredDefaultBackend ?? settings.defaultBackend ?? "local";
-  const savedFlavor = settings.defaultFlavor ?? "";
+  const savedBackend: ComputeTargetId | typeof DEFAULT_TARGET_ID = value?.backend ?? DEFAULT_TARGET_ID;
+  const savedFlavor = value?.flavor ?? "";
   const [backend, setBackend] = useState(savedBackend);
   const [flavor, setFlavor] = useState(savedFlavor);
   const [customFlavor, setCustomFlavor] = useState(isCustomFlavor(savedBackend, savedFlavor));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const target = settings.targets.find((candidate) => candidate.id === backend);
-  const choices = settings.targets.filter(
-    (candidate) => candidate.configured || candidate.id === savedBackend,
-  );
-  const flavored = FLAVORED_TARGETS.includes(backend);
-  const flavorRequired = FLAVOR_REQUIRED.includes(backend);
-  const flavorSuggestions = FLAVOR_SUGGESTIONS[backend] ?? [];
+  const targetChoices = settings.targets
+    .filter((candidate) => candidate.configured || candidate.id === savedBackend)
+    .map((choice) => ({ id: choice.id, label: TARGET_LABELS[choice.id]() }));
+  const choices = fallback
+    ? [{ id: DEFAULT_TARGET_ID, label: m.project_setting_default_choice({ value: computeLabel(fallback) }) }, ...targetChoices]
+    : targetChoices;
+  const picked = backend === DEFAULT_TARGET_ID ? null : backend;
+  const flavored = picked !== null && FLAVORED_TARGETS.includes(picked);
+  const flavorRequired = picked !== null && FLAVOR_REQUIRED.includes(picked);
+  const flavorSuggestions = picked ? FLAVOR_SUGGESTIONS[picked] ?? [] : [];
   const unchanged =
     backend === savedBackend && (!flavored || flavor.trim() === savedFlavor);
-  const destination = TARGET_LABELS[backend]();
-  const usage = TARGET_USAGE[backend];
+  const destination = picked ? TARGET_LABELS[picked]() : "";
+  const usage = picked ? TARGET_USAGE[picked] : undefined;
   const helperText =
     saving
       ? m.settings_updating_default_destination()
       : flavorRequired && !flavor.trim()
-        ? m.settings_choose_flavor_for_runs({ destination })
+        ? m.settings_flavor_unsaved({ destination })
         : backend === "ssh"
           ? m.settings_new_runs_use_ssh()
-          : m.settings_new_runs_use_destination({ destination });
+          : null;
 
   useEffect(() => {
     setBackend(savedBackend);
@@ -2756,17 +2870,16 @@ function DefaultDestinationEditor({
     setCustomFlavor(isCustomFlavor(savedBackend, savedFlavor));
   }, [savedBackend, savedFlavor]);
 
-  async function save(nextBackend: ComputeTargetId, nextFlavor: string) {
-    const nextFlavored = FLAVORED_TARGETS.includes(nextBackend);
-    if (saving || (FLAVOR_REQUIRED.includes(nextBackend) && !nextFlavor.trim())) return;
+  async function save(nextBackend: ComputeTargetId | typeof DEFAULT_TARGET_ID, nextFlavor: string) {
+    if (saving) return;
+    const target = nextBackend === DEFAULT_TARGET_ID
+      ? null
+      : { backend: nextBackend, flavor: FLAVORED_TARGETS.includes(nextBackend) ? nextFlavor.trim() || null : null };
+    if (target && FLAVOR_REQUIRED.includes(target.backend) && !target.flavor) return;
     setSaving(true);
     setError(null);
     try {
-      await mutSetComputeDefault.runAsHeadlessPromise(workspace, {
-        backend: nextBackend,
-        flavor: nextFlavored ? nextFlavor.trim() || null : null,
-        projectId,
-      }, {});
+      await onSave(target);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setBackend(savedBackend);
@@ -2778,6 +2891,13 @@ function DefaultDestinationEditor({
   }
 
   function changeBackend(id: string) {
+    if (id === DEFAULT_TARGET_ID) {
+      setBackend(DEFAULT_TARGET_ID);
+      setFlavor("");
+      setCustomFlavor(false);
+      if (savedBackend !== DEFAULT_TARGET_ID) void save(DEFAULT_TARGET_ID, "");
+      return;
+    }
     const next = settings.targets.find((candidate) => candidate.id === id);
     if (!next) return;
     setBackend(next.id);
@@ -2798,28 +2918,25 @@ function DefaultDestinationEditor({
   }
 
   return (
-    <section className="mb-8">
-      <h2 className="mt-0 mx-0 mb-2 text-lg">{m.settings_page_default_destination()}</h2>
+    <div className="w-72 max-w-full">
       <div>
         <form
-          className="grid grid-cols-[minmax(12rem,18rem)_minmax(12rem,18rem)] items-start gap-3"
+          aria-label={label}
+          className="flex flex-col gap-2"
           onSubmit={(event) => {
             event.preventDefault();
             if (!unchanged) void save(backend, flavor);
           }}
         >
           <OptionPicker
-            choices={choices.map((choice) => ({
-              id: choice.id,
-              label: TARGET_LABELS[choice.id](),
-            }))}
+            choices={choices}
             value={backend}
             variant="field"
             dropDown
             disabled={saving}
             renderIcon={(choice) => {
-              const target = settings.targets.find((candidate) => candidate.id === choice.id);
-              return target ? <BackendLogo kind={TARGET_KIND[target.id]} size={16} /> : null;
+              const id = choice.id === DEFAULT_TARGET_ID ? fallback?.backend : choice.id;
+              return id ? <BackendLogo kind={TARGET_KIND[id as ComputeTargetId]} size={16} /> : null;
             }}
             onSelect={changeBackend}
           />
@@ -2892,9 +3009,9 @@ function DefaultDestinationEditor({
           </p>
         )}
       </div>
-      <p className="mt-2 mb-0 text-sm leading-relaxed text-subtext">{helperText}</p>
+      {helperText && <p className="mt-2 mb-0 text-sm leading-relaxed text-subtext">{helperText}</p>}
       {usage && <p className="mt-1 mb-0 text-sm leading-relaxed text-subtext">{usage()}</p>}
-    </section>
+    </div>
   );
 }
 
@@ -3099,7 +3216,7 @@ function ComputeTab({
 
   // Preserve server order except for the selected default, which leads its section.
   const targets = settings ? settings.targets : null;
-  const defaultBackend = settings?.configuredDefaultBackend ?? settings?.defaultBackend;
+  const defaultBackend = settings ? (settings.projectDefault ?? machineDefault(settings)).backend : undefined;
   const orderedTargets = targets
     ? [...targets].sort(
       (a, b) => Number(b.id === defaultBackend) - Number(a.id === defaultBackend),
@@ -3178,10 +3295,7 @@ function ComputeTab({
         </LoadingRow>
       ) : (
         <>
-          <DefaultDestinationEditor
-            settings={settings}
-            projectId={project?.id}
-          />
+          <DefaultComputeSection settings={settings} project={project} />
           <section className="mb-8">
             <h2 className="mt-0 mx-0 mb-2 text-lg">{m.settings_page_ready_to_use()}</h2>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -5091,7 +5205,183 @@ export function SettingsHeader({ active, onSelect, leading }: { active: Tab; onS
 }
 
 /** One project's name, folder, GitHub publishing and deletion. */
-function ProjectSettings({ project, onRemoved }: { project: Project; onRemoved: () => void }) {
+/** A text setting saved when it loses focus or on Enter; empty follows the default the placeholder shows. */
+function DefaultedInput({ label, value, placeholder, onCommit }: { label: string; value: string; placeholder: string; onCommit: (value: string) => void }) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+  const commit = () => {
+    if (draft.trim() !== value) onCommit(draft.trim());
+  };
+  return (
+    <label className="flex flex-col gap-1 text-sm text-subtext">
+      {label}
+      <Input
+        value={draft}
+        placeholder={placeholder}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => { if (event.key === "Enter") commit(); }}
+        autoComplete="off"
+        spellCheck={false}
+      />
+    </label>
+  );
+}
+
+const AUTONOMIES: Autonomy[] = ["agentic", "copilot"];
+
+function autonomyLabel(autonomy: Autonomy) {
+  return autonomy === "copilot" ? m.model_picker_autonomy_copilot() : m.model_picker_autonomy_agentic();
+}
+
+const SLURM_FIELDS = [
+  { key: "account", label: m.settings_page_account },
+  { key: "partition", label: m.settings_page_partition },
+  { key: "qos", label: m.settings_slurm_qos },
+] as const;
+
+/**
+ * The project's own `#SBATCH` defaults and Kubernetes namespace, shown once its runs go
+ * to that backend, or while it still holds values for one.
+ */
+function ProjectClusterDefaults({ compute, settings, save }: { compute: ComputeSettings; settings: ProjectSettings; save: (edit: ProjectSettingsEdit) => void }) {
+  const { getSlurmSettingsQuery, getK8sSettingsQuery } = useWorkspace().queries;
+  const own = settings.slurm ?? {};
+  const backend = (compute.projectDefault ?? machineDefault(compute)).backend;
+  const showSlurm = backend === "slurm" || Object.keys(own).length > 0;
+  const showK8s = backend === "k8s" || settings.k8sNamespace !== undefined;
+  const slurm = useQuery({ ...getSlurmSettingsQuery(), enabled: showSlurm });
+  const k8s = useQuery({ ...getK8sSettingsQuery(), enabled: showK8s });
+
+  const machineSlurm = SLURM_FIELDS.flatMap(({ key, label }) => slurm.data?.[key] ? [`${label()} ${slurm.data[key]}`] : []);
+  return (
+    <>
+      {showSlurm && slurm.data && (
+        <ProjectSettingRow
+          title={TARGET_LABELS.slurm()}
+          own={Object.keys(own).length > 0}
+          defaultValue={machineSlurm.length > 0 ? new Intl.ListFormat(getLocale(), { type: "unit" }).format(machineSlurm) : m.settings_page_cluster_default()}
+          onReset={() => save({ slurm: {} })}
+        >
+          <div className="flex w-72 max-w-full flex-col gap-2">
+            {SLURM_FIELDS.map(({ key, label }) => (
+              <DefaultedInput
+                key={key}
+                label={label()}
+                value={own[key] ?? ""}
+                placeholder={slurm.data?.[key] ?? m.settings_page_cluster_default()}
+                onCommit={(value) => save({ slurm: { ...own, [key]: value || undefined } })}
+              />
+            ))}
+          </div>
+        </ProjectSettingRow>
+      )}
+      {showK8s && k8s.data && (
+        <ProjectSettingRow
+          title={TARGET_LABELS.k8s()}
+          own={settings.k8sNamespace !== undefined}
+          defaultValue={k8s.data.namespace}
+          onReset={() => save({ k8sNamespace: null })}
+        >
+          <div className="w-72 max-w-full">
+            <DefaultedInput
+              label={m.settings_page_namespace()}
+              value={settings.k8sNamespace ?? ""}
+              placeholder={k8s.data.namespace}
+              onCommit={(value) => save({ k8sNamespace: value || null })}
+            />
+          </div>
+        </ProjectSettingRow>
+      )}
+    </>
+  );
+}
+
+/** What new chats and runs in the project start with; each follows the default until the project sets its own. */
+function ProjectDefaults({ project, onOpenAgents }: { project: Project; onOpenAgents: () => void }) {
+  const workspace = useWorkspace();
+  const { getComputeSettingsQuery, getProjectSettingsQuery, getUiStateQuery, getHarnessesQuery } = workspace.queries;
+
+  const compute = useQuery(getComputeSettingsQuery(project.id));
+  const settings = useQuery(getProjectSettingsQuery(project.id));
+  const { data: uiState } = useQuery(getUiStateQuery());
+  const { data: harnesses = [] } = useQuery(getHarnessesQuery());
+  const lit = useProjectLitSources(project.id);
+  const failed = compute.error ?? settings.error ?? lit.error;
+  if (!compute.data || !settings.data || !lit.sources) {
+    return failed
+      ? <div className="error">{failed.message}</div>
+      : <LoadingRow><Spinner /> {m.settings_page_loading()}</LoadingRow>;
+  }
+
+  const agent = settings.data.agent ?? null;
+  const lastAutonomy = uiState?.preferredAutonomy ?? DEFAULT_AUTONOMY;
+  const shownAgent = agent ?? uiState?.preferredAgent ?? null;
+  const agentHarness = selectionHarness(harnesses, shownAgent);
+  const reasoning = reasoningFor(agentHarness, shownAgent?.model);
+  const machineSources = LIT_SOURCES.filter((source) => !lit.sources.machineOff.includes(source)).map((source) => LIT_SOURCE_NAME[source]);
+  const save = (edit: ProjectSettingsEdit) =>
+    mutUpdateProjectSettings.runAsHeadlessPromise(workspace, project.id, edit, {}).catch(showSaveError);
+  return (
+    <>
+      <ProjectComputeDefault settings={compute.data} project={project} title={m.workspace_default_compute()} />
+      <ProjectClusterDefaults compute={compute.data} settings={settings.data} save={(edit) => void save(edit)} />
+      <ProjectSettingRow
+        title={m.project_settings_agent_title()}
+        own={agent !== null}
+        defaultValue={m.project_settings_agent_last_used()}
+        onReset={() => void save({ agent: null })}
+      >
+        <ModelPicker
+          value={shownAgent}
+          onSelect={(selection) => void save({ agent: selection })}
+          onOpenSettings={onOpenAgents}
+          reasoningChoices={agentHarness?.agentReady ? reasoning.choices : []}
+          defaultReasoningId={reasoning.defaultId}
+          onSelectReasoning={(id) => { if (shownAgent) void save({ agent: { ...shownAgent, reasoningLevel: id } }); }}
+        />
+      </ProjectSettingRow>
+      <ProjectSettingRow
+        title={m.project_settings_autonomy_title()}
+        own={settings.data.autonomy !== undefined}
+        defaultValue={autonomyLabel(lastAutonomy)}
+        onReset={() => void save({ autonomy: null })}
+      >
+        <div className="w-72 max-w-full">
+          <OptionPicker
+            choices={[
+              { id: DEFAULT_TARGET_ID, label: m.project_setting_default_choice({ value: autonomyLabel(lastAutonomy) }) },
+              ...AUTONOMIES.map((id) => ({ id, label: autonomyLabel(id) })),
+            ]}
+            value={settings.data.autonomy ?? DEFAULT_TARGET_ID}
+            variant="field"
+            dropDown
+            onSelect={(id) => void save({ autonomy: id === DEFAULT_TARGET_ID ? null : id as Autonomy })}
+          />
+        </div>
+      </ProjectSettingRow>
+      <ProjectSettingRow
+        title={m.project_settings_lit_title()}
+        own={lit.sources.own}
+        defaultValue={machineSources.length > 0 ? new Intl.ListFormat(getLocale(), { type: "conjunction" }).format(machineSources) : m.project_settings_lit_none()}
+        onReset={() => void save({ disabledLitSources: null })}
+      >
+        <div className="w-56 rounded-lg border border-border p-1">
+          <LitSourcesList
+            disabled={lit.sources.disabled}
+            onToggle={(source) => {
+              const next = lit.sources.disabled.includes(source) ? lit.sources.disabled.filter((off) => off !== source) : [...lit.sources.disabled, source];
+              const followsDefault = next.length === lit.sources.machineOff.length && next.every((off) => lit.sources.machineOff.includes(off));
+              void save({ disabledLitSources: followsDefault ? null : next });
+            }}
+          />
+        </div>
+      </ProjectSettingRow>
+    </>
+  );
+}
+
+function ProjectSettings({ project, onRemoved, onOpenAgents }: { project: Project; onRemoved: () => void; onOpenAgents: () => void }) {
   const workspace = useWorkspace();
   const revealLabel = useFileManagerLabel();
   const nameId = useId();
@@ -5114,7 +5404,7 @@ function ProjectSettings({ project, onRemoved }: { project: Project; onRemoved: 
       onSettled: () => setSaving(false),
     });
   };
-  const setIcon = (icon: ProjectIcon) => {
+  const setIcon = (icon: ProjectIcon | null) => {
     setError(null);
     mutUpdateProject.runWithOptions(workspace, project.id, { icon }, {
       onError: (err) => setError(err instanceof Error ? err.message : String(err)),
@@ -5133,7 +5423,7 @@ function ProjectSettings({ project, onRemoved }: { project: Project; onRemoved: 
             <form className={`${PROJECT_DEFAULT_ROW_CLASS_NAME} flex-wrap gap-y-2`} onSubmit={(event) => { event.preventDefault(); rename(); }}>
               <label htmlFor={nameId} className="project-default-title text-base font-medium">{m.new_project_form_project_name()}</label>
               <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
-                <ProjectIconButton project={project} name={name} value={project.icon} onChange={setIcon} disabled={saving} />
+                <ProjectIconButton project={project} name={name} onChange={setIcon} disabled={saving} />
                 <Input id={nameId} value={name} disabled={saving} onChange={(event) => setDraft(event.target.value)} className="w-72 min-w-0" />
                 <Button type="submit" disabled={!changed || saving}>{saving && <Spinner />}{m.common_save()}</Button>
               </div>
@@ -5147,6 +5437,11 @@ function ProjectSettings({ project, onRemoved }: { project: Project; onRemoved: 
               <Button type="button" className="shrink-0" onClick={reveal}>{revealLabel}</Button>
             </div>
           </div>
+        </section>
+        <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+          <h2>{m.project_settings_defaults_heading()}</h2>
+          <p className="mt-0 mb-3 text-base leading-relaxed text-text">{m.project_settings_defaults_note()}</p>
+          <div className={SETTINGS_CARD_CLASS_NAME}><ProjectDefaults project={project} onOpenAgents={onOpenAgents} /></div>
         </section>
         <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
           <h2>{m.settings_page_git_hub_publishing()}</h2>
@@ -5223,7 +5518,7 @@ export function SettingsView({
           )}
         </div>
       )}
-      {tab === "project" && project && <ProjectSettings key={project.id} project={project} onRemoved={onProjectRemoved} />}
+      {tab === "project" && project && <ProjectSettings key={project.id} project={project} onRemoved={onProjectRemoved} onOpenAgents={() => onSelectTab("agents")} />}
       {tab === "agents" && (
         <>
           <p className="mt-0 mx-0 mb-5 text-base leading-relaxed text-text">{m.settings_agents_intro()}</p>

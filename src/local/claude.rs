@@ -400,9 +400,6 @@ struct Record {
     /// The model in the child's `ORX_INVOCATION_CONTEXT`.
     #[serde(default)]
     invocation_model: Option<String>,
-    /// Whether the child's usage totals already count a turn's, so the next one starts from them.
-    #[serde(default)]
-    usage_started: bool,
 }
 
 impl Record {
@@ -459,8 +456,6 @@ pub struct ClaudeClient {
     config: std::sync::Mutex<SpawnConfig>,
     /// The inherited model stays fixed even when the catalog resolves its alias differently.
     invocation_model: Option<String>,
-    /// Compaction can serve a turn before this process records any usage.
-    usage_started: AtomicBool,
     gate: Option<String>,
     auth: AuthIdentity,
     auth_generation: AtomicU64,
@@ -516,7 +511,6 @@ impl ClaudeClient {
             turn: std::sync::Mutex::new(turn),
             config: std::sync::Mutex::new(record.config),
             invocation_model: record.invocation_model,
-            usage_started: AtomicBool::new(record.usage_started),
             gate: record.gate,
             auth: record.auth,
             auth_generation: AtomicU64::new(auth_generation),
@@ -537,7 +531,6 @@ impl ClaudeClient {
             started_at_ms: self.started_at_ms,
             background: self.turn.lock().unwrap().background.clone(),
             invocation_model: self.invocation_model.clone(),
-            usage_started: self.usage_started.load(Ordering::Relaxed),
         }
         .owner(&self.session_id)
     }
@@ -598,26 +591,6 @@ impl ClaudeClient {
     /// The config this child is currently running under.
     pub fn config(&self) -> SpawnConfig {
         self.config.lock().unwrap().clone()
-    }
-
-    pub(crate) fn begin_usage_attempt(
-        &self,
-        store: &crate::store::Store,
-        execution: &str,
-        prefix: &str,
-        native_scope: Option<&str>,
-    ) -> Result<()> {
-        let native_scope = if self.usage_started.load(Ordering::Relaxed) {
-            native_scope
-        } else {
-            None
-        };
-
-        store.begin_native_usage_attempt(execution, prefix, "claude-code", native_scope)?;
-        if !self.usage_started.swap(true, Ordering::Relaxed) {
-            self.publish_record();
-        }
-        Ok(())
     }
 
     pub fn auth_generation(&self) -> u64 {
@@ -1248,7 +1221,6 @@ async fn spawn_client(
         started_at_ms: crate::store::now_ms(),
         background: BTreeMap::new(),
         invocation_model,
-        usage_started: false,
     };
     let kept = keep::spawn(keep::Keep {
         command: cmd.as_std(),
@@ -1988,7 +1960,7 @@ impl ClaudeHost {
                 "Claude is still finishing a background task. Wait for its reply, or ask Claude to stop the task."
             ));
         }
-        self.kill_session_for(session_id, "fork-switched", false)
+        self.kill_session_for(session_id, "stopped-idle", false)
             .await;
         Ok(())
     }
@@ -2130,7 +2102,6 @@ pub(crate) mod tests {
             started_at_ms: crate::store::now_ms(),
             background: BTreeMap::new(),
             invocation_model: None,
-            usage_started: false,
         }
     }
 

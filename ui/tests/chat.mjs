@@ -64,6 +64,7 @@ export async function renderChat(path, { sessions = [session("s")], transcripts 
     ...(remote ? { "GET /_orx/runtime": () => remoteRuntime(remoteSession) } : {}),
     "GET /api/projects": () => ({ projects }),
     "GET /api/projects/activity": () => ({ activity: [] }),
+    ...Object.fromEntries(projects.map(({ id }) => [`GET /api/projects/${id}/settings`, () => ({})])),
     "GET /api/chat/sessions": (_, url) => ({ sessions: sessions.filter((row) => url.includes(`projectId=${row.projectId}`)) }),
     "GET /api/chat/shown-runs": () => [],
     "GET /api/harnesses": () => ({ harnesses }),

@@ -3,10 +3,10 @@ import { useMutate } from "@clo/react-mutation";
 import { WorkspaceDomContext } from "../WorkspaceDom";
 import { useWorkspace } from "../workspace";
 import { useMachines } from "../machineSelection";
-import { showRemoteHostDialog } from "./RemoteHostDialog";
+import { forgetMachine, showRemoteHostDialog } from "./RemoteHostDialog";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 
-import { Check, ChevronsUpDown, CloudOff, Info, Laptop, Plus, Power, Server, Unplug } from "lucide-react";
+import { Check, ChevronsUpDown, CloudOff, Info, Laptop, Plus, Power, Server, Trash2, Unplug } from "lucide-react";
 import { type RemoteSessionStatus, type RuntimeInfo } from "../api";
 import { autoDir, ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
@@ -158,29 +158,33 @@ export function WorkspaceConnection({
                           <span className="min-w-0 flex-1 truncate">{m.projects_local()}</span>
                           <Selected />
                         </Menu.RadioItem>
-                        {machines.sessions.map((session) => (
-                          <Menu.RadioItem
-                            nativeButton
-                            key={session.id}
-                            value={session.id}
-                            closeOnClick
-                            render={<MenuItem className={ITEM} />}
-                            onClick={() => {
-                              switching.current =
-                                machines.activeId !== session.id;
-                              setOpen(false);
-                              machines.selectRemote(session);
-                            }}
-                          >
-                            <Server size={14} className={ICON} aria-hidden="true" />
-                            <span className="min-w-0 flex-1 truncate">
-                              {session.host}
-                            </span>
-                            <SessionStatus status={session.status} />
-                            <Selected />
-                          </Menu.RadioItem>
-                        ))}
+                        {machines.hosts.map((host) => {
+                          const session = machines.sessions.find((entry) => entry.host === host);
+                          return (
+                            <Menu.RadioItem
+                              nativeButton
+                              key={host}
+                              value={session?.id ?? `host:${host}`}
+                              closeOnClick
+                              render={<MenuItem className={ITEM} />}
+                              onClick={() => {
+                                setOpen(false);
+                                machines.connect(host).catch((error: unknown) =>
+                                  showAlert(error instanceof Error ? error.message : String(error), "error"),
+                                );
+                              }}
+                            >
+                              <Server size={14} className={ICON} aria-hidden="true" />
+                              <span className="min-w-0 flex-1 truncate">{host}</span>
+                              <SessionStatus status={session?.status ?? "disconnected"} />
+                              <Selected />
+                            </Menu.RadioItem>
+                          );
+                        })}
                       </Menu.RadioGroup>
+                      {machines.hostsError && (
+                        <p role="alert" className="m-0 px-2 py-1.5 text-xs text-accent-red">{machines.hostsError}</p>
+                      )}
                       <Menu.Item
                         nativeButton
                         render={<MenuItem className={ITEM} />}
@@ -248,6 +252,16 @@ export function WorkspaceConnection({
                           <Info size={14} />
                         </Tooltip>
                       </div>
+                      {machines.canSwitch && (
+                        <Menu.Item
+                          nativeButton
+                          render={<MenuItem className={ITEM} />}
+                          onClick={() => forgetMachine(workspace.dialogs, machines.owner, runtime.session.host)}
+                        >
+                          <Trash2 size={14} className={ICON} aria-hidden="true" />
+                          {m.remote_forget_machine()}
+                        </Menu.Item>
+                      )}
                       <Menu.Item
                         nativeButton
                         render={

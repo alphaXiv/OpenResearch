@@ -9,7 +9,7 @@ use crate::error::{anyhow, Result};
 use crate::LitSource;
 
 pub async fn run(args: crate::DiscoverArgs) -> Result<()> {
-    let disabled = crate::config::disabled_lit_sources();
+    let disabled = crate::local::disabled_lit_sources_here()?;
     let results: Vec<LitHit> = match args.command {
         crate::DiscoverCommand::Keyword(args) => {
             ensure_source_enabled(LitSource::Alphaxiv, &disabled)?;

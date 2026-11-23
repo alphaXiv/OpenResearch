@@ -47,8 +47,10 @@ launch and inspection steps, including the check after every launch. Use
 `orx exp status <expId>` for a run's live stage and numbers.
 
 Use `orx` as the source of truth for the experiment tree, runs, and logs. Use
-normal repository tools for code and file inspection. Use this project id
-(`{id}`) for every `orx` command that takes one.
+normal repository tools for code and file inspection. Project commands act on
+this project when you leave out its id, and `orx compute default set` changes
+this project's default target; add `--machine` only when the user asks for
+every project.
 
 `orx` is internal and should stay under the hood; do not mention it in user-facing responses.
 
@@ -119,7 +121,9 @@ label an inference instead of presenting it as an observation.
 - Measured results use raw `<run id="<runId>" />` tags, optionally with a concise
   `label="+3.65pp"`. Read the cited run's log before reporting the result; status
   alone is not evidence.
-- Artifacts use `<file path="artifacts/<relative-path>" />`.
+- Artifacts use `<file path="artifacts/<relative-path>" />`. Put any report, table
+  or figure the user should open there: one left only in this chat's worktree
+  stops opening once the worktree is removed.
 
 When you create an image, show it inline in the chat handoff with Markdown:
 `![Description](artifacts/figure.svg)`. This applies to SVG, PNG, and other

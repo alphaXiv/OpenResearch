@@ -340,7 +340,7 @@ fn id_token_nonce(id_token: &str) -> Option<String> {
     jwt_claim(id_token, "nonce")
 }
 
-fn jwt_claim(token: &str, name: &str) -> Option<String> {
+pub(crate) fn jwt_claim(token: &str, name: &str) -> Option<String> {
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(token.split('.').nth(1)?)
         .ok()?;
@@ -388,7 +388,12 @@ fn forwarded_path() -> PathBuf {
 /// Own or forwarded; a forwarded token that lapsed still counts, so agents
 /// don't restart each time a laptop goes offline.
 pub fn signed_in() -> bool {
-    tokens_path().exists() || forwarded_path().exists()
+    signed_in_checked().unwrap_or(false)
+}
+
+/// [`signed_in`], with an error when the token files cannot be checked.
+pub fn signed_in_checked() -> std::io::Result<bool> {
+    Ok(tokens_path().try_exists()? || forwarded_path().try_exists()?)
 }
 
 fn load() -> Option<Tokens> {

@@ -91,8 +91,7 @@ exactly one template, use it; if several, ask which unless the scope above names
 one; if none, use the skill's default preamble.
 
 Method:
-1. Ground the paper in what actually ran. Read the tree with `orx project view
-   <projectId>`, then use `orx logs` to locate each file and read every number
+1. Ground the paper in what actually ran. Read the tree with `orx project view`, then use `orx logs` to locate each file and read every number
    you intend to report from it (the `orx-logs` skill covers this). Never
    write a metric you have not read
    out of a run; if something is not measured yet, say so in the text.

@@ -32,6 +32,7 @@ use tower::ServiceExt as _;
 
 use crate::commands::remote_host::{
     ControlResponse, HostDescriptor, ATTACHED_MARKER, CONTROL_PROTOCOL, HOST_MARKER,
+    HOST_NOT_RESPONDING,
 };
 use crate::error::{anyhow, Result};
 use crate::jobs::ssh::{HostKeyPolicy, SshTarget};
@@ -406,20 +407,40 @@ impl RemoteSessionManager {
         Ok(info)
     }
 
+    /// Closes the host's session, if any, and drops it from the list.
+    pub(crate) async fn forget(&self, host: &str) -> Result<()> {
+        let session = {
+            let mut registry = self.registry.lock().await;
+            let Some(id) = registry.by_host.remove(host) else {
+                return Ok(());
+            };
+            registry.by_id.remove(&id)
+        };
+        match session {
+            Some(session) => close_session(&session).await,
+            None => Ok(()),
+        }
+    }
+
     pub(crate) async fn shutdown(&self) {
         let sessions = {
             let registry = self.registry.lock().await;
             registry.by_id.values().cloned().collect::<Vec<_>>()
         };
         for session in sessions {
-            if let Err(error) = disconnect_session(&session).await {
+            if let Err(error) = close_session(&session).await {
                 eprintln!("Could not disconnect a remote session during shutdown: {error}");
-            }
-            if let Some(task) = session.gateway_task.lock().await.take() {
-                task.abort();
             }
         }
     }
+}
+
+async fn close_session(session: &Arc<RemoteSession>) -> Result<()> {
+    let disconnected = disconnect_session(session).await;
+    if let Some(task) = session.gateway_task.lock().await.take() {
+        task.abort();
+    }
+    disconnected.map(drop)
 }
 
 fn validated_dev_origin() -> Option<String> {
@@ -1403,6 +1424,10 @@ async fn forward_alphaxiv(
 }
 
 fn retryable_ssh_transport_error(error: &str) -> bool {
+    // A busy host that misses the control timeout is still running; give it another chance.
+    if error.contains(HOST_NOT_RESPONDING) {
+        return true;
+    }
     error.contains("failed (exit 255)")
         && ![
             "Permission denied",
@@ -3004,14 +3029,31 @@ async fn ensure_remote_host(
             )
         },
     );
-    let output =
-        crate::jobs::ssh::direct_run(target, &remote_host_cmd(path, paths, &operation)?, None)
-            .await?;
+    let command = remote_host_cmd(path, paths, &operation)?;
+    let output = retry_busy_host(|| crate::jobs::ssh::direct_run(target, &command, None)).await?;
     output
         .lines()
         .find_map(|line| line.strip_prefix(HOST_MARKER))
         .and_then(|json| serde_json::from_str(json).ok())
         .ok_or_else(|| anyhow!("The remote OpenResearch host returned an invalid descriptor."))
+}
+
+/// A host that misses one control timeout is busy, not gone: ask again before reporting it.
+async fn retry_busy_host<T, F, Fut>(mut run: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut retries = 2;
+    loop {
+        match run().await {
+            Err(error) if retries > 0 && error.to_string().contains(HOST_NOT_RESPONDING) => {
+                retries -= 1;
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            result => return result,
+        }
+    }
 }
 
 fn parse_control_response(output: &str) -> Option<ControlResponse> {
@@ -3442,6 +3484,33 @@ mod tests {
         forwarding.abort();
     }
 
+    #[tokio::test]
+    async fn forgetting_a_host_closes_its_session_and_drops_it_from_the_list() {
+        let manager = RemoteSessionManager::new();
+        let session = Arc::new(sample_session());
+        let gateway = tokio::spawn(std::future::pending::<()>());
+        let gateway_ended = gateway.abort_handle();
+        *session.gateway_task.lock().await = Some(gateway);
+        {
+            let mut registry = manager.registry.lock().await;
+            registry.by_host.insert("example".into(), "session".into());
+            registry.by_id.insert("session".into(), session.clone());
+        }
+
+        manager.forget("other").await.unwrap();
+        assert_eq!(manager.list().await.len(), 1);
+
+        manager.forget("example").await.unwrap();
+        assert!(manager.list().await.is_empty());
+        assert!(manager.get("session").await.is_none());
+        assert!(matches!(
+            session.info.read().await.status,
+            RemoteSessionStatus::Disconnected
+        ));
+        tokio::task::yield_now().await;
+        assert!(gateway_ended.is_finished());
+    }
+
     #[test]
     fn stale_prepare_cannot_restore_a_cleared_expected_instance() {
         let session = sample_session();
@@ -3480,6 +3549,44 @@ mod tests {
         assert!(!retryable_ssh_transport_error(
             "ssh ini failed (exit 1): expected host is no longer running"
         ));
+        assert!(retryable_ssh_transport_error(
+            "ssh ini failed (exit 1): orx remote-host: The persistent OpenResearch host is not responding. Try again in a moment."
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_busy_host_is_asked_again_before_it_is_reported() {
+        let busy = || anyhow!("ssh ini failed (exit 1): orx remote-host: {HOST_NOT_RESPONDING}");
+        let mut calls = 0;
+        let recovered = retry_busy_host(|| {
+            calls += 1;
+            let result = if calls < 3 { Err(busy()) } else { Ok(calls) };
+            async move { result }
+        })
+        .await;
+        assert_eq!(recovered.unwrap(), 3);
+
+        let mut calls = 0;
+        let stuck = retry_busy_host(|| {
+            calls += 1;
+            async move { Err::<(), _>(busy()) }
+        })
+        .await;
+        assert!(stuck.unwrap_err().to_string().contains(HOST_NOT_RESPONDING));
+        assert_eq!(calls, 3);
+
+        let mut calls = 0;
+        let gone = retry_busy_host(|| {
+            calls += 1;
+            async move {
+                Err::<(), _>(anyhow!(
+                    "The expected OpenResearch host is no longer running."
+                ))
+            }
+        })
+        .await;
+        assert!(gone.is_err());
+        assert_eq!(calls, 1);
     }
 
     #[test]

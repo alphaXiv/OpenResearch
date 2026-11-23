@@ -38,6 +38,7 @@ fn add_project(id: &str) -> String {
             run_command: None,
             paper_id: None,
             icon: None,
+            proposal: None,
             created_at: 1,
             updated_at: 1,
         })

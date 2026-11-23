@@ -5,7 +5,7 @@ import type { WorkspaceClient } from "./client";
 import { readLiveSnapshot } from "./live";
 import { mutations } from "./mutations";
 import type { Workspace } from "../workspace";
-import { queryOptions, useQuery } from "@tanstack/react-query";
+import { queryOptions, useQuery, type DataTag, type QueryKey } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 import type * as api from "../api";
 
@@ -232,6 +232,18 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     staleTime: 300_000,
   });
 
+  const getChatLitSourcesQuery = (sessionId: string) => queryOptions({
+    queryKey: workspaceKey("getChatLitSources", sessionId),
+    queryFn: ({ signal }) => api.getChatLitSources(sessionId, signal),
+    staleTime: 300_000,
+  });
+
+  const getProjectSettingsQuery = (projectId: string) => queryOptions({
+    queryKey: workspaceKey("getProjectSettings", projectId),
+    queryFn: ({ signal }) => api.getProjectSettings(projectId, signal),
+    staleTime: 300_000,
+  });
+
   const getLitSourcesQuery = () => queryOptions({
     queryKey: workspaceKey("getLitSources"),
     queryFn: ({ signal }) => api.getLitSources(signal),
@@ -388,6 +400,8 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     getPendingWorkQuery,
     getBuildNotesQuery,
     getLitSourcesQuery,
+    getProjectSettingsQuery,
+    getChatLitSourcesQuery,
     getProjectDefaultsQuery,
     getProjectGitStatusQuery,
     getTelemetryQuery,
@@ -515,21 +529,85 @@ export const mutSaveHfToken = mutations.define({
   refetchOnSuccess: false,
 });
 
+/** Changes the machine's default, which every project without its own follows. */
 export const mutSetComputeDefault = mutations.define({
   id: "settings/compute-default",
   mutate: (ws: Workspace, choice: Parameters<Api["setComputeDefault"]>[0]) => ws.api.setComputeDefault(choice),
-  optimistic({ helpers, args: [ws, { backend, flavor = null, projectId }], onSuccess }) {
-    const options = ws.queries.getComputeSettingsQuery(projectId);
-    helpers(ws.queryClient).updateExisting(options, (settings) => ({
-      ...settings,
-      configuredDefaultBackend: backend,
-      configuredDefaultFlavor: flavor,
-      defaultFlavor: flavor,
-    }));
+  optimistic({ helpers, args: [ws, { backend, flavor = null }], onSuccess }) {
+    const family = ws.queries.getComputeSettingsQuery().queryKey.slice(0, -1);
+    const cached = ws.queryClient.getQueriesData<api.ComputeSettings>({ queryKey: family });
+    for (const [queryKey] of cached) {
+      helpers(ws.queryClient).updateExisting<api.ComputeSettings>({ queryKey }, (settings) => ({
+        ...settings,
+        configuredDefaultBackend: backend,
+        configuredDefaultFlavor: flavor,
+        defaultFlavor: flavor,
+      }));
+    }
+    onSuccess((saved) => {
+      for (const [queryKey] of cached) {
+        const key = queryKey as DataTag<QueryKey, api.ComputeSettings>;
+        ws.setScopedQueryData(key, { ...saved, projectDefault: ws.queryClient.getQueryData(key)?.projectDefault });
+      }
+    });
+  },
+  key: ({ args: [ws] }) => [ws.identity, "compute-default"],
+  describe: "change where new runs go",
+  describeResult: null,
+  refetchOnSuccess: false,
+});
+
+export const mutUpdateProjectSettings = mutations.define({
+  id: "settings/project",
+  mutate: (ws: Workspace, projectId: string, edit: api.ProjectSettingsEdit) => ws.api.updateProjectSettings(projectId, edit),
+  optimistic({ helpers, args: [ws, projectId, edit], onSuccess }) {
+    const options = ws.queries.getProjectSettingsQuery(projectId);
+    const cache = helpers(ws.queryClient);
+    cache.updateExisting(options, (settings) => {
+      const next = { ...settings, ...edit };
+      for (const key of Object.keys(edit) as (keyof api.ProjectSettings)[]) {
+        const value = edit[key];
+        if (value === null || (typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 0)) delete next[key];
+      }
+      return next as api.ProjectSettings;
+    });
+    if (edit.compute !== undefined) {
+      cache.updateExisting(ws.queries.getComputeSettingsQuery(projectId), (settings) => ({ ...settings, projectDefault: edit.compute }));
+    }
     onSuccess((saved) => ws.setScopedQueryData(options.queryKey, saved));
   },
-  key: ({ args: [ws, { projectId }] }) => [ws.identity, "compute-default", projectId ?? ""],
-  describe: "change where new runs go",
+  key: ({ args: [ws, projectId, edit] }) => [ws.identity, "project-settings", projectId, Object.keys(edit).sort().join()],
+  describe: "change the project's settings",
+  describeResult: null,
+  refetchOnSuccess: false,
+});
+
+/** Changes the sources every project without its own choice follows. */
+export const mutSetLitSources = mutations.define({
+  id: "settings/lit-sources",
+  mutate: (ws: Workspace, sources: api.LitSourcesSettings) => ws.api.setLitSources(sources),
+  optimistic({ helpers, args: [ws, sources], onSuccess }) {
+    const options = ws.queries.getLitSourcesQuery();
+    helpers(ws.queryClient).set(options, sources);
+    onSuccess((saved) => ws.setScopedQueryData(options.queryKey, saved));
+  },
+  key: ({ args: [ws] }) => [ws.identity, "lit-sources"],
+  describe: "change literature sources",
+  describeResult: null,
+  refetchOnSuccess: false,
+});
+
+/** `null` returns the chat to its project's sources. */
+export const mutSetChatLitSources = mutations.define({
+  id: "chat/lit-sources",
+  mutate: (ws: Workspace, sessionId: string, disabled: api.LitSource[] | null) => ws.api.setChatLitSources(sessionId, disabled),
+  optimistic({ helpers, args: [ws, sessionId, disabled], onSuccess }) {
+    const options = ws.queries.getChatLitSourcesQuery(sessionId);
+    helpers(ws.queryClient).set(options, { disabledLitSources: disabled });
+    onSuccess((saved) => ws.setScopedQueryData(options.queryKey, saved));
+  },
+  key: ({ args: [ws, sessionId] }) => [ws.identity, "chat-lit-sources", sessionId],
+  describe: "change this chat's literature sources",
   describeResult: null,
   refetchOnSuccess: false,
 });
@@ -690,20 +768,6 @@ export const mutSetGithubForNewProjects = mutations.define({
   refetchOnSuccess: false,
 });
 
-export const mutSetLitSources = mutations.define({
-  id: "settings/lit-sources",
-  mutate: (ws: Workspace, sources: api.LitSourcesSettings) => ws.api.setLitSources(sources),
-  optimistic({ helpers, args: [ws, sources], onSuccess }) {
-    const options = ws.queries.getLitSourcesQuery();
-    helpers(ws.queryClient).set(options, sources);
-    onSuccess((saved) => ws.setScopedQueryData(options.queryKey, saved));
-  },
-  key: ({ args: [ws] }) => [ws.identity, "lit-sources"],
-  describe: "change literature sources",
-  describeResult: null,
-  refetchOnSuccess: false,
-});
-
 function showGitResult(ws: Workspace, projectId: string, result: { project: api.Project; git: api.ProjectGitStatus }) {
   ws.setScopedQueryData(ws.queries.getProjectGitStatusQuery(projectId).queryKey, result.git);
   ws.setScopedQueryData(ws.queries.listProjectsQuery().queryKey, (projects) =>
@@ -813,12 +877,16 @@ export const mutAddRemoteHost = mutations.define({
 
 export const mutRemoveRemoteHost = mutations.define({
   id: "remote/host-remove",
-  mutate: (ws: Workspace, host: string) => ws.api.removeRemoteHost(host),
+  async mutate(ws: Workspace, host: string) {
+    await ws.api.removeRemoteHost(host);
+    // Dropping the session closes its workspace, so it waits for the server.
+    await ws.queryClient.invalidateQueries(ws.queries.listRemoteSessionsQuery());
+  },
   optimistic({ helpers, args: [ws, host] }) {
     helpers(ws.queryClient).arrayRemove(ws.queries.listRemoteHostsQuery(), (entry) => entry.host === host);
   },
   key: ({ args: [ws, host] }) => [ws.identity, "remote-host", host],
-  describe: "remove the remote",
+  describe: "forget the machine",
   describeResult: null,
   refetchOnSuccess: false,
 });

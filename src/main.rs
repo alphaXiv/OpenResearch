@@ -263,7 +263,8 @@ pub struct ProjectArgs {
 pub enum ProjectCommand {
     /// Show a local project's details and experiment tree.
     View {
-        project_id: String,
+        /// Project id from `orx projects`; defaults to the chat's or the current folder's project.
+        project_id: Option<String>,
         /// Include archived experiments in the listing.
         #[arg(long)]
         all: bool,
@@ -271,7 +272,8 @@ pub enum ProjectCommand {
 
     /// Edit a local project's name or run command.
     Edit {
-        project_id: String,
+        /// Project id from `orx projects`; defaults to the chat's or the current folder's project.
+        project_id: Option<String>,
         /// Rename the project.
         #[arg(long)]
         name: Option<String>,
@@ -285,7 +287,8 @@ pub enum ProjectCommand {
     /// or publish it as an openresearch.sh link with --publish.
     /// Every chat is included unless narrowed with --chat or left out with --no-chats.
     Share {
-        project_id: String,
+        /// Project id from `orx projects`; defaults to the chat's or the current folder's project.
+        project_id: Option<String>,
         /// File to write (default: ./<project>.orx).
         #[arg(long, conflicts_with = "publish")]
         out: Option<String>,
@@ -320,7 +323,10 @@ pub enum ProjectCommand {
     },
 
     /// Delete a project's published openresearch.sh link and its file.
-    Unpublish { project_id: String },
+    Unpublish {
+        /// Project id from `orx projects`; defaults to the chat's or the current folder's project.
+        project_id: Option<String>,
+    },
 
     /// Open a shared .orx file, or an openresearch.sh/p/... link, as a new project.
     Import {
@@ -333,7 +339,8 @@ pub enum ProjectCommand {
 
 #[derive(Args, Debug)]
 pub struct RunsArgs {
-    pub project_id: String,
+    /// Project id from `orx projects`; defaults to the chat's or the current folder's project.
+    pub project_id: Option<String>,
     /// Filter to one experiment.
     #[arg(long)]
     pub experiment: Option<String>,
@@ -369,8 +376,8 @@ pub struct MetricsArgs {
 
 #[derive(Args, Debug)]
 pub struct CreateExperimentArgs {
-    /// Local project id from `orx projects`.
-    pub project_id: String,
+    /// Project id from `orx projects`; defaults to the chat's or the current folder's project.
+    pub project_id: Option<String>,
     /// Experiment title (required).
     #[arg(long)]
     pub title: Option<String>,

@@ -20,7 +20,7 @@ macro_rules! providers {
 }
 
 providers! {
-    hf => ("hf_job", |account| hf::HfAccount { namespace: account.target()?.into() }),
+    hf => ("hf_job", |account| hf::HfAccount::new(account.target()?.into())),
     modal => ("modal_job", |_account| modal::ModalAccount),
     k8s => ("k8s_job", |account| k8s::K8sAccount::new(
         account.context.clone(), account.target()?.into()
@@ -161,9 +161,7 @@ mod windows_tests {
         ));
         let adapters: Vec<Box<dyn Backend>> = vec![
             Box::new(super::api::Adapter::new(
-                super::hf::HfAccount {
-                    namespace: "org".into(),
-                },
+                super::hf::HfAccount::new("org".into()),
                 clock.clone(),
                 dir.join("spools"),
             )),

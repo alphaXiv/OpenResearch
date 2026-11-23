@@ -396,3 +396,16 @@ test("a late agent switch cannot replace a newer chat's selection or draft setti
   await chat.navigate("/projects/p/tasks/original");
   assert.equal(picker()[0], m.a11y_chat_model({ label: "Target Model" }));
 });
+
+test("a new chat starts with its project's agent over the last one used", async () => {
+  const claude = { ...codex, id: "claude-code", name: "Claude Code", models: [model("pinned-model")] };
+  await renderChat("/projects/p/tasks/new", {
+    sessions: [session("original")],
+    harnesses: [codex, claude],
+    routes: {
+      "GET /api/projects/p/settings": () => ({ agent: { harness: "claude-code", model: "pinned-model", permissionMode: null, reasoningLevel: null } }),
+    },
+  });
+  const label = () => document.querySelector('[data-onboarding="composer"] [data-onboarding="model-picker"] button').getAttribute("aria-label");
+  assert.equal(label(), m.a11y_chat_model({ label: "Pinned Model" }));
+});

@@ -30,6 +30,8 @@ import { InlineHtmlFigure } from "./InlineHtmlFigure";
 import { ImageCarousel, ImageCarouselContext } from "./ImageCarousel";
 import { FileChip, FileReference, FileScopeContext, type OpenFile } from "./FileReference";
 import { ImageModal } from "./ImageModal";
+import { ImageMenu } from "./ImageMenu";
+import { fileNameOf } from "../download";
 import { CITED_ID } from "../agentMessages";
 import { CitedRef } from "./ChatLinks";
 import { chatImageTarget, chatImageTargets, citedFilePath, documentAssetTarget, encodeMarkdownPath, firstCitedLine, nativeMarkdownPath, rehypeNetworkImages, rehypeSafeUrls, splitLineSuffix, type ImageCandidate } from "../markdownTarget";
@@ -61,22 +63,22 @@ export function ChatImageScope({ projectId, sessionId, children }: {
   return <ImageResolverContext value={resolver}><FileScopeContext value={files}>{children}</FileScopeContext></ImageResolverContext>;
 }
 
-function MarkdownImage({ sources, downloadName, alt = "", ...props }: ImgHTMLAttributes<HTMLImageElement> & { sources: string[]; downloadName?: string }) {
+function MarkdownImage({ sources, downloadName, alt = "", ...props }: ImgHTMLAttributes<HTMLImageElement> & { sources: string[]; downloadName: string }) {
   const [attempt, setAttempt] = useState(0);
   const [expanded, setExpanded] = useState(false);
   const carousel = useContext(ImageCarouselContext);
   const changeExpanded = carousel?.setExpanded ?? setExpanded;
   const displayedSrc = sources[attempt];
   return <>
-    <img {...props} src={displayedSrc} alt={alt} role="button" tabIndex={0} aria-haspopup="dialog"
+    <ImageMenu src={displayedSrc ?? ""} name={downloadName}><img {...props} src={displayedSrc} alt={alt} role="button" tabIndex={0} aria-haspopup="dialog"
       onClick={(event) => { event.preventDefault(); event.stopPropagation(); changeExpanded(true); }}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault(); event.stopPropagation(); changeExpanded(true);
         }
       }}
-      onError={attempt + 1 < sources.length ? () => setAttempt(attempt + 1) : undefined} />
-    {(carousel?.expanded ?? expanded) && displayedSrc && <ImageModal src={displayedSrc} alt={alt} name={downloadName} onClose={() => changeExpanded(false)} />}
+      onError={attempt + 1 < sources.length ? () => setAttempt(attempt + 1) : undefined} /></ImageMenu>
+    {(carousel?.expanded ?? expanded) && displayedSrc && <ImageModal key={displayedSrc} src={displayedSrc} alt={alt} name={downloadName} onClose={() => changeExpanded(false)} />}
   </>;
 }
 
@@ -418,7 +420,7 @@ export const Md = memo(function Md({
       <MarkdownImage
         {...rest}
         key={resolved}
-        downloadName={src.split(/[\\/]/).pop()?.split(/[?#]/)[0]}
+        downloadName={fileNameOf(src)}
         sources={sources.map(source => source.url)}
         alt={alt ?? ""}
         loading="lazy"

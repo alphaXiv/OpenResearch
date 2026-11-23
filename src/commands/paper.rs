@@ -25,7 +25,7 @@ use crate::LitSource;
 
 pub async fn run(args: crate::PaperArgs) -> Result<()> {
     let source = args.source.unwrap_or_else(|| detect_source(&args.id));
-    ensure_source_enabled(source, &crate::config::disabled_lit_sources())?;
+    ensure_source_enabled(source, &crate::local::disabled_lit_sources_here()?)?;
     match source {
         LitSource::Alphaxiv => run_alphaxiv(&args).await,
         LitSource::Openalex => run_openalex(&args.id, args.full).await,
@@ -39,7 +39,7 @@ pub async fn run(args: crate::PaperArgs) -> Result<()> {
 fn ensure_source_enabled(source: LitSource, disabled: &[String]) -> Result<()> {
     if disabled.iter().any(|d| d == source.as_str()) {
         return Err(anyhow!(
-            "{} is disabled by your OpenResearch literature-source configuration. Re-enable it to fetch this paper.",
+            "{} is turned off in the chat's Data sources menu. Ask the user to turn it on there, or use another source.",
             source.display_name()
         ));
     }
