@@ -3727,7 +3727,12 @@ fn slash_skill_name(token: &str) -> Option<String> {
     Some(name.to_ascii_lowercase())
 }
 
-async fn prepare_project_slash_worktree(project: &LocalProject, text: &str, session_id: &str) {
+async fn prepare_project_slash_worktree(
+    project: &LocalProject,
+    text: &str,
+    session_id: &str,
+    worktree: &std::path::Path,
+) {
     let has_project_skill = text
         .split_whitespace()
         .filter_map(slash_skill_name)
@@ -3737,15 +3742,13 @@ async fn prepare_project_slash_worktree(project: &LocalProject, text: &str, sess
                 Some((_, crate::local::user_skills::SkillSelection::Project))
             )
         });
-    if !has_project_skill
-        || crate::local::git::existing_session_worktree_path(project, session_id).exists()
-    {
+    if !has_project_skill || worktree.exists() {
         return;
     }
     let project = project.clone();
     let session_id = session_id.to_string();
     let _ = tokio::task::spawn_blocking(move || {
-        crate::local::git::ensure_session_worktree(&project, &session_id)
+        crate::local::git::ensure_session_worktree(&Store::open()?, &project, &session_id)
     })
     .await;
 }
@@ -3754,7 +3757,7 @@ fn selected_slash_skills(
     project: &LocalProject,
     text: &str,
     harness: Option<&str>,
-    session_id: Option<&str>,
+    worktree: Option<&std::path::Path>,
 ) -> (Vec<SelectedSlashSkill>, bool) {
     let has_request = text
         .split_whitespace()
@@ -3787,9 +3790,7 @@ fn selected_slash_skills(
         } else if let Some(instructions) = crate::local::user_skills::instructions(
             &name,
             harness,
-            session_id
-                .map(|id| crate::local::git::existing_session_worktree_path(project, id))
-                .as_deref(),
+            worktree,
             Some(std::path::Path::new(&project.repo_path)),
         ) {
             seen.insert(name);
@@ -3817,9 +3818,9 @@ fn expand_slash_skills(
     project: &LocalProject,
     text: &str,
     harness: Option<&str>,
-    session_id: Option<&str>,
+    worktree: Option<&std::path::Path>,
 ) -> String {
-    let (selected, has_request) = selected_slash_skills(project, text, harness, session_id);
+    let (selected, has_request) = selected_slash_skills(project, text, harness, worktree);
     if selected.is_empty() {
         return text.to_string();
     }
@@ -5773,8 +5774,16 @@ impl ChatHost {
                     .get_chat_session(session_id)?
                     .ok_or_else(|| anyhow!("chat session not found"))?;
                 let project = store.get_local_project(&session.project_id)?;
-                if let Some(project) = &project {
-                    prepare_project_slash_worktree(project, &text, session_id).await;
+                let worktree = project
+                    .as_ref()
+                    .map(|project| {
+                        crate::local::git::existing_session_worktree_path(
+                            &store, project, session_id,
+                        )
+                    })
+                    .transpose()?;
+                if let (Some(project), Some(worktree)) = (&project, &worktree) {
+                    prepare_project_slash_worktree(project, &text, session_id, worktree).await;
                 }
                 let message = SteerMessage {
                     id: new_queued_id(),
@@ -5785,7 +5794,7 @@ impl ChatHost {
                                 &project,
                                 &text,
                                 Some(&session.harness),
-                                Some(session_id),
+                                worktree.as_deref(),
                             );
                             delegation::expand_refs(&store, &text).unwrap_or(text)
                         })
@@ -7027,9 +7036,12 @@ impl ChatHost {
         )?);
         // Slash-skills: the transcript keeps the `/name` the user typed; the
         // harness gets the expanded prompt. What orx writes is never a command.
+        let worktree =
+            crate::local::git::existing_session_worktree_path(&store, &project, &session.id)?;
         if prepared_input.is_none() && orx.is_empty() {
             for message in &messages {
-                prepare_project_slash_worktree(&project, &message.text, &session.id).await;
+                prepare_project_slash_worktree(&project, &message.text, &session.id, &worktree)
+                    .await;
             }
         }
         // A command keeps its leading `/`, and what orx writes keeps its
@@ -7050,7 +7062,7 @@ impl ChatHost {
                         &project,
                         text,
                         Some(&session.harness),
-                        Some(&session.id),
+                        Some(&worktree),
                     );
                     delegation::expand_refs(&store, &text).unwrap_or(text)
                 } else {

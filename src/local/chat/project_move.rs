@@ -276,8 +276,9 @@ impl ChatHost {
                         return Err(anyhow!(CHANGED));
                     }
                     let created = if project.is_scratch() {
-                        let worktree =
-                            crate::local::git::existing_session_worktree_path(&project, &owner);
+                        let worktree = crate::local::git::existing_session_worktree_path(
+                            &store, &project, &owner,
+                        )?;
                         projects::promote_scratch_project(
                             &store,
                             &project,

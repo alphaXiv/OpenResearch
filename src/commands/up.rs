@@ -2358,15 +2358,13 @@ async fn create_independent_project_repository(
     organization: Option<&str>,
 ) -> Result<local::model::LocalProject> {
     let store = Store::open()?;
-    let legacy = store
-        .list_chat_sessions_by_project(&project.id)?
-        .into_iter()
-        .map(|session| session.id)
-        .filter(|id| {
-            local::git::existing_session_worktree_path(&project, id)
-                != local::git::session_worktree_path(&project.id, id)
-        })
-        .collect::<Vec<_>>();
+    let mut legacy = Vec::new();
+    for session in store.list_chat_sessions_by_project(&project.id)? {
+        let worktree = local::git::existing_session_worktree_path(&store, &project, &session.id)?;
+        if worktree != local::git::session_worktree_path(&project.id, &session.id) {
+            legacy.push(session.id);
+        }
+    }
     // `git worktree move` would pull a running turn's checkout out from under it.
     chat.while_idle(&legacy, || {
         local::git::migrate_legacy_project_worktrees(&project, &legacy)
@@ -3951,7 +3949,7 @@ fn resolve_checkout_root(
                 .get_chat_session(s)?
                 .filter(|sess| sess.project_id == project.id)
                 .ok_or_else(|| not_found("chat session"))?;
-            let dir = local::git::existing_session_worktree_path(project, &session.id);
+            let dir = local::git::existing_session_worktree_path(store, project, &session.id)?;
             match crate::paths::canonicalize(&dir) {
                 Ok(p) => Some(p),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -8033,7 +8031,7 @@ fn session_checkout_root(
     project: &local::model::LocalProject,
     session_id: &str,
 ) -> std::result::Result<std::path::PathBuf, ApiError> {
-    match local::git::ensure_session_worktree(project, session_id) {
+    match local::git::ensure_session_worktree(store, project, session_id) {
         Ok(dir) => Ok(crate::paths::canonicalize(&dir).unwrap_or(dir)),
         Err(error) => {
             eprintln!("orx up: session worktree unavailable, using the clone: {error}");

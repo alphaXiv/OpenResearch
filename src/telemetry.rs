@@ -437,6 +437,23 @@ fn outbox_dir() -> PathBuf {
     crate::config::config_dir().join("telemetry-outbox")
 }
 
+/// Where a command run in a chat leaves its events for `orx up` to send: orx lets an
+/// agent's sandbox write the data directory, not the config directory.
+fn chat_outbox_dir() -> PathBuf {
+    crate::store::data_dir().join("telemetry-outbox")
+}
+
+fn queued_payload_paths() -> Vec<PathBuf> {
+    [outbox_dir(), chat_outbox_dir()]
+        .iter()
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"))
+        .collect()
+}
+
 /// How reading `settings.json` turned out. The corrupt case is kept distinct
 /// from absent so a mutation refuses to clobber a file that might still hold a
 /// persisted opt-out we just failed to parse (a torn write, a hand-edit) —
@@ -930,8 +947,11 @@ async fn post_payload(payload: &serde_json::Value) -> DeliveryOutcome {
     }
 }
 
-fn persist_payload(event_id: uuid::Uuid, payload: &serde_json::Value) -> Option<PathBuf> {
-    let dir = outbox_dir();
+fn persist_payload(
+    dir: PathBuf,
+    event_id: uuid::Uuid,
+    payload: &serde_json::Value,
+) -> Option<PathBuf> {
     std::fs::create_dir_all(&dir).ok()?;
     let path = dir.join(format!("{event_id}.json"));
     crate::local::git::atomic_write_with_mode(
@@ -980,14 +1000,7 @@ fn is_consent_payload(payload: &serde_json::Value) -> bool {
 }
 
 fn remove_queued_product_events() {
-    let Ok(entries) = std::fs::read_dir(outbox_dir()) else {
-        return;
-    };
-    for path in entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"))
-    {
+    for path in queued_payload_paths() {
         let Ok(bytes) = std::fs::read(&path) else {
             continue;
         };
@@ -1046,7 +1059,7 @@ fn transfer_pending_events() {
         let Ok(event_id) = uuid::Uuid::parse_str(&id) else {
             continue;
         };
-        if persist_payload(event_id, &payload).is_some() {
+        if persist_payload(outbox_dir(), event_id, &payload).is_some() {
             let _ = store.acknowledge_pending_telemetry(&id);
         }
     }
@@ -1066,14 +1079,7 @@ pub(crate) fn retry_outbox() {
         return;
     }
     transfer_pending_events();
-    let Ok(entries) = std::fs::read_dir(outbox_dir()) else {
-        return;
-    };
-    let mut paths: Vec<_> = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"))
-        .collect();
+    let mut paths = queued_payload_paths();
     sort_oldest_first(&mut paths, |path| {
         std::fs::metadata(path)
             .and_then(|meta| meta.modified())
@@ -1114,19 +1120,18 @@ fn spawn_event(
 }
 
 /// An agent's sandbox may proxy a send and report the agent's command as failed
-/// when exit cuts the send off, so a command run in an `orx up` chat stages its
-/// events for `orx up` to deliver.
+/// when exit cuts the send off, so a command run in an `orx up` chat leaves its
+/// events for `orx up` to deliver. A file, not the store: a second connection
+/// would wait out the busy timeout whenever a chat holds the write lock.
 fn send_or_stage(
     event_id: uuid::Uuid,
     payload: serde_json::Value,
 ) -> Option<tokio::task::JoinHandle<()>> {
     if crate::local::chat::in_local_session() {
-        if let Ok(store) = crate::store::Store::open() {
-            let _ = store.stage_telemetry(&event_id.to_string(), &payload);
-        }
+        persist_payload(chat_outbox_dir(), event_id, &payload);
         return None;
     }
-    let path = persist_payload(event_id, &payload);
+    let path = persist_payload(outbox_dir(), event_id, &payload);
     Some(tokio::spawn(deliver_payload(path, payload)))
 }
 
@@ -1235,7 +1240,7 @@ pub(crate) async fn record_consent(agreed: bool) {
     }
     let event_id = uuid::Uuid::new_v4();
     let payload = consent_payload(agreed, &consent_distinct_id(agreed), event_id);
-    let path = persist_payload(event_id, &payload);
+    let path = persist_payload(outbox_dir(), event_id, &payload);
     let send = deliver_queued_payload(path, payload);
     // Cap the wait so the settings POST / command return promptly even if the
     // network is slow; the send itself also has its own 3s request timeout.
@@ -2946,14 +2951,16 @@ mod tests {
             build_payload_with_id("command", "install", event_id, json!({ "command": "exp" }));
 
         assert!(send_or_stage(event_id, payload.clone()).is_none());
-        assert_eq!(
-            crate::store::Store::open()
-                .unwrap()
-                .pending_telemetry()
-                .unwrap(),
-            vec![(event_id.to_string(), payload)]
-        );
+        let staged = chat_outbox_dir().join(format!("{event_id}.json"));
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&staged).unwrap()).unwrap();
+        assert_eq!(written, payload);
+        assert_eq!(queued_payload_paths(), vec![staged.clone()]);
         assert!(!outbox_dir().exists());
+        assert!(!crate::store::data_dir().join("orx.db").exists());
+
+        set_persisted_disabled(true).unwrap();
+        assert!(!staged.exists());
     }
 
     #[test]

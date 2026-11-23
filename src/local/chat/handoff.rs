@@ -307,7 +307,7 @@ pub(crate) fn context(
     }
     let mut state = format!("Chat: `{}`\n", session.id);
     if let Some(project) = store.get_local_project(&session.project_id)? {
-        let cwd = crate::local::git::existing_session_worktree_path(&project, &session.id);
+        let cwd = crate::local::git::existing_session_worktree_path(store, &project, &session.id)?;
         let _ = writeln!(state, "Worktree: {}", cwd.display());
         if cwd.exists() {
             let branch = crate::local::git::current_branch(&cwd);
@@ -737,6 +737,52 @@ mod tests {
         assert!(handoff.contains("Compare the two parser designs."));
         assert!(handoff.contains("Explain the second design."));
         assert!(!handoff.contains("LATER PARENT REQUEST"));
+    }
+
+    #[test]
+    fn a_handoff_built_inside_a_turn_admission_names_the_owner_worktree() {
+        // The store `Store::open()` resolves, so a second connection would contend with this one.
+        let store = Store::open().unwrap();
+        let repo = crate::local::git::TemporaryDirectory::new("handoff-in-transaction").unwrap();
+        store
+            .create_local_project(&crate::local::model::LocalProject {
+                id: "project_handoff_lock".into(),
+                name: "Test".into(),
+                slug: "handoff-lock".into(),
+                github_owner: String::new(),
+                github_repo: String::new(),
+                github_sync_enabled: false,
+                baseline_branch: "main".into(),
+                repo_path: repo.path().to_string_lossy().into_owned(),
+                run_command: None,
+                paper_id: None,
+                icon: None,
+                proposal: None,
+                created_at: 0,
+                updated_at: 0,
+            })
+            .unwrap();
+        let mut parent = session();
+        parent.id = "chat_handoff_lock_parent".into();
+        parent.project_id = "project_handoff_lock".into();
+        store.create_chat_session(&parent).unwrap();
+        let mut side = parent.clone();
+        side.id = "chat_handoff_lock_side".into();
+        side.side_parent_session_id = Some(parent.id.clone());
+        store.create_chat_session(&side).unwrap();
+        let mut request = message("dddd0001", "user", "Earlier request.");
+        request.session_id = side.id.clone();
+        store.upsert_chat_message_on_branch(&request).unwrap();
+        let side = store.get_chat_session(&side.id).unwrap().unwrap();
+
+        let admission = store.begin_immediate().unwrap();
+        let handoff = context(&store, &side, None, None, None).unwrap();
+        drop(admission);
+        let owner = crate::local::git::session_worktree_path("project_handoff_lock", &parent.id);
+        assert!(
+            handoff.contains(&format!("Worktree: {}\n", owner.display())),
+            "{handoff}"
+        );
     }
 
     #[test]

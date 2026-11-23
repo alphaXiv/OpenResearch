@@ -102,8 +102,11 @@ pub(super) async fn run_turn(
         get(&endpoint, &format!("/api/session/{id}")).await?;
         id.clone()
     } else {
-        let directory =
-            crate::local::git::existing_session_worktree_path(&ctx.project, &ctx.session_id);
+        let directory = crate::local::git::existing_session_worktree_path(
+            &crate::store::Store::open()?,
+            &ctx.project,
+            &ctx.session_id,
+        )?;
         let mut body =
             json!({"agent":opencode_agent(ctx.plan_mode),"location":{"directory":directory}});
         if let Some(model) = &model {
