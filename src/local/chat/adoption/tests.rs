@@ -605,3 +605,55 @@ fn a_restart_waits_only_for_work_it_would_stop() {
         super::stop_kept(|_| true, "the test ended").await;
     });
 }
+
+#[cfg(unix)]
+#[test]
+fn a_hand_off_ends_the_agents_of_turns_it_stops_and_keeps_the_rest() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        register();
+        let store = Store::open().unwrap();
+        chat(&store, "resumes", "test-resume");
+        chat(&store, "unsaved", "test-resume");
+        let resumes = running_turn(&store, "resumes");
+        let resumes_agent = left_running(&store, "test-resume", "resumes", json!({})).await;
+        // Started before its turn saved a checkpoint, so that turn cannot resume.
+        let unsaved_agent = left_running(&store, "test-resume", "unsaved", json!({})).await;
+        let unsaved = running_turn(&store, "unsaved");
+        let chat = host();
+        for turn in [&resumes, &unsaved] {
+            assert!(chat.claim_durable_turn(&turn.session_id));
+            chat.turns.lock().await.insert(
+                turn.session_id.clone(),
+                TurnState::Active(super::super::ActiveTurn {
+                    handle: tokio::spawn(std::future::pending()),
+                    message_id: turn.assistant_message_id.clone(),
+                    turn_id: turn.id.clone(),
+                }),
+            );
+        }
+
+        chat.hand_off().await;
+
+        gone(&unsaved_agent).await;
+        let alive = |id: &str| {
+            keep::entries()
+                .unwrap()
+                .iter()
+                .any(|entry| entry.id == id && entry.liveness == keep::Liveness::Alive)
+        };
+        assert!(alive(&resumes_agent));
+        let resumable = store.chat_turns_to_resume().unwrap();
+        assert_eq!(
+            resumable.iter().map(|turn| &turn.id).collect::<Vec<_>>(),
+            [&unsaved.id]
+        );
+        keep::attach(&resumes_agent)
+            .await
+            .unwrap()
+            .handle()
+            .signal(keep::Signal::Kill);
+    });
+}

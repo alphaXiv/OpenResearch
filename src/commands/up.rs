@@ -586,19 +586,29 @@ impl Lineage {
             return Ok(None);
         }
         let path = Self::path();
-        let read = std::fs::read(&path)
-            .map_err(|error| anyhow!("{error}"))
-            .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|error| anyhow!("{error}")));
-        match read {
-            Ok(lineage) => Ok(Some(lineage)),
-            Err(error) => {
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 eprintln!(
-                    "orx up: could not read {}, so the agents kept running cannot call this server: {error:#}",
+                    "orx up: {} is missing, so the agents kept running cannot call this server",
                     path.display()
                 );
-                Ok(None)
+                return Ok(None);
             }
-        }
+            // Starting without it would stop agents that may still be working.
+            Err(error) => {
+                return Err(anyhow!(
+                    "Could not read {}, which agents still running need to reach OpenResearch: {error}. Fix its permissions and start again.",
+                    path.display()
+                ))
+            }
+        };
+        serde_json::from_slice(&bytes).map(Some).map_err(|error| {
+            anyhow!(
+                "{} is damaged ({error}), so agents still running cannot reach OpenResearch. Delete it to stop them, then start again.",
+                path.display()
+            )
+        })
     }
 
     fn record(&self) -> Result<()> {
@@ -6019,6 +6029,26 @@ pub(crate) async fn track_active(request: axum::extract::Request, next: Next) ->
     ) {
         return next.run(request).await;
     }
+    let request = if request.uri().path() == "/api/internal/mcp" {
+        let (parts, body) = request.into_parts();
+        let Ok(bytes) = axum::body::to_bytes(body, 2 * 1024 * 1024).await else {
+            return ApiError(
+                axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                "The agent's tool call is too large or was cut off.".into(),
+            )
+            .into_response();
+        };
+        // `orx mcp` sends a cut `wait` to the next server, so its long poll holds off no restart.
+        let waits = serde_json::from_slice::<Value>(&bytes)
+            .is_ok_and(|call| call["method"] == "tools/call" && call["params"]["name"] == "wait");
+        let request = axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes));
+        if waits {
+            return next.run(request).await;
+        }
+        request
+    } else {
+        request
+    };
     // Count first, then check: paired with the drain's set-then-count, one side always sees the other.
     let active = loop {
         let active = Active::new();
@@ -12341,6 +12371,16 @@ mod tests {
                 (first.token, first.agent_key, 4321)
             );
 
+            // Unknown is not absent: a damaged record leaves the agent to the user, not stopped.
+            std::fs::write(Lineage::path(), b"{").unwrap();
+            let Err(damaged) = Lineage::inherited() else {
+                panic!("a damaged lineage was read as valid");
+            };
+            let damaged = damaged.to_string();
+            assert!(damaged.contains("lineage.json"), "{damaged}");
+            std::fs::remove_file(Lineage::path()).unwrap();
+            assert!(Lineage::inherited().unwrap().is_none());
+
             kept.handle().stop(Duration::from_secs(10)).await.unwrap();
             let id = kept.handle().id().to_string();
             let stopped =
@@ -13139,7 +13179,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_held_approval_does_not_hold_off_a_restart() {
+    async fn a_held_approval_or_agent_wait_does_not_hold_off_a_restart() {
         use tower::ServiceExt;
 
         let _guard = ACTIVE_TEST_LOCK.lock().await;
@@ -13148,17 +13188,30 @@ mod tests {
                 "/api/internal/permissions",
                 post(std::future::pending::<()>),
             )
+            .route("/api/internal/mcp", post(std::future::pending::<()>))
             .route("/api/other", post(std::future::pending::<()>))
             .layer(middleware::from_fn(track_active));
-        for (path, counted) in [("/api/internal/permissions", 0), ("/api/other", 1)] {
+        let call = |name: &str| {
+            json!({ "sessionId": "chat", "token": "t", "method": "tools/call", "params": { "name": name } })
+                .to_string()
+        };
+        for (path, body, counted) in [
+            ("/api/internal/permissions", String::new(), 0),
+            ("/api/internal/mcp", call("wait"), 0),
+            ("/api/internal/mcp", call("delegate"), 1),
+            ("/api/other", String::new(), 1),
+        ] {
             let request = axum::http::Request::builder()
                 .method("POST")
                 .uri(path)
-                .body(axum::body::Body::empty())
+                .body(axum::body::Body::from(body.clone()))
                 .unwrap();
             let mut held = Box::pin(app.clone().oneshot(request));
-            assert!(futures::poll!(&mut held).is_pending());
-            assert_eq!(ACTIVE.load(Ordering::SeqCst), counted, "{path}");
+            for _ in 0..10 {
+                assert!(futures::poll!(&mut held).is_pending());
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(ACTIVE.load(Ordering::SeqCst), counted, "{path} {body}");
         }
     }
 

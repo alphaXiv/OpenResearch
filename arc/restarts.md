@@ -47,7 +47,7 @@ When a server starts, every turn still running resumes if its keeper is alive an
 
 A starting server reads each live keeper's `owner.json` and gives the child back to its harness host, which treats it like one it spawned: the next turn reuses it, settings changes still restart it, and the idle reaper still releases it. A child whose chat is gone, or whose record no harness understands, is stopped; a keeper whose directory, record or lock cannot be read is left running and reported, and a directory is only removed once its lock is confirmed released.
 
-**What an agent's environment names outlives a server.** The port, the server's bearer, the key `orx mcp` tokens derive from, and each child's approval token are kept per lineage of servers, not per process: a successor reads them back, and a fresh set is drawn only when no kept child survives to need the old one.
+**What an agent's environment names outlives a server.** The port, the server's bearer, the key `orx mcp` tokens derive from, and each child's approval token are kept per lineage of servers, not per process: a successor reads them back, and a fresh set is drawn only when no kept child survives to need the old one. A record that is there but cannot be read keeps the server from starting, since a fresh set would cut those children off.
 
 ## The gap between servers
 
@@ -57,7 +57,7 @@ A starting server accepts agents' calls only once it has adopted their children 
 
 ## Restarting
 
-**A restart hands its children off; a quit stops them.** Restarting into an update, from the update banner or on its own once one is due, stops admitting requests, waits for those in flight, then hands off: no kept child is stopped, leases are released, and the server exits or execs into the new binary ([dashboard](dashboard.md#restarting-into-an-update)). Running turns, queued messages, approvals and terminals no longer hold a restart back. Quitting the app or interrupting `orx up` stops every kept child, as before. A crash hands off by default: its keepers wait out their orphan timeout for a successor. So does a desktop window that goes away without quitting: its server hands off and exits ([desktop](desktop.md#keeping-the-window-through-an-update)).
+**A restart hands its children off; a quit stops them.** Restarting into an update, from the update banner or on its own once one is due, stops admitting requests, waits for those in flight, then hands off: no kept child is stopped, leases are released, and the server exits or execs into the new binary ([dashboard](dashboard.md#restarting-into-an-update)). Running turns, queued messages, approvals, an agent's `wait` and terminals no longer hold a restart back. A turn that cannot resume stops as for a quit, its agent with it, so the successor adopts no agent still doing work its turn gave up. Quitting the app or interrupting `orx up` stops every kept child, as before. A crash hands off by default: its keepers wait out their orphan timeout for a successor. So does a desktop window that goes away without quitting: its server hands off and exits ([desktop](desktop.md#keeping-the-window-through-an-update)).
 
 ## Terminals
 

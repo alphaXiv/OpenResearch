@@ -2280,10 +2280,7 @@ impl ChatHost {
             &marker,
             command_plan,
         )?;
-        self.claude.kill_session(session_id).await;
-        self.codex.kill_session(session_id).await;
-        self.opencode.kill_session(session_id).await;
-        self.acp.stop(session_id).await;
+        self.end_agents(session_id).await;
         self.emit(
             "chat.message",
             message_json(&stored_to_wire(&marker), session_id),
@@ -4966,31 +4963,46 @@ impl ChatHost {
     }
 
     /// Leaves the turns that resume to the next server, which goes on from each one's last
-    /// checkpoint, so nothing more is recorded about them; the rest stop as for a shutdown. No
-    /// kept child stops from here on.
+    /// checkpoint, so nothing more is recorded about them; the rest stop as for a quit, agents
+    /// included. No other kept child stops from here on.
     pub async fn hand_off(self: &Arc<Self>) {
-        crate::keep::hand_off();
         self.stop_admitting();
-        let stopped = {
-            let mut turns = self.turns.lock().await;
-            let stopped = self.restart_stops(&turns);
-            turns.retain(|session_id, state| {
-                if stopped.contains(session_id) {
-                    return true;
-                }
-                if let TurnState::Active(active) = state {
-                    active.handle.abort();
-                }
-                false
-            });
-            stopped
-        };
+        let stopped = self.stopped_by_restart().await;
+
         let stops = stopped.iter().map(|session_id| async move {
             if let Err(error) = self.stop_turn(session_id, StopMode::Shutdown).await {
                 eprintln!("orx up: failed to stop turn {session_id} for a restart: {error}");
             }
+            self.end_agents(session_id).await;
         });
         futures::future::join_all(stops).await;
+        // The next server would adopt an agent still doing the work its turn gave up.
+        adoption::stop_kept(
+            |owner| match owner {
+                Some(
+                    crate::keep::Owner::Agent { session_id, .. }
+                    | crate::keep::Owner::AgentCommand { session_id, .. },
+                ) => stopped.contains(session_id),
+                _ => false,
+            },
+            "a restart stopped its turn",
+        )
+        .await;
+
+        crate::keep::hand_off();
+        for state in self.turns.lock().await.drain().map(|(_, state)| state) {
+            if let TurnState::Active(active) = state {
+                active.handle.abort();
+            }
+        }
+    }
+
+    /// Ends the chat's agent, whichever harness runs it.
+    async fn end_agents(&self, session_id: &str) {
+        self.claude.kill_session(session_id).await;
+        self.codex.kill_session(session_id).await;
+        self.opencode.kill_session(session_id).await;
+        self.acp.stop(session_id).await;
     }
 
     /// Stop admitting turns, including the next queued message of a turn that ends from here on.
@@ -8604,10 +8616,7 @@ impl ChatHost {
         // A live opencode serve child would keep running in (and lock) the
         // session's worktree; the resident claude child's cwd is that worktree
         // too, so reap it before `cleanup_session_worktree` below.
-        self.opencode.kill_session(session_id).await;
-        self.codex.kill_session(session_id).await;
-        self.claude.kill_session(session_id).await;
-        self.acp.stop(session_id).await;
+        self.end_agents(session_id).await;
         self.respond_locks.lock().await.remove(session_id);
         self.recovery_locks.lock().await.remove(session_id);
         self.submission_locks.lock().await.remove(session_id);
