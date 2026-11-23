@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use super::delegation::{
-    answer, inline, message_ref, message_text, pending_prompt, question_body, question_text,
-    PendingPrompt,
+    answer, asks_agents, inline, message_ref, message_text, pending_prompt, question_body,
+    question_text, PendingPrompt,
 };
 use super::{
     stored_to_wire, ChatHost, OrxDisplay, OrxKind, OrxSource, TurnGuard, TurnState, TurnSubmission,
@@ -82,7 +82,8 @@ impl News {
 }
 
 /// Everything subscriptions owe, or owe one subscriber. A chat waiting on a
-/// question owes the question, not the turn that ended asking it.
+/// question an agent may answer owes the question, not the turn that ended
+/// asking it.
 pub fn chat_news(store: &Store, subscriber: Option<&str>) -> Result<Vec<News>> {
     let mut prompts: BTreeMap<String, Option<PendingPrompt>> = BTreeMap::new();
     let mut pending = |target: &str| -> Result<Option<PendingPrompt>> {
@@ -96,11 +97,12 @@ pub fn chat_news(store: &Store, subscriber: Option<&str>) -> Result<Vec<News>> {
         if sub.paused || !sub.outstanding {
             continue;
         }
-        let Some(prompt) =
-            pending(&sub.target_session_id)?.filter(|pending| pending.kind() == "question")
-        else {
+        let Some(prompt) = pending(&sub.target_session_id)? else {
             continue;
         };
+        if !asks_agents(store, &sub.target_session_id, &prompt)? {
+            continue;
+        }
         if sub.told_prompt_id.as_deref() != Some(prompt.id.as_str()) {
             news.push(News::Question {
                 subscriber: sub.subscriber_session_id,
@@ -121,8 +123,10 @@ pub fn chat_news(store: &Store, subscriber: Option<&str>) -> Result<Vec<News>> {
             )?;
             continue;
         }
-        let asking =
-            pending(&ready.target_session_id)?.is_some_and(|pending| pending.kind() == "question");
+        let asking = match pending(&ready.target_session_id)? {
+            Some(prompt) => asks_agents(store, &ready.target_session_id, &prompt)?,
+            None => false,
+        };
         if !asking {
             news.push(News::Answer(ready));
         }

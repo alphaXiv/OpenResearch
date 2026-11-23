@@ -106,7 +106,7 @@ fn tools(harness: &str) -> Value {
         },
         {
             "name": "subscribe",
-            "description": "Hear from chats, not only the ones you delegated to: each time one finishes a turn or asks a question, it arrives in this chat as a new message, or through `wait`. Returns each chat's state now; news starts from there.",
+            "description": "Hear from chats, not only the ones you delegated to: each time one finishes a turn, or a delegate asks a question, it arrives in this chat as a new message, or through `wait`. Returns each chat's state now; news starts from there.",
             "inputSchema": { "type": "object", "properties": { "chatIds": chat_ids }, "required": ["chatIds"] },
         },
         {
@@ -155,7 +155,7 @@ fn tools(harness: &str) -> Value {
         },
         {
             "name": "answer",
-            "description": "Answer a question a chat asked: choose among its option labels, write an answer, or both.",
+            "description": "Answer a question a delegate chat asked: choose among its option labels, write an answer, or both.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -351,7 +351,11 @@ async fn call(
                 .filter(|pending| pending.id == prompt_id)
                 .ok_or_else(|| anyhow!("Chat `{}` has no open question `{prompt_id}`; call `status` for its current one.", target.id))?;
             match pending.kind() {
-                "question" => {}
+                "question" if delegation::asks_agents(&store, &target.id, &pending)? => {}
+                "question" => bail!(
+                    "Chat `{}` is not a delegate, so only the user answers its questions.",
+                    target.id
+                ),
                 "env" => bail!(
                     "Only the user can set the variables chat `{}` asks for.",
                     target.id
