@@ -25,6 +25,7 @@ import { noticeRun, runActive, runDisplay, runDuration, runNeverStarted, runResu
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { BackendBadge } from "./BackendLogos";
 import { BranchPill } from "./BranchPill";
+import type { OpenFile } from "./FileReference";
 import { ChatImageScope, Md } from "./Md";
 import { RunContactNotice } from "./RunContactNotice";
 import { useRunClock } from "./RunTiming";
@@ -61,6 +62,7 @@ export function ExperimentOverview({
   experiment,
   lineageNode,
   onOpenExperiment,
+  onOpenFile,
   parentExperiment,
   project,
   runs,
@@ -74,6 +76,7 @@ export function ExperimentOverview({
   experiment: Experiment;
   lineageNode: HistoryNode | null;
   onOpenExperiment: (id: string, intent: TabOpenIntent) => void;
+  onOpenFile: OpenFile;
   parentExperiment: Experiment | null;
   project: Project;
   runs: Run[];
@@ -166,7 +169,7 @@ export function ExperimentOverview({
         {experiment.description && (
           <section className="experiment-overview-section mt-5.5 pt-4.5 border-t border-t-border-variant [&_h2]:mt-0 [&_h2]:mx-0 [&_h2]:mb-3.5 [&_h2]:text-text [&_h2]:text-sm [&_h2]:font-semibold overview-description [&_.md]:text-text [&_.md]:leading-relaxed">
             <h2>{m.experiment_overview_description()}</h2>
-            <Md text={experiment.description} />
+            <Md text={experiment.description} onOpenFile={onOpenFile} />
           </section>
         )}
 
@@ -210,7 +213,7 @@ export function ExperimentOverview({
                 <div
                   className={`experiment-overview-result mt-4 [&.failed]:text-accent-red ${run.status === "failed" ? "failed" : ""}`}
                 >
-                  <Md text={result} />
+                  <Md text={result} onOpenFile={onOpenFile} />
                 </div>
               )}
             </>

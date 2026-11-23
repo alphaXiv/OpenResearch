@@ -30,6 +30,7 @@ async function show(overrides, trackioRuns = []) {
       return { generation: "g", offset: 0, dataBase64: "", nextOffset: 0, eof: true };
     }
     if (path === "/api/compute/hosts") return [];
+    if (path.startsWith("/api/projects/project-a/code-tree")) return { root: "repo", branch: "main", entries: ["notes.md"] };
     if (path === "/api/trackio/projects/project-a/runs") {
       return { dashboardUrl: trackioRuns.length ? "http://127.0.0.1:7860" : null, project: "p", runs: trackioRuns };
     }
@@ -164,4 +165,18 @@ test("Stop asks first; Escape keeps the run, a refusal stays in the dialog, and 
   await click(find('[role="dialog"] button', m.experiments_stop_run()));
   assert.equal(cancels.length, 2);
   assert.equal(dialog(), null);
+});
+
+test("a file reference in the overview description opens the file", async () => {
+  const opened = [];
+  const { container } = await show({
+    view: "overview",
+    experiment: { ...props.experiment, description: '<file path="notes.md" />', chatSessionId: "chat-a", createdAt: 1 },
+    experiments: [],
+    onOpenFile: (...args) => opened.push(args),
+  });
+  const chip = container.querySelector(".file-chip");
+  assert.equal(chip.disabled, false);
+  await click(chip);
+  assert.equal(opened[0][0], "notes.md");
 });

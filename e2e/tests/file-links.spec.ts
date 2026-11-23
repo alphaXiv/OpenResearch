@@ -44,3 +44,26 @@ test('file citations open the artifact they name and never a missing file', asyn
     await expect(page.getByText('0.42', { exact: true })).toBeVisible()
   })
 })
+
+test("an experiment's description opens the files it cites", async ({ page, project, agent, orx }) => {
+  const listing = await page.request.get(`${orx.url}/api/projects/${project.id}/files`)
+  await expect(listing).toBeOK()
+  const { dir } = await listing.json()
+  agent.script('Describe the baseline.', [
+    { run: [
+      'set -e',
+      `printf '# Summary\\n\\nLoss fell to 0.42.\\n' > '${dir}/report.md'`,
+      `id=$(orx create-experiment ${project.id} --title Baseline | sed -n 's/^ *id: *//p')`,
+      `orx exp desc "$id" --set 'Findings are in <file path="report.md" />.'`,
+    ].join('\n') },
+    { say: 'Described the baseline.' },
+  ])
+  await project.open(page)
+  await send(page, 'Describe the baseline.')
+  await expect(page.getByText('Described the baseline.', { exact: true })).toBeVisible()
+
+  await page.getByRole('button', { name: 'Experiments' }).click()
+  await page.getByRole('list', { name: 'Experiments' }).getByRole('listitem').filter({ hasText: 'Baseline' }).click()
+  await page.getByRole('button', { name: /report\.md/ }).click()
+  await expect(page.getByText('Loss fell to 0.42.', { exact: true })).toBeVisible()
+})
