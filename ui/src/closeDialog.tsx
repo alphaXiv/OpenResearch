@@ -173,10 +173,13 @@ export function askBeforeClosing({ showCustomDialog }: ReturnType<typeof createD
   });
 }
 
+/** The agents a restart into an update stops; the others go on with their turns after it. */
+export const stoppedByRestart = (agents: PendingAgent[]) => agents.filter((agent) => !agent.resumesAfterRestart);
+
 /** Experiments carry on through a restart, so only the agents it stops are listed. */
 function RestartDialogContent({ agents: found, machine, open, confirm, cancel, isDisabled }: DialogContentProps<void> & { agents: PendingAgent[] } & Machine) {
   const live = useQuery({ ...machine.queries.getPendingWorkQuery(), gcTime: 0 }, machine.queryClient);
-  const agents = live.data?.agents ?? found;
+  const agents = live.data ? stoppedByRestart(live.data.agents) : found;
   useEffect(() => {
     if (agents.length === 0) cancel();
   }, [agents.length, cancel]);

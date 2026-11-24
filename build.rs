@@ -130,9 +130,10 @@ fn collect_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     }
 }
 
-/// Resource 1 is the icon Explorer shows for orx.exe and the app window loads.
+/// Resource 1 is the icon Explorer shows for orx.exe and the app window loads, and its manifest.
 fn embed_windows_icon() {
     println!("cargo:rerun-if-changed=windows/OpenResearch.ico");
+    println!("cargo:rerun-if-changed=windows/orx.manifest");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
@@ -140,8 +141,17 @@ fn embed_windows_icon() {
     let icon = manifest_dir.join("windows").join("OpenResearch.ico");
     // An absolute path, so it doesn't matter which directory rc.exe resolves against.
     let rc = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("icon.rc");
-    let escaped = icon.display().to_string().replace('\\', "\\\\");
-    std::fs::write(&rc, format!("1 ICON \"{escaped}\"\n")).unwrap();
+    let escape = |path: std::path::PathBuf| path.display().to_string().replace('\\', "\\\\");
+    let manifest = manifest_dir.join("windows").join("orx.manifest");
+    std::fs::write(
+        &rc,
+        format!(
+            "1 ICON \"{}\"\n1 24 \"{}\"\n",
+            escape(icon),
+            escape(manifest)
+        ),
+    )
+    .unwrap();
     embed_resource::compile(&rc, embed_resource::NONE)
         .manifest_required()
         .unwrap();

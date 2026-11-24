@@ -486,6 +486,9 @@ readFileSync(${JSON.stringify(gate)})
     }
   }
   await page.setViewportSize({ width: 1440, height: 1000 })
+  // Left where the 420px layout put it, the pointer would rest on a sidebar chat and open its card over the banner.
+  await page.mouse.move(1439, 500)
+  await expect(page.locator('[data-session-hover-card]')).toHaveCount(0)
   await banner.getByRole('button', { name: /Timed floor/ }).first().hover()
   await page.getByRole('dialog').getByRole('link', { name: /Timed floor/ }).click()
   const latest = page.locator('section', { has: page.getByRole('heading', { name: 'Latest run', exact: true }) })

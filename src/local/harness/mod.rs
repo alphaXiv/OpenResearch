@@ -326,6 +326,21 @@ pub enum ResumeAction {
     Nothing,
 }
 
+/// One chat's kept agent, as a starting server found it.
+#[derive(Debug, Clone)]
+pub struct Adoption {
+    pub keep_id: String,
+    pub session_id: String,
+    /// The owner record's `state`, as this harness wrote it.
+    pub state: serde_json::Value,
+    /// The checkpoint offset of the chat's running turn, which resumes on this agent next.
+    /// Output before it was applied; output after it belongs to that turn, so nothing may
+    /// consume it first. `None` when no turn resumes: unacknowledged output is new.
+    pub resume_at: Option<u64>,
+    /// Commands kept for this agent (`keep::Owner::AgentCommand`): keep id, command id, state.
+    pub commands: Vec<(String, String, serde_json::Value)>,
+}
+
 /// One coding-agent integration. See the module docs for the capability model.
 #[async_trait]
 // async-trait marks its boxed futures `#[must_use]`; clippy 1.99 flags that generated code.
@@ -384,6 +399,23 @@ pub trait Harness: Send + Sync {
         false
     }
 
+    /// Whether [`Harness::run_turn`] honors `ctx.resume`: it goes on with a turn a previous
+    /// server left running on a kept agent, from its checkpoint, without sending the prompt.
+    /// A harness that cannot is never handed a resume; its turns recover as failed instead.
+    fn supports_resume(&self) -> bool {
+        false
+    }
+
+    /// Takes back an agent a previous server kept for this harness (`crate::keep`), before
+    /// any turn resumes on it. An error stops the kept agent and its commands.
+    async fn adopt(
+        &self,
+        _chat: &Arc<crate::local::chat::ChatHost>,
+        _adoption: Adoption,
+    ) -> Result<()> {
+        Err(anyhow!("{} cannot take back a kept agent", self.name()))
+    }
+
     /// Whether native compaction or the shared summarize-and-reseed path is supported.
     fn supports_compaction(&self) -> bool {
         false
@@ -428,12 +460,17 @@ pub trait Harness: Send + Sync {
         title::sanitize_title(&raw)
     }
 
+    /// [`Self::run_one_shot`], as one of the [`ONE_SHOTS`] a restart waits for.
+    async fn one_shot(&self, request: OneShot<'_>) -> Result<String> {
+        ONE_SHOTS.run(self.name(), self.run_one_shot(request)).await
+    }
+
     /// Run one headless request on a throwaway child at the requested
     /// [`OneShotQuality`] and return the model's reply verbatim. The child
     /// cannot write or reach MCP servers (tools are disabled where the CLI
     /// allows), and nothing is recorded in the harness's own session store.
     /// The error says why it couldn't run or failed, in the CLI's own words where it gave any.
-    async fn one_shot(&self, _request: OneShot<'_>) -> Result<String> {
+    async fn run_one_shot(&self, _request: OneShot<'_>) -> Result<String> {
         Err(anyhow!("{} cannot run one-shot requests", self.name()))
     }
 
@@ -638,6 +675,59 @@ fn registry_with_acp(definitions: Vec<crate::local::acp::Definition>) -> Vec<Box
     harnesses
 }
 
+/// The one-shots in flight. Nothing carries one to the next server, so a restart waits a moment
+/// for them to answer, then ends the rest: they are short and cheap to ask again.
+pub static ONE_SHOTS: std::sync::LazyLock<OneShots> = std::sync::LazyLock::new(OneShots::new);
+
+pub struct OneShots {
+    running: tokio::sync::watch::Sender<usize>,
+    ended: tokio::sync::watch::Sender<bool>,
+}
+
+impl OneShots {
+    /// How long [`Self::finish`] waits for one-shots to answer.
+    const GRACE: Duration = Duration::from_secs(5);
+
+    fn new() -> Self {
+        Self {
+            running: tokio::sync::watch::Sender::new(0),
+            ended: tokio::sync::watch::Sender::new(false),
+        }
+    }
+
+    async fn run(
+        &self,
+        agent: &str,
+        answer: impl std::future::Future<Output = Result<String>>,
+    ) -> Result<String> {
+        struct Running<'a>(&'a tokio::sync::watch::Sender<usize>);
+        impl Drop for Running<'_> {
+            fn drop(&mut self) {
+                self.0.send_modify(|running| *running -= 1);
+            }
+        }
+
+        let mut ended = self.ended.subscribe();
+        self.running.send_modify(|running| *running += 1);
+        let _running = Running(&self.running);
+        tokio::select! {
+            answer = answer => answer,
+            _ = ended.wait_for(|ended| *ended) => {
+                Err(anyhow!("OpenResearch restarted before {agent} answered"))
+            }
+        }
+    }
+
+    /// For a restart: waits up to [`Self::GRACE`] for the one-shots in flight, then ends the
+    /// rest and every one asked after, and stops their children.
+    pub async fn finish(&self) {
+        let mut running = self.running.subscribe();
+        let _ = tokio::time::timeout(Self::GRACE, running.wait_for(|running| *running == 0)).await;
+        self.ended.send_replace(true);
+        crate::local::acp::stop_one_shots().await;
+    }
+}
+
 /// A single self-contained request for [`Harness::one_shot`].
 #[derive(Debug, Clone, Copy)]
 pub struct OneShot<'a> {
@@ -811,7 +901,24 @@ pub fn runs_on_acp_host(id: &str) -> bool {
     id.starts_with("acp:") || id == "antigravity"
 }
 
+/// Harnesses a test registers by id, which `session_harness` serves before the registry's.
+#[cfg(test)]
+pub(crate) static TEST_HARNESSES: std::sync::Mutex<Vec<(&str, TestHarness)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) type TestHarness = fn() -> Box<dyn Harness>;
+
 pub fn session_harness(id: &str, session_id: &str) -> Option<Box<dyn Harness>> {
+    #[cfg(test)]
+    if let Some((_, harness)) = TEST_HARNESSES
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(test, _)| *test == id)
+    {
+        return Some(harness());
+    }
     if id.starts_with("acp:") {
         let state = Store::open()
             .ok()?
@@ -1072,6 +1179,31 @@ mod tests {
         assert!(!DefaultHarness.supports_compaction());
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_restart_waits_for_one_shots_then_ends_the_rest() {
+        let one_shots = Arc::new(OneShots::new());
+        let ask = |agent: &'static str, takes: u64| {
+            let one_shots = one_shots.clone();
+            tokio::spawn(async move {
+                let answer = async {
+                    tokio::time::sleep(Duration::from_secs(takes)).await;
+                    Ok(format!("{agent} answered"))
+                };
+                one_shots.run(agent, answer).await
+            })
+        };
+        let quick = ask("Quick", 1);
+        let slow = ask("Slow", 60);
+        tokio::task::yield_now().await;
+
+        let started = tokio::time::Instant::now();
+        one_shots.finish().await;
+        assert_eq!(started.elapsed(), OneShots::GRACE);
+        assert_eq!(quick.await.unwrap().unwrap(), "Quick answered");
+        let ended = slow.await.unwrap().unwrap_err().to_string();
+        assert!(ended.contains("restarted before Slow answered"), "{ended}");
+    }
+
     #[tokio::test]
     async fn title_uses_only_the_selected_opencode_model() {
         struct TitleHarness {
@@ -1086,7 +1218,7 @@ mod tests {
             fn name(&self) -> &str {
                 self.id
             }
-            async fn one_shot(&self, request: OneShot<'_>) -> Result<String> {
+            async fn run_one_shot(&self, request: OneShot<'_>) -> Result<String> {
                 self.calls
                     .lock()
                     .unwrap()

@@ -489,7 +489,7 @@ fn read_only_commands_work_on_a_read_only_store() {
             .command()
             .env("ORX_UP_PORT", &port)
             .env("ORX_UP_AUTH_TOKEN", "token")
-            .args(["exp", "wait", "--timeout", "60"])
+            .args(["exp", "wait", "--timeout", "3"])
             .args(target)
             .output()
             .unwrap();

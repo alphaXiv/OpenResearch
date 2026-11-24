@@ -37,6 +37,13 @@ const toBackend: ProxyOptions = {
     };
     proxy.on("proxyReq", asBackend);
     proxy.on("proxyReqWs", asBackend);
+    // A piped response stays open when the backend goes away mid-stream, so a page's event
+    // stream would never learn to reconnect to the server that replaced it.
+    proxy.on("proxyRes", (proxyRes, _req, res) => {
+      proxyRes.on("close", () => {
+        if (!res.writableEnded) res.destroy();
+      });
+    });
   },
 };
 

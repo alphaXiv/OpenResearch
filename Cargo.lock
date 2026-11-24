@@ -2773,6 +2773,7 @@ dependencies = [
  "once_cell",
  "orx-host",
  "orx-host-proto",
+ "orx-keep",
  "orx-signals",
  "orx-test-support",
  "pbkdf2",
@@ -2842,6 +2843,7 @@ dependencies = [
  "libc",
  "orx-host",
  "orx-host-proto",
+ "orx-keep",
  "orx-signals",
  "orx-test-support",
  "serde",
@@ -2858,6 +2860,17 @@ dependencies = [
  "base64 0.22.1",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "orx-keep"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

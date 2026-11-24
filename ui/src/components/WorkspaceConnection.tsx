@@ -22,7 +22,7 @@ const ICON = "shrink-0 text-subtext";
 
 function connection(status: RemoteSessionStatus) {
   if (status === "connected") return { state: "connected", label: m.remote_machine_connected() } as const;
-  if (status === "connecting" || status === "reconnecting" || status === "applying") return { state: "connecting", label: m.remote_machine_connecting() } as const;
+  if (status === "connecting" || status === "reconnecting" || status === "applying" || status === "restarting") return { state: "connecting", label: m.remote_machine_connecting() } as const;
   return { state: "disconnected", label: m.remote_machine_disconnected() } as const;
 }
 

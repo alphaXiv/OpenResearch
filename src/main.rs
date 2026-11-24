@@ -24,6 +24,7 @@ mod file_lock;
 mod folder_picker;
 mod invocation;
 mod jobs;
+mod keep;
 // Local mode (`orx up`): builds out across stages; not all of it is wired yet.
 #[allow(dead_code)]
 mod local;
@@ -968,9 +969,11 @@ pub struct UpArgs {
     /// Internal persistent dashboard/agent-host mode.
     #[arg(long, hide = true)]
     pub remote_host: bool,
-    /// Serving the desktop app's window, which only restarts when asked.
-    #[arg(skip)]
-    pub desktop_app: bool,
+    /// Serve the desktop window that started this, which only restarts when asked: its
+    /// stdin is the window's lease, and end of input means the window is gone. A contract
+    /// with every window shipped (src/commands/app/FROZEN.md).
+    #[arg(long, hide = true, conflicts_with_all = ["remote", "remote_host", "headless"])]
+    pub app_window: bool,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -981,6 +984,10 @@ pub struct RemoteHostArgs {
 
 #[derive(Clone, Subcommand, Debug)]
 pub enum RemoteHostCommand {
+    Restart {
+        #[arg(long)]
+        expected_instance: String,
+    },
     Ensure {
         #[arg(long)]
         expected_instance: Option<String>,
@@ -1239,11 +1246,24 @@ pub struct PaperArgs {
 }
 
 fn main() {
+    // Before any thread starts: a keeper forks to leave this process tree.
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() == Some(std::ffi::OsStr::new("keep")) {
+        let status = match (args.next(), args.next()) {
+            (Some(dir), None) => orx_keep::run(std::path::Path::new(&dir)).map_or(1, |()| 0),
+            _ => {
+                eprintln!("usage: orx keep KEEPER_DIR");
+                2
+            }
+        };
+        std::process::exit(status);
+    }
     if let Err(error) = commands::remote_host::prepare_readiness_pipe() {
         eprintln!("Could not prepare server readiness: {error}");
         std::process::exit(1);
     }
     run_cli();
+    commands::up::flush_stderr();
 }
 
 // Desktop app mode blocks the main thread while the dashboard runs on worker threads.
@@ -1479,6 +1499,7 @@ async fn run_cli() {
         } else {
             1
         };
+        commands::up::flush_stderr();
         std::process::exit(code);
     }
 }
@@ -1531,8 +1552,10 @@ fn show_error_dialog(message: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 
     // The app's console is hidden, and shared with the agents it runs, so it
-    // doesn't own it.
-    if !owns_its_console() && !commands::app::launched_with_app_arg() {
+    // doesn't own it; the window's server leaves its errors to the window.
+    if commands::app::serves_window()
+        || (!owns_its_console() && !commands::app::launched_with_app_arg())
+    {
         return;
     }
     let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
@@ -1623,6 +1646,9 @@ fn should_capture_command(command: &Command) -> bool {
         command,
         Command::Update(UpdateArgs {
             background: true,
+            ..
+        }) | Command::Up(UpArgs {
+            app_window: true,
             ..
         })
     )

@@ -8,6 +8,7 @@ import { createWorkspaceRouter } from "./router";
 import { MachineSelectionContext } from "./machineSelection";
 import { askBeforeClosing } from "./closeDialog";
 import { QueryDevtools } from "./components/QueryDevtools";
+import { ServerStopped, UpdateHandoff } from "./components/UpdateBanner";
 import { Button, Spinner } from "./components/ui";
 import { mutCreateRemoteSession } from "./queries/settings";
 import { getThemePreference } from "./theme";
@@ -314,6 +315,8 @@ function MachineWorkspaces({
         connect,
       }}
     >
+      {canSwitch && <UpdateHandoff workspace={owner} />}
+      {canSwitch && "__ORX_DESKTOP__" in window && <ServerStopped workspace={owner} />}
       {[...workspaces].map(([id, machine]) => (
         <WorkspaceView
           key={machine.workspace.identity}

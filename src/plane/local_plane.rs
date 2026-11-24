@@ -3,6 +3,7 @@
 use std::time::{Duration, Instant};
 
 use super::{CreateExperimentSpec, DescInput, ProjectEdit, Run, RunListing};
+use crate::commands::remote_host::RELAUNCH_WAIT;
 use crate::error::{anyhow, Context, Result};
 use crate::local::model::{LocalExperiment, LocalProject};
 use crate::store::{is_db_locked, Store};
@@ -424,11 +425,13 @@ impl LocalPlane {
             wait: true,
             ..Default::default()
         };
-        tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), async {
-            ApiClient::discover().await?.wait(filter).await
-        })
+        let client = tokio::time::timeout(
+            deadline.saturating_duration_since(Instant::now()),
+            ApiClient::discover(),
+        )
         .await
-        .map_err(|_| anyhow!("Timed out waiting for a run state change."))?
+        .map_err(|_| anyhow!("Timed out waiting for the OpenResearch server to start."))??;
+        client.wait(filter, deadline).await
     }
 
     // --- create-experiment ------------------------------------------------
@@ -677,32 +680,65 @@ impl ApiClient {
             .bearer_auth(&self.server.token)
     }
 
+    /// Sends a request, waiting out a restarting server: a request refused before it was sent,
+    /// or turned away by a server on its way out, goes to whichever server answers next, for up
+    /// to [`RELAUNCH_WAIT`] or until `deadline`. One the connection dropped after sending is sent
+    /// again only when `repeatable`, since the server may have acted on it.
+    async fn send_waiting(
+        &self,
+        repeatable: bool,
+        deadline: Option<Instant>,
+        request: impl Fn(&Self) -> reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response> {
+        let started = Instant::now();
+        let restart = started + RELAUNCH_WAIT;
+        let deadline = deadline.map_or(restart, |deadline| deadline.min(restart));
+        let mut backoff = Duration::from_millis(250);
+        let mut client = self.clone();
+        loop {
+            let response = request(&client).send().await;
+            let retry = match &response {
+                Ok(response) => response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                Err(error) => error.is_connect() || repeatable && error.is_request(),
+            };
+            if !retry {
+                return Ok(response?);
+            }
+            if Instant::now() + backoff > deadline {
+                let port = client.server.port;
+                let seconds = started.elapsed().as_secs();
+                return Err(match response {
+                    Ok(response) => anyhow!(
+                        "The OpenResearch server on port {port} still answered {} after {seconds} seconds. Ask the user to check that OpenResearch is running.",
+                        response.status()
+                    ),
+                    Err(error) => anyhow!(
+                        "Could not reach the OpenResearch server on port {port} for {seconds} seconds ({error}). Ask the user to check that OpenResearch is running."
+                    ),
+                });
+            }
+            drop(response);
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_secs(5));
+            client = Self::discover().await?;
+        }
+    }
+
     pub async fn json(
         &self,
         method: reqwest::Method,
         path: &str,
         body: Option<&serde_json::Value>,
     ) -> Result<serde_json::Value> {
-        let request = |client: &Self| {
-            let mut request = client.request(method.clone(), path);
-            if let Some(body) = body {
-                request = request.json(body);
-            }
-            request
-        };
-        let response = request(self).send().await;
-        let retry = match &response {
-            Ok(response) => response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE,
-            Err(error) => {
-                error.is_connect() || method == reqwest::Method::GET && error.is_request()
-            }
-        };
-        let response = if retry {
-            drop(response);
-            request(&Self::discover().await?).send().await?
-        } else {
-            response?
-        };
+        let response = self
+            .send_waiting(method == reqwest::Method::GET, None, |client| {
+                let mut request = client.request(method.clone(), path);
+                if let Some(body) = body {
+                    request = request.json(body);
+                }
+                request
+            })
+            .await?;
         if !response.status().is_success() {
             return Err(anyhow!("{}", response.text().await?));
         }
@@ -915,14 +951,40 @@ impl ApiClient {
         Ok(())
     }
 
-    pub async fn wait(&self, filter: crate::commands::up::api_v2::Filter) -> Result<()> {
+    /// Follows `filter` until a run it waits for ends, or fails at `deadline` with what it was
+    /// waiting on: a server to reach, or a state change. The deadline covers every step,
+    /// rediscovery and response headers included.
+    pub async fn wait(
+        &self,
+        filter: crate::commands::up::api_v2::Filter,
+        deadline: Instant,
+    ) -> Result<()> {
+        let waiting_on = std::cell::RefCell::new(format!(
+            "the OpenResearch server at 127.0.0.1:{} to answer. Ask the user to check that OpenResearch is running",
+            self.server.port
+        ));
+        tokio::time::timeout_at(deadline.into(), self.follow(&filter, deadline, &waiting_on))
+            .await
+            .unwrap_or_else(|_| Err(anyhow!("Timed out waiting for {}.", waiting_on.borrow())))
+    }
+
+    async fn follow(
+        &self,
+        filter: &crate::commands::up::api_v2::Filter,
+        deadline: Instant,
+        waiting_on: &std::cell::RefCell<String>,
+    ) -> Result<()> {
         use futures::StreamExt;
         let mut client = self.clone();
         let mut original_in_flight: Option<std::collections::HashSet<String>> = None;
         let mut last_status = None;
         loop {
-            let mut events = client.events(&filter).await?;
-            while let Some(event) = events.next().await {
+            let mut events = client.events(filter, Some(deadline)).await?;
+            *waiting_on.borrow_mut() = "a run state change".into();
+            loop {
+                let Some(event) = events.next().await else {
+                    break;
+                };
                 let mut value = match event {
                     Ok(value) => value,
                     Err(error)
@@ -997,6 +1059,7 @@ impl ApiClient {
                 }
             }
             drop(events);
+            *waiting_on.borrow_mut() = "the OpenResearch server to start".into();
             client = Self::discover().await?;
         }
     }
@@ -1004,28 +1067,14 @@ impl ApiClient {
     pub async fn events(
         &self,
         filter: &crate::commands::up::api_v2::Filter,
+        deadline: Option<Instant>,
     ) -> Result<impl futures::Stream<Item = Result<serde_json::Value>>> {
         use futures::{StreamExt, TryStreamExt};
         let response = self
-            .request(reqwest::Method::GET, "events")
-            .query(filter)
-            .send()
-            .await;
-        let retry = match &response {
-            Ok(response) => response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE,
-            Err(error) => error.is_connect() || error.is_request(),
-        };
-        let response = if retry {
-            drop(response);
-            Self::discover()
-                .await?
-                .request(reqwest::Method::GET, "events")
-                .query(filter)
-                .send()
-                .await?
-        } else {
-            response?
-        };
+            .send_waiting(true, deadline, |client| {
+                client.request(reqwest::Method::GET, "events").query(filter)
+            })
+            .await?;
         if !response.status().is_success() {
             return Err(anyhow!("{}", response.text().await?));
         }
@@ -1098,7 +1147,7 @@ impl ApiClient {
         };
         let mut client = self.clone();
         let mut events = if follow {
-            Some(client.events(&filter).await?)
+            Some(client.events(&filter, None).await?)
         } else {
             None
         };
@@ -1129,7 +1178,7 @@ impl ApiClient {
                             && (error.is_connect() || error.is_request() || error.is_body()) =>
                     {
                         client = Self::discover().await?;
-                        events = Some(client.events(&filter).await?);
+                        events = Some(client.events(&filter, None).await?);
                         continue 'follow;
                     }
                     Err(error) => return Err(error.into()),
@@ -1147,7 +1196,7 @@ impl ApiClient {
                     Ok(bytes) => bytes,
                     Err(error) if follow && error.is_body() => {
                         client = Self::discover().await?;
-                        events = Some(client.events(&filter).await?);
+                        events = Some(client.events(&filter, None).await?);
                         continue 'follow;
                     }
                     Err(error) => return Err(error.into()),
@@ -1216,7 +1265,7 @@ impl ApiClient {
                 }
                 _ => {
                     client = Self::discover().await?;
-                    events = Some(client.events(&filter).await?);
+                    events = Some(client.events(&filter, None).await?);
                 }
             }
         }
