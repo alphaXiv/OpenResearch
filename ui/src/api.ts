@@ -1023,8 +1023,12 @@ export interface LocalMachine {
   hostname: string;
   os: string;
   arch: string;
-  /** CPU brand string on macOS (e.g. "Apple M2 Pro"). */
+  /** The CPU's brand string, e.g. "Apple M2 Pro". */
   chip: string | null;
+  /** The OS and its version, e.g. "macOS 15.2". */
+  osName: string | null;
+  /** The computer's model, e.g. "MacBook Pro". */
+  model: string | null;
   cpuCount: number;
   memBytes: number | null;
   gpus: LocalGpu[];
@@ -1163,6 +1167,11 @@ export interface ProjectGitStatus {
     url: string | null;
     syncStatus: string | null;
   };
+}
+
+/** Where Report a bug files: Linear when true, GitHub otherwise. Shared by every checkout on the machine. */
+export interface BugReportSettings {
+  linear: boolean;
 }
 
 export interface TelemetrySettings {
@@ -3126,6 +3135,10 @@ export function createApi(
 
   const getTelemetry = (signal?: AbortSignal) => get<TelemetrySettings>("/api/settings/telemetry", signal);
 
+  const getBugReports = (signal?: AbortSignal) => get<BugReportSettings>("/api/settings/bug-reports", signal);
+
+  const setBugReports = (linear: boolean) => post<BugReportSettings>("/api/settings/bug-reports", { linear });
+
   const setTelemetry = (enabled: boolean) =>
     post<TelemetrySettings>("/api/settings/telemetry", { enabled });
 
@@ -3627,6 +3640,8 @@ export function createApi(
     importSharedProject,
     getTelemetry,
     setTelemetry,
+    getBugReports,
+    setBugReports,
     captureUiEvent,
     reportLocale,
     getHarnessSetupCommands,

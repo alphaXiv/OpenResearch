@@ -85,6 +85,8 @@ const env = {
   ...process.env,
   ORX_DATA_DIR: path.join(LIVE, 'data'),
   XDG_CONFIG_HOME: path.join(LIVE, 'config'),
+  // Settings every checkout shares, such as where bug reports go.
+  ORX_SHARED_CONFIG_DIR: path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'openresearch'),
   ORX_CACHE_DIR: path.join(DEV, 'cache'),
 }
 
