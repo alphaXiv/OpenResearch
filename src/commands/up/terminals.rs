@@ -62,6 +62,8 @@ struct View {
     viewers: u64,
     /// A cursor-position query nobody has answered; ConPTY holds the shell's output until then.
     cursor_query: bool,
+    /// The end of the last output, held while it may be the start of a cursor query.
+    held: Vec<u8>,
     exit: Option<Exit>,
 }
 
@@ -394,27 +396,14 @@ impl Terminal {
     async fn output(&self, offset: u64, bytes: Vec<u8>) {
         let (frames, live, answer) = {
             let mut view = self.view.lock().unwrap();
-            // A query answered twice reaches the shell as input, which ConPTY reads as F3.
-            let mut live = Vec::with_capacity(bytes.len());
-            let mut rest = &bytes[..];
-            let mut at_offset = offset;
-            while let Some(at) = cursor_query(rest) {
-                view.scrollback.extend(&rest[..at]);
-                live.extend_from_slice(&rest[..at]);
-                if at_offset + at as u64 >= self.answered_until {
-                    view.cursor_query = true;
-                    live.extend_from_slice(CURSOR_QUERY);
-                }
-                at_offset += (at + CURSOR_QUERY.len()) as u64;
-                rest = &rest[at + CURSOR_QUERY.len()..];
-            }
-            view.scrollback.extend(rest);
-            live.extend_from_slice(rest);
+            let scan = scan_queries(&mut view.held, offset, &bytes, self.answered_until);
+            view.cursor_query |= scan.asked;
+            view.scrollback.extend(&scan.shown);
             let excess = view.scrollback.len().saturating_sub(SCROLLBACK);
             view.scrollback.drain(..excess);
             match &view.viewer {
-                Some(viewer) => (Some(viewer.frames.clone()), live, false),
-                None => (None, live, std::mem::take(&mut view.cursor_query)),
+                Some(viewer) => (Some(viewer.frames.clone()), scan.live, false),
+                None => (None, scan.live, std::mem::take(&mut view.cursor_query)),
             }
         };
         if let Some(frames) = frames {
@@ -535,6 +524,47 @@ fn cursor_query(bytes: &[u8]) -> Option<usize> {
     bytes
         .windows(CURSOR_QUERY.len())
         .position(|window| window == CURSOR_QUERY)
+}
+
+struct Scan {
+    /// For the scrollback, which never holds a query: one replayed would be answered again.
+    shown: Vec<u8>,
+    /// For the page, with each query still to answer.
+    live: Vec<u8>,
+    asked: bool,
+}
+
+/// Splits output from `offset` on into what the scrollback and the page get. A query is found
+/// even when it straddles two outputs, since `held` keeps an end that may begin one.
+fn scan_queries(held: &mut Vec<u8>, offset: u64, bytes: &[u8], answered_until: u64) -> Scan {
+    let mut at_offset = offset - held.len() as u64;
+    let joined = [std::mem::take(held).as_slice(), bytes].concat();
+    let mut scan = Scan {
+        shown: Vec::with_capacity(joined.len()),
+        live: Vec::with_capacity(joined.len()),
+        asked: false,
+    };
+    let mut rest = &joined[..];
+    while let Some(at) = cursor_query(rest) {
+        scan.shown.extend_from_slice(&rest[..at]);
+        scan.live.extend_from_slice(&rest[..at]);
+        // A query answered twice reaches the shell as input, which ConPTY reads as F3.
+        if at_offset + at as u64 >= answered_until {
+            scan.asked = true;
+            scan.live.extend_from_slice(CURSOR_QUERY);
+        }
+        at_offset += (at + CURSOR_QUERY.len()) as u64;
+        rest = &rest[at + CURSOR_QUERY.len()..];
+    }
+    let partial = (1..CURSOR_QUERY.len())
+        .rev()
+        .find(|&len| rest.ends_with(&CURSOR_QUERY[..len]))
+        .unwrap_or(0);
+    let (whole, start) = rest.split_at(rest.len() - partial);
+    scan.shown.extend_from_slice(whole);
+    scan.live.extend_from_slice(whole);
+    *held = start.to_vec();
+    scan
 }
 
 /// Reads the shell's output for as long as the terminal is registered, viewed or not.

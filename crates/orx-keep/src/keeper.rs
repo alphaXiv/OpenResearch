@@ -328,6 +328,7 @@ fn serve(dir: &Path, spec: Spec, started: Started) -> io::Result<()> {
 /// Retains the child's output under the spec's policy until it ends.
 fn pump(shared: &Shared, output: &mut dyn Read) {
     let mut chunk = vec![0; wire::MAX_OUTPUT];
+    let mut tail = Vec::new();
     loop {
         if let Retain::Unacked { limit } = shared.retain {
             let mut state = shared.lock();
@@ -352,7 +353,7 @@ fn pump(shared: &Shared, output: &mut dyn Read) {
             state.retained.drain(..excess);
             state.oldest += excess as u64;
         }
-        if shared.answers_cursor_queries && contains(bytes, CURSOR_QUERY) {
+        if shared.answers_cursor_queries && asks_cursor(&mut tail, bytes) {
             state.cursor_query = true;
             if state.attachment == 0 {
                 shared.answer_cursor_query(&mut state);
@@ -369,6 +370,16 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
         .any(|window| window == needle)
+}
+
+/// Whether `bytes` holds or completes a cursor query, with `tail` the end of the output before.
+fn asks_cursor(tail: &mut Vec<u8>, bytes: &[u8]) -> bool {
+    let reach = CURSOR_QUERY.len() - 1;
+    let edge = [tail.as_slice(), &bytes[..bytes.len().min(reach)]].concat();
+    let asks = contains(&edge, CURSOR_QUERY) || contains(bytes, CURSOR_QUERY);
+    tail.extend_from_slice(&bytes[bytes.len().saturating_sub(reach)..]);
+    tail.drain(..tail.len().saturating_sub(reach));
+    asks
 }
 
 /// Reads against one deadline: `set_read_timeout` alone restarts on every read.
@@ -583,5 +594,26 @@ fn send(shared: &Shared, mut stream: TcpStream, generation: u64, welcome: Welcom
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cursor_query_split_across_reads_is_still_seen() {
+        let mut tail = Vec::new();
+        assert!(!asks_cursor(&mut tail, b"prompt \x1b["));
+        assert!(asks_cursor(&mut tail, b"6n more"));
+        assert!(!asks_cursor(&mut tail, b"plain"));
+        // One byte at a time.
+        let mut tail = Vec::new();
+        let asked: Vec<bool> = CURSOR_QUERY
+            .iter()
+            .map(|byte| asks_cursor(&mut tail, &[*byte]))
+            .collect();
+        assert_eq!(asked, [false, false, false, true]);
+        assert!(asks_cursor(&mut Vec::new(), b"a\x1b[6nb"));
     }
 }

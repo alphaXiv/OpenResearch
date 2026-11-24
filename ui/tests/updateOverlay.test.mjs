@@ -7,10 +7,6 @@ import { m } from "../src/paraglide/messages.js";
 import { find, render, renderApp, serve, serveApp, settle } from "./render.mjs";
 
 let loads = 0;
-const waitFor = async (done) => {
-  for (let tries = 0; tries < 100 && !done(); tries++) await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
-  assert.ok(done());
-};
 /** Runs public/update-overlay.js as index.html does on each page load. */
 const loadPage = () => import(`../public/update-overlay.js?load=${++loads}`);
 const overlay = () => document.querySelector('[role="alertdialog"]');
@@ -116,13 +112,19 @@ test("a desktop page whose server stopped says why, and offers to start it again
   await act(() => find("button", m.server_stopped_quit()).click());
   assert.deepEqual(sent, ["server:asking", "app:quit"]);
 
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   await act(() => find("button", m.server_stopped_restart()).click());
   assert.deepEqual(sent, ["server:asking", "app:quit", "server:start"]);
   assert.equal(overlay().getAttribute("aria-busy"), "true");
   assert.equal(find("button", m.server_stopped_restart()), null);
   assert.equal(find("summary", m.server_stopped_details()), null);
+  await act(async () => t.mock.timers.tick(500));
+  await settle();
+  assert.equal(reload.mock.callCount(), 0, "the page waits for the server it started");
   up = true;
-  await waitFor(() => reload.mock.callCount() === 1);
+  await act(async () => t.mock.timers.tick(500));
+  await settle();
+  assert.equal(reload.mock.callCount(), 1);
 });
 
 test("a server that stopped without a reason, or under a window that sends none, offers the restart alone", async () => {

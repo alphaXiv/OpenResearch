@@ -473,3 +473,28 @@ async fn closing_a_tab_waits_for_its_terminal_to_finish_opening() {
     assert!(close.await);
     close_where.await;
 }
+
+#[test]
+fn a_cursor_query_split_across_outputs_is_asked_once_and_kept_out_of_the_scrollback() {
+    let mut held = Vec::new();
+    let first = scan_queries(&mut held, 0, b"ab\x1b[", 0);
+    assert_eq!((first.shown.as_slice(), first.asked), (&b"ab"[..], false));
+    let second = scan_queries(&mut held, 4, b"6ncd", 0);
+    assert_eq!(second.shown, b"cd");
+    assert_eq!(second.live, [CURSOR_QUERY, b"cd"].concat());
+    assert!(second.asked);
+
+    // Answered before this server attached: dropped, not asked again.
+    let mut held = Vec::new();
+    scan_queries(&mut held, 0, b"\x1b", 10);
+    let replayed = scan_queries(&mut held, 1, b"[6nok", 10);
+    assert_eq!(
+        (replayed.live.as_slice(), replayed.asked),
+        (&b"ok"[..], false)
+    );
+
+    // An escape that starts something else is shown once the next output tells.
+    let mut held = Vec::new();
+    assert!(scan_queries(&mut held, 0, b"x\x1b", 0).live == b"x");
+    assert_eq!(scan_queries(&mut held, 2, b"[0m", 0).live, b"\x1b[0m");
+}
