@@ -1073,8 +1073,7 @@ impl CodexHost {
         bin: Option<&Path>,
         skills: Option<u64>,
     ) -> Option<Arc<CodexClient>> {
-        let guard = self.inner.lock().await;
-        let client = guard.get(session_id)?;
+        let client = self.inner.lock().await.get(session_id)?.clone();
         if client.native_store() == native_store
             && client.profile.as_deref() == profile
             && bin.is_none_or(|bin| bin == client.bin)
@@ -1084,7 +1083,7 @@ impl CodexHost {
             && matches!(client.child.lock().await.try_wait(), Ok(None))
         {
             client.touch();
-            Some(client.clone())
+            Some(client)
         } else {
             None
         }

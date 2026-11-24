@@ -461,7 +461,6 @@ impl AgentChild {
 
 /// Spawn `opencode serve` in the session's worktree and wait for it to come
 /// up healthy.
-#[expect(clippy::too_many_arguments)]
 async fn spawn_agent(
     project: &LocalProject,
     model: Option<&str>,
@@ -470,7 +469,6 @@ async fn spawn_agent(
     native_store: NativeStore,
     binary: ResolvedBinary,
     database: native_store::opencode_database::DatabaseLease,
-    skills: Option<u64>,
 ) -> Result<AgentChild> {
     // The clone/worktree setup inside can hit the network; keep it off the
     // async workers.
@@ -530,7 +528,7 @@ async fn spawn_agent(
         config,
         native_store,
         alphaxiv_signed_in: crate::alphaxiv::signed_in(),
-        skills,
+        skills: None,
         binary,
         endpoint,
         database,
@@ -1017,9 +1015,9 @@ impl AgentHost {
             native_store,
             binary,
             database,
-            skills,
         )
         .await?;
+        agent.skills = skills;
         let mut inner = self.inner.lock().await;
         if *cancelled.borrow() || self.stopping.load(std::sync::atomic::Ordering::SeqCst) {
             if let Err(error) = agent.child.kill().await {

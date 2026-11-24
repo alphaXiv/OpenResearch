@@ -31,7 +31,8 @@ private to this chat session.
 - Artifacts directory: `{artifacts}` — where durable project outputs go:
   reports, figures, images, CSVs, PDFs, and any folder or archive the user asked
   for. Write them there directly: the Artifacts panel lists only this directory,
-  never your worktree.
+  never your worktree. A paper's `.tex`, its figures and its PDF are the
+  exception and stay in the worktree (see `orx-paper`).
 
 ## Project state
 

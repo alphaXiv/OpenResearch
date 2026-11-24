@@ -1870,7 +1870,7 @@ fn stop_process_tree(pid: u32) {
 }
 
 /// Whether the agent `pid` still runs a command it started in a session of its
-/// own, as agy starts each of its commands. A process tree it cannot read
+/// own, as agy's commands and Codex's background terminals run. A process tree it cannot read
 /// counts as busy.
 #[cfg(unix)]
 pub(crate) fn runs_a_detached_command(pid: u32) -> bool {
