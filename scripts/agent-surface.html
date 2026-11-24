@@ -1,0 +1,581 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>orx agent surface</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f9f9f7; --surface: #fcfcfb; --raised: #ffffff;
+    --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --line: #e1e0d9; --line-2: #c3c2b7; --accent: #2a78d6; --mark: #fde68a;
+    --c1: #2a78d6; --c2: #eb6834; --c3: #1baf7a; --c4: #eda100; --c5: #e87ba4;
+    --warn: #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0d0d0d; --surface: #1a1a19; --raised: #222221;
+      --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+      --line: #2c2c2a; --line-2: #383835; --accent: #3987e5; --mark: #6b5310;
+      --c1: #3987e5; --c2: #d95926; --c3: #199e70; --c4: #c98500; --c5: #d55181;
+      --warn: #e66767;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+  code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+  header { position: sticky; top: 0; z-index: 2; background: var(--page); border-bottom: 1px solid var(--line); padding: 12px 20px 0; }
+  .title { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  h1 { font-size: 17px; margin: 0; }
+  .meta { color: var(--muted); font-size: 12px; }
+  .bar { display: flex; align-items: center; gap: 4px; margin-top: 10px; flex-wrap: wrap; }
+  .tab { border: 0; background: none; color: var(--ink-2); font: inherit; padding: 8px 12px; border-bottom: 2px solid transparent; cursor: pointer; }
+  .tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+  .tab .n { color: var(--muted); font-weight: 400; margin-left: 4px; }
+  input[type="search"] { margin-left: auto; width: min(320px, 100%); padding: 6px 10px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--surface); color: var(--ink); font: inherit; margin-bottom: 6px; }
+  main { padding: 16px 20px 60px; max-width: 1400px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; margin-bottom: 20px; }
+  .tile { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .tile b { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
+  .tile span { color: var(--ink-2); font-size: 12px; }
+  h2 { font-size: 15px; margin: 22px 0 8px; }
+  .note { color: var(--ink-2); font-size: 12.5px; margin: 0 0 10px; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); margin-bottom: 8px; }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  .budget { display: grid; grid-template-columns: minmax(180px, 300px) 1fr 64px; gap: 2px 10px; align-items: center; }
+  .budget .row { display: contents; cursor: pointer; }
+  .budget .row:hover .label { color: var(--accent); }
+  .budget .label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12.5px; }
+  .budget .track { height: 14px; position: relative; }
+  .budget .fill { height: 100%; border-radius: 0 4px 4px 0; min-width: 2px; }
+  .budget .v { text-align: right; font-variant-numeric: tabular-nums; color: var(--ink-2); font-size: 12px; }
+  #tip { position: fixed; pointer-events: none; background: var(--raised); border: 1px solid var(--line-2); border-radius: 6px; padding: 6px 8px; font-size: 12px; box-shadow: 0 4px 14px rgb(0 0 0 / .15); display: none; z-index: 5; max-width: 340px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
+  .card h3 { margin: 0 0 4px; font-size: 14px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .badge { font-size: 11px; font-weight: 500; padding: 1px 6px; border-radius: 10px; border: 1px solid var(--line-2); color: var(--ink-2); white-space: nowrap; }
+  .badge.warn { border-color: var(--warn); color: var(--warn); }
+  .desc { margin: 4px 0 8px; white-space: pre-wrap; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; vertical-align: top; padding: 5px 8px; border-top: 1px solid var(--line); }
+  th { font-weight: 600; color: var(--ink-2); font-size: 12px; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .variant { color: var(--c4); font-size: 12px; margin-top: 2px; }
+  .cli > tbody > tr.cmd > td:first-child { white-space: nowrap; }
+  .cli tr.cmd { cursor: pointer; }
+  .cli tr.cmd:hover td { background: var(--surface); }
+  .cli tr.cmd.hidden-cmd code { color: var(--muted); }
+  .cli tr.detail > td { background: var(--surface); padding: 10px 14px 14px; }
+  .filters { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; font-size: 13px; }
+  .split { display: grid; grid-template-columns: minmax(220px, 320px) 1fr; gap: 16px; align-items: start; }
+  .list { position: sticky; top: 110px; max-height: calc(100vh - 130px); overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  .list button { display: flex; justify-content: space-between; gap: 8px; width: 100%; text-align: left; border: 0; border-top: 1px solid var(--line); background: none; color: var(--ink); font: inherit; padding: 6px 10px; cursor: pointer; }
+  .list button:first-child { border-top: 0; }
+  .list button.child { padding-left: 24px; color: var(--ink-2); font-size: 12.5px; }
+  .list button[aria-current="true"] { background: var(--raised); box-shadow: inset 3px 0 0 var(--accent); }
+  .list .size { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .doc pre { white-space: pre-wrap; word-break: break-word; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin: 0; }
+  mark { background: var(--mark); color: inherit; border-radius: 2px; }
+  a, .link { color: var(--accent); cursor: pointer; text-decoration: none; }
+  a:hover, .link:hover { text-decoration: underline; }
+  .mentions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .empty { color: var(--muted); padding: 20px 0; }
+  .graph { display: grid; grid-template-columns: 300px 1fr; gap: 16px; align-items: start; }
+  .graph svg { width: 100%; height: calc(100vh - 130px); min-height: 520px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; cursor: grab; }
+  .graph svg text { font-size: 11px; fill: var(--ink-2); paint-order: stroke; stroke: var(--surface); stroke-width: 3px; pointer-events: none; }
+  .graph .edge { stroke: var(--muted); stroke-opacity: .45; }
+  .graph .edge.cmd { stroke-dasharray: 2 3; }
+  .graph .node circle { stroke: var(--surface); stroke-width: 1.5px; cursor: pointer; }
+  .graph .node.root circle { stroke: var(--ink); stroke-width: 2px; }
+  .graph .dim { opacity: .12; }
+  .graph-side h2:first-child { margin-top: 0; }
+  .error { border-left: 3px solid var(--warn); padding: 6px 10px; background: var(--surface); margin-bottom: 10px; }
+</style>
+</head>
+<body>
+<!--SURFACE-->
+<header>
+  <div class="title"><h1>orx agent surface</h1><span class="meta" id="meta"></span></div>
+  <div class="bar" role="tablist" id="tabs"></div>
+</header>
+<main id="main"></main>
+<div id="tip" role="tooltip"></div>
+<script>
+const S = JSON.parse(document.getElementById("surface").textContent);
+const tokens = (text) => Math.round(text.length / 4);
+const fmt = (n) => n.toLocaleString("en-US");
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const el = (html) => { const t = document.createElement("template"); t.innerHTML = html.trim(); return t.content.firstElementChild; };
+const highlight = (text, q) => {
+  const safe = esc(text);
+  if (!q) return safe;
+  const pattern = new RegExp(esc(q).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+  return safe.replace(pattern, (m) => `<mark>${m}</mark>`);
+};
+
+// Documents: every text an agent reads, addressable by the label the dump's mentions use.
+const docs = [];
+for (const p of S.prompts) if (!p.expands) docs.push({ id: p.label, tab: "prompts", label: p.label, content: p.content, kind: "prompt" });
+const slashAliases = S.prompts.filter((p) => p.expands);
+for (const s of S.skills) {
+  docs.push({ id: s.name, tab: "skills", label: s.name, content: s.content, kind: "skill", skill: s });
+  for (const r of s.resources) docs.push({ id: `${s.name}/${r.path}`, tab: "skills", label: r.path, content: r.content, kind: "resource", parent: s.name });
+}
+const docById = new Map(docs.map((d) => [d.id, d]));
+
+// MCP tools.
+const listing = S.mcp.alphaxivListing ?? {};
+const access = new Map(S.mcp.alphaxiv.map((t) => [t.name, t.access]));
+const orxTools = [{ ...S.mcp.approve, only: "Claude permission prompt" }, ...S.mcp.tools];
+const antigravity = new Map(S.mcp.antigravityTools.map((t) => [t.name, t]));
+const alphaxivTools = listing.tools ?? [];
+
+// CLI: flatten the tree and attach mentions.
+const commands = [];
+(function walk(node, depth, hiddenAbove) {
+  const hidden = hiddenAbove || node.hidden;
+  commands.push({ ...node, depth, hidden });
+  for (const sub of node.subcommands) walk(sub, depth + 1, hidden);
+})(S.cli, 0, false);
+const byPath = new Map(commands.map((c) => [c.path, c]));
+for (const c of commands) { c.texts = new Map(); c.flagCounts = new Map(); }
+for (const m of S.mentions) {
+  const c = byPath.get(m.command);
+  if (!c || !m.command) continue;
+  c.texts.set(m.text, (c.texts.get(m.text) ?? 0) + 1);
+  for (const f of m.flags) c.flagCounts.set(f, (c.flagCounts.get(f) ?? 0) + 1);
+}
+const spellings = (a) => [a.long && `--${a.long}`, a.short && `-${a.short}`, ...a.aliases.map((x) => `--${x}`)].filter(Boolean);
+const flagTaught = (c, a) => spellings(a).reduce((n, f) => n + (c.flagCounts.get(f) ?? 0), 0);
+const taughtBelow = (c) => commands.some((d) => d.path.startsWith(`${c.path} `) && d.texts.size);
+const leaves = commands.filter((c) => c.path && !c.subcommands.length);
+const flags = commands.flatMap((c) => c.args.filter((a) => !a.positional).map((a) => ({ c, a })));
+
+const budget = [
+  ...orxTools.map((t) => ({ label: `orx · ${t.name}`, n: tokens(JSON.stringify(t)), cat: 0, go: ["mcp", t.name] })),
+  ...alphaxivTools.map((t) => ({ label: `alphaxiv · ${t.name}`, n: tokens(JSON.stringify(t)), cat: 0, go: ["mcp", t.name] })),
+  ...docs.map((d) => ({ label: d.parent ? `${d.parent} · ${d.label}` : d.label, n: tokens(d.content), cat: { prompt: 1, skill: 2, resource: 3 }[d.kind], go: [d.tab, d.id] })),
+].sort((a, b) => b.n - a.n);
+const CATS = ["MCP tool definitions", "Prompts", "Skills", "Skill resources"];
+const sum = (cat) => budget.filter((b) => b.cat === cat).reduce((n, b) => n + b.n, 0);
+
+// State and routing.
+const state = { tab: "overview", q: "", selected: { prompts: S.prompts[0]?.label, skills: S.skills[0]?.name }, open: new Set(), showHidden: true, taught: "all" };
+const TABS = [
+  ["overview", "Overview", null],
+  ["graph", "Fan-out", null],
+  ["mcp", "MCP tools", orxTools.length + alphaxivTools.length],
+  ["cli", "CLI", leaves.length],
+  ["prompts", "Prompts", S.prompts.length],
+  ["skills", "Skills", S.skills.length],
+];
+
+function go(tab, id) {
+  state.tab = tab;
+  if (tab === "prompts" || tab === "skills") state.selected[tab] = id;
+  if (tab === "cli" && id) state.open.add(id);
+  render();
+  if (tab === "mcp" && id) document.getElementById(`tool-${id}`)?.scrollIntoView({ block: "center" });
+  if (tab === "cli" && id) document.getElementById(`cmd-${id}`)?.scrollIntoView({ block: "center" });
+  if (tab !== "mcp" && tab !== "cli") window.scrollTo(0, 0);
+}
+
+document.getElementById("meta").textContent =
+  [S.revision, `generated ${new Date(S.generatedAt).toLocaleString()}`, "≈ tokens are characters ÷ 4"].filter(Boolean).join(" · ");
+const tabs = document.getElementById("tabs");
+const search = el(`<input type="search" placeholder="Filter" aria-label="Filter">`);
+search.addEventListener("input", () => { state.q = search.value.trim(); render(); });
+for (const [id, label, n] of TABS) {
+  const b = el(`<button class="tab" role="tab">${label}${n == null ? "" : `<span class="n">${n}</span>`}</button>`);
+  b.dataset.tab = id;
+  b.onclick = () => go(id);
+  tabs.append(b);
+}
+tabs.append(search);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "/" && document.activeElement !== search) { e.preventDefault(); search.focus(); }
+  if (e.key === "Escape" && document.activeElement === search) { search.value = ""; state.q = ""; render(); search.blur(); }
+});
+
+const tip = document.getElementById("tip");
+const showTip = (e, html) => { tip.innerHTML = html; tip.style.display = "block"; tip.style.left = `${Math.min(e.clientX + 12, innerWidth - 360)}px`; tip.style.top = `${e.clientY + 14}px`; };
+const hideTip = () => { tip.style.display = "none"; };
+
+function render() {
+  for (const b of tabs.querySelectorAll(".tab")) b.setAttribute("aria-selected", b.dataset.tab === state.tab);
+  const main = document.getElementById("main");
+  main.replaceChildren(({ overview, graph, mcp, cli, prompts: () => documents("prompts"), skills: () => documents("skills") })[state.tab]());
+}
+
+function overview() {
+  const root = el(`<div></div>`);
+  const untaughtLeaves = leaves.filter((c) => !c.hidden && !c.texts.size);
+  const untaughtFlags = flags.filter(({ c, a }) => !c.hidden && !a.hidden && !flagTaught(c, a));
+  const tiles = [
+    [orxTools.length + alphaxivTools.length, `MCP tools (${orxTools.length} orx, ${alphaxivTools.length || "?"} alphaXiv)`, "mcp"],
+    [leaves.length, `CLI commands, ${leaves.filter((c) => c.hidden).length} hidden`, "cli"],
+    [untaughtLeaves.length, "visible commands no agent text names", "cli"],
+    [flags.length, "CLI flags and options", "cli"],
+    [untaughtFlags.length, "visible flags no agent text names", "cli"],
+    [S.prompts.length, "prompts", "prompts"],
+    [S.skills.length, `skills, ${S.skills.reduce((n, s) => n + s.resources.length, 0)} resources`, "skills"],
+    [fmt(budget.reduce((n, b) => n + b.n, 0)), "≈ tokens across all of it", null],
+  ];
+  const grid = el(`<div class="tiles"></div>`);
+  for (const [n, label, tab] of tiles) {
+    const t = el(`<div class="tile"><b>${n}</b><span>${label}</span></div>`);
+    if (tab) { t.style.cursor = "pointer"; t.onclick = () => go(tab); }
+    grid.append(t);
+  }
+  root.append(grid);
+  root.append(el(`<h2>Size of each piece</h2>`));
+  root.append(el(`<p class="note">MCP tool definitions are measured as their JSON. Click a row to open it.</p>`));
+  const legend = el(`<div class="legend"></div>`);
+  CATS.forEach((name, i) => legend.append(el(`<span><span class="swatch" style="background:var(--c${i + 1})"></span>${name} · ≈${fmt(sum(i))}</span>`)));
+  root.append(legend);
+  const chart = el(`<div class="budget" role="table" aria-label="Approximate tokens per piece"></div>`);
+  const max = budget[0]?.n || 1;
+  const q = state.q.toLowerCase();
+  for (const b of budget.filter((b) => !q || b.label.toLowerCase().includes(q))) {
+    const row = el(`<div class="row" role="row"><div class="label" role="cell">${esc(b.label)}</div><div class="track" role="cell"><div class="fill" style="width:${(b.n / max) * 100}%;background:var(--c${b.cat + 1})"></div></div><div class="v" role="cell">${fmt(b.n)}</div></div>`);
+    row.onclick = () => go(...b.go);
+    for (const cell of row.children) {
+      cell.addEventListener("mousemove", (e) => showTip(e, `<b>${esc(b.label)}</b><br>${CATS[b.cat]} · ≈${fmt(b.n)} tokens`));
+      cell.addEventListener("mouseleave", hideTip);
+    }
+    chart.append(row);
+  }
+  root.append(chart);
+  return root;
+}
+
+// Fan-out: what reaches an agent from the playbook, hop by hop.
+const KINDS = { mcp: ["MCP", 1], prompt: ["Prompt", 2], skill: ["Skill", 3], resource: ["Skill resource", 4], cli: ["CLI command", 5] };
+const fanout = (() => {
+  const nodes = new Map();
+  const edges = [];
+  const add = (id, kind, label, n, go) => nodes.has(id) || nodes.set(id, { id, kind, label, n, go });
+  const link = (source, target, type) => {
+    if (source !== target && nodes.has(source) && nodes.has(target) && !edges.some((e) => e.source === source && e.target === target)) edges.push({ source, target, type });
+  };
+  for (const d of docs) add(d.id, d.kind, d.parent ? `${d.parent}/${d.label}` : d.label, tokens(d.content), [d.tab, d.id]);
+  for (const p of slashAliases) add(p.label, "prompt", p.label, 0, ["skills", p.expands]);
+  add("mcp:orx", "mcp", "orx MCP", 0, ["mcp"]);
+  add("mcp:alphaxiv", "mcp", "alphaxiv MCP", 0, ["mcp"]);
+  for (const t of orxTools) add(`tool:orx:${t.name}`, "mcp", t.name, tokens(JSON.stringify(t)), ["mcp", t.name]);
+  for (const t of alphaxivTools) add(`tool:alphaxiv:${t.name}`, "mcp", t.name, tokens(JSON.stringify(t)), ["mcp", t.name]);
+  for (const c of commands) if (c.texts.size) add(`cmd:${c.path}`, "cli", `orx ${c.path}`, 0, ["cli", c.path]);
+
+  const local = S.skills.filter((s) => s.inLocalSet);
+  for (const s of local) link("playbook", s.name, "context");
+  link("playbook", "mcp:orx", "inject");
+  link("playbook", "mcp:alphaxiv", "inject");
+  for (const t of orxTools) link("mcp:orx", `tool:orx:${t.name}`, "inject");
+  for (const t of alphaxivTools) link("mcp:alphaxiv", `tool:alphaxiv:${t.name}`, "inject");
+  link("mcp:alphaxiv", "alphaXiv MCP instructions", "inject");
+  for (const p of slashAliases) link(p.label, p.expands, "ref");
+
+  for (const a of docs) {
+    for (const b of docs) {
+      const sameScope = b.kind !== "resource" || a.parent === b.parent || a.id === b.parent;
+      if (b.label.endsWith(".md") && sameScope && a.content.includes(b.label)) link(a.id, b.id, "ref");
+    }
+  }
+  const skillNames = S.skills.map((s) => s.name).sort((a, b) => b.length - a.length);
+  for (const d of docs) {
+    for (const name of skillNames) {
+      const bare = name.replace(/^orx-/, "");
+      if (new RegExp(`(^|[^\\w-])(${name}|orx skill ${bare})(?![\\w-])`).test(d.content)) link(d.id, name, "ref");
+    }
+  }
+  for (const m of S.mentions) {
+    if (!m.command) continue;
+    link(m.text === "orx MCP tools" ? "mcp:orx" : m.text, `cmd:${m.command}`, "cmd");
+  }
+  link("cmd:skill", "orx skill", "ref");
+
+  // 0-1 breadth-first: what the harness injects with the playbook costs no hop.
+  const depth = new Map([["playbook", 0]]);
+  const queue = ["playbook"];
+  while (queue.length) {
+    const id = queue.shift();
+    for (const e of edges) {
+      const d = depth.get(id) + (e.type === "inject" ? 0 : 1);
+      if (e.source !== id || (depth.has(e.target) && depth.get(e.target) <= d)) continue;
+      depth.set(e.target, d);
+      e.type === "inject" ? queue.unshift(e.target) : queue.push(e.target);
+    }
+  }
+  for (const node of nodes.values()) node.depth = depth.get(node.id);
+  const roots = [...nodes.values()].filter((n) => n.id === "playbook" || (n.depth == null && !edges.some((e) => e.target === n.id)));
+  for (const n of roots) n.root = true;
+  return { nodes: [...nodes.values()], edges };
+})();
+
+let d3;
+function graph() {
+  const root = el(`<div class="graph"><div class="graph-side"></div><svg role="img" aria-label="Graph of agent text, tools and commands reachable from the playbook"></svg></div>`);
+  const side = root.firstElementChild;
+  const q = state.q.toLowerCase();
+
+  const byDepth = new Map();
+  for (const n of fanout.nodes) {
+    const key = n.depth ?? "unreached";
+    const row = byDepth.get(key) ?? { nodes: 0, n: 0 };
+    row.nodes += 1; row.n += n.n;
+    byDepth.set(key, row);
+  }
+  const descriptions = S.skills.filter((s) => s.inLocalSet).reduce((n, s) => n + tokens(s.description), 0);
+  const rows = [...byDepth].sort(([a], [b]) => (a === "unreached") - (b === "unreached") || a - b).map(([d, r]) => {
+    const name = d === "unreached" ? "Not reached" : d === 0 ? "In context" : `${d} hop${d > 1 ? "s" : ""}`;
+    return `<tr><td>${name}</td><td class="num">${r.nodes}</td><td class="num">≈${fmt(r.n)}</td></tr>`;
+  });
+  side.append(el(`<div>
+    <h2>Fan-out from the playbook</h2>
+    <p class="note">The playbook is each chat's system prompt; the harness sends the MCP tools with it. Skills sit one hop out: their descriptions (≈${fmt(descriptions)} tokens, not counted below) are in context, and an agent reads a body when it loads the skill. Arrows run from a text to what it names; dashed ones end at a CLI command.</p>
+    <table><thead><tr><th>Distance</th><th class="num">Nodes</th><th class="num">≈ Tokens</th></tr></thead><tbody>${rows.join("")}</tbody></table>
+    <p class="note" style="margin-top:10px">Not reached: texts a user or orx sends on its own, such as slash commands, installed skills and one-shot prompts. Each starts its own cluster, ringed.</p>
+  </div>`));
+  const legend = el(`<div class="legend" style="margin-top:12px"></div>`);
+  for (const [, [name, c]] of Object.entries(KINDS)) legend.append(el(`<span><span class="swatch" style="background:var(--c${c})"></span>${name}</span>`));
+  side.append(legend);
+
+  const svgEl = root.querySelector("svg");
+  const draw = () => drawGraph(svgEl, q);
+  if (d3) queueMicrotask(draw);
+  else import("https://cdn.jsdelivr.net/npm/d3@7/+esm").then((m) => { d3 = m; if (svgEl.isConnected) draw(); }, (e) => svgEl.replaceWith(el(`<div class="error">d3 could not load from jsDelivr, so the graph can't draw: ${esc(e.message)}</div>`)));
+  return root;
+}
+
+function drawGraph(svgEl, q) {
+  const { width, height } = svgEl.getBoundingClientRect();
+  const nodes = fanout.nodes.map((n) => ({ ...n }));
+  const edges = fanout.edges.map((e) => ({ ...e }));
+  const radius = (n) => (n.root || n.id.startsWith("mcp:") ? 8 : 3) + Math.sqrt(n.n) / 4;
+  const color = (n) => `var(--c${KINDS[n.kind][1]})`;
+  const svg = d3.select(svgEl).attr("viewBox", [-width / 2, -height / 2, width, height]);
+  svg.append("defs").append("marker").attr("id", "arrow").attr("viewBox", "0 -4 8 8").attr("refX", 8).attr("markerWidth", 6).attr("markerHeight", 6).attr("orient", "auto")
+    .append("path").attr("d", "M0,-4L8,0L0,4").attr("fill", "var(--muted)");
+  const view = svg.append("g");
+  const zoom = d3.zoom().scaleExtent([0.2, 6]).on("zoom", (e) => view.attr("transform", e.transform));
+  svg.call(zoom);
+
+  const edge = view.append("g").selectAll("line").data(edges).join("line").attr("class", (e) => `edge ${e.type}`).attr("marker-end", "url(#arrow)");
+  const node = view.append("g").selectAll("g").data(nodes).join("g").attr("class", (n) => `node ${n.root ? "root" : ""}`);
+  node.append("circle").attr("r", radius).attr("fill", color);
+  node.filter((n) => n.root || n.kind === "skill" || n.kind === "prompt" || n.id.startsWith("mcp:"))
+    .append("text").attr("dy", (n) => -radius(n) - 4).attr("text-anchor", "middle").text((n) => n.label);
+
+  const neighbors = new Map(nodes.map((n) => [n.id, new Set([n.id])]));
+  for (const e of fanout.edges) { neighbors.get(e.source).add(e.target); neighbors.get(e.target).add(e.source); }
+  const focus = (id) => {
+    node.classed("dim", (n) => id != null && !neighbors.get(id).has(n.id));
+    edge.classed("dim", (e) => id != null && e.source.id !== id && e.target.id !== id);
+  };
+  if (q) node.classed("dim", (n) => !n.label.toLowerCase().includes(q));
+  node.on("mouseenter", (e, n) => {
+    focus(n.id);
+    const where = n.depth == null ? "not reached from the playbook" : n.depth === 0 ? "the playbook" : `${n.depth} hop${n.depth > 1 ? "s" : ""} from the playbook`;
+    showTip(e, `<b>${esc(n.label)}</b><br>${KINDS[n.kind][0]} · ${where}${n.n ? ` · ≈${fmt(n.n)} tokens` : ""}`);
+  }).on("mousemove", (e) => { tip.style.left = `${Math.min(e.clientX + 12, innerWidth - 360)}px`; tip.style.top = `${e.clientY + 14}px`; })
+    .on("mouseleave", () => { focus(null); hideTip(); if (q) node.classed("dim", (n) => !n.label.toLowerCase().includes(q)); })
+    .on("click", (e, n) => { if (!e.defaultPrevented) { hideTip(); go(...n.go); } });
+
+  const sim = d3.forceSimulation(nodes)
+    .force("link", d3.forceLink(edges).id((n) => n.id).distance((e) => (e.type === "cmd" ? 70 : 50) + radius(e.source) + radius(e.target)).strength(0.3))
+    .force("charge", d3.forceManyBody().strength((n) => -90 - radius(n) * 12))
+    .force("collide", d3.forceCollide((n) => radius(n) + 3))
+    .force("x", d3.forceX().strength((n) => (neighbors.get(n.id).size > 1 ? 0.03 : 0.3)))
+    .force("y", d3.forceY().strength((n) => (neighbors.get(n.id).size > 1 ? 0.05 : 0.3)))
+    .stop();
+  const playbook = nodes.find((n) => n.id === "playbook");
+  playbook.fx = 0;
+  playbook.fy = 0;
+  sim.tick(400);
+  const xs = nodes.map((n) => n.x), ys = nodes.map((n) => n.y);
+  const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+  const k = Math.min(1.5, 0.92 * Math.min(width / (x1 - x0 + 80), height / (y1 - y0 + 80)));
+  view.selectAll("text").style("font-size", `${11 / k}px`).style("stroke-width", `${3 / k}px`);
+  svg.call(zoom.transform, d3.zoomIdentity.scale(k).translate(-(x0 + x1) / 2, -(y0 + y1) / 2));
+  node.call(d3.drag()
+    .on("start", (e) => { if (!e.active) sim.alphaTarget(0.3).restart(); e.subject.fx = e.subject.x; e.subject.fy = e.subject.y; })
+    .on("drag", (e) => { e.subject.fx = e.x; e.subject.fy = e.y; })
+    .on("end", (e) => { if (!e.active) sim.alphaTarget(0); if (e.subject !== playbook) { e.subject.fx = null; e.subject.fy = null; } }));
+  const place = () => {
+    edge.each(function (e) {
+      const dx = e.target.x - e.source.x, dy = e.target.y - e.source.y, len = Math.hypot(dx, dy) || 1;
+      const r = radius(e.target) + 2;
+      this.setAttribute("x1", e.source.x); this.setAttribute("y1", e.source.y);
+      this.setAttribute("x2", e.target.x - (dx / len) * r); this.setAttribute("y2", e.target.y - (dy / len) * r);
+    });
+    node.attr("transform", (n) => `translate(${n.x},${n.y})`);
+  };
+  place();
+  sim.on("tick", place);
+}
+
+function schemaTable(schema, variant) {
+  const props = Object.entries(schema?.properties ?? {});
+  if (!props.length) return "";
+  const required = new Set(schema.required ?? []);
+  const rows = props.map(([name, p]) => {
+    const type = p.enum ? p.enum.map((v) => `"${v}"`).join(" | ") : p.type === "array" ? `${p.items?.type ?? "any"}[]` : p.type ?? "";
+    const other = variant?.inputSchema?.properties?.[name]?.description;
+    const differs = other && other !== p.description ? `<div class="variant">Antigravity: ${highlight(other, state.q)}</div>` : "";
+    return `<tr><td><code>${esc(name)}</code>${required.has(name) ? ` <span class="badge">required</span>` : ""}</td><td class="mono">${esc(type)}</td><td>${highlight(p.description ?? "", state.q)}${differs}</td></tr>`;
+  });
+  return `<table><thead><tr><th>Parameter</th><th>Type</th><th>Description</th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
+}
+
+function toolCard(server, t, badges, variant) {
+  const differs = variant && variant.description !== t.description ? `<div class="variant">Antigravity: ${highlight(variant.description, state.q)}</div>` : "";
+  return el(`<div class="card" id="tool-${esc(t.name)}">
+    <h3><code>mcp__${server}__${esc(t.name)}</code>${badges}<span class="meta">≈${fmt(tokens(JSON.stringify(t)))} tokens</span></h3>
+    <div class="desc">${highlight(t.description ?? "", state.q)}</div>${differs}
+    ${schemaTable(t.inputSchema, variant)}
+  </div>`);
+}
+
+function mcp() {
+  const root = el(`<div></div>`);
+  const q = state.q.toLowerCase();
+  const matches = (t) => !q || JSON.stringify(t).toLowerCase().includes(q);
+  root.append(el(`<h2>orx <span class="meta">orx mcp, relayed to orx up</span></h2>`));
+  for (const t of orxTools.filter(matches)) {
+    const badge = t.only ? `<span class="badge">${t.only} only</span>` : "";
+    root.append(toolCard("orx", t, badge, antigravity.get(t.name)));
+  }
+  root.append(el(`<h2>alphaxiv <span class="meta">orx alphaxiv-mcp, proxied from alphaXiv</span></h2>`));
+  if (S.prompts.some((p) => p.label === "alphaXiv MCP instructions")) {
+    const link = el(`<p class="note">The server also sends <span class="link">its instructions</span> on initialize.</p>`);
+    link.querySelector(".link").onclick = () => go("prompts", "alphaXiv MCP instructions");
+    root.append(link);
+  }
+  if (listing.error) root.append(el(`<div class="error">alphaXiv's tool list could not be read, so only the names orx allows are shown: ${esc(listing.error)}</div>`));
+  const listed = new Set(alphaxivTools.map((t) => t.name));
+  for (const t of alphaxivTools.filter(matches)) {
+    root.append(toolCard("alphaxiv", t, `<span class="badge">${access.get(t.name) ?? "not in orx allowlist"}</span>`));
+  }
+  for (const t of S.mcp.alphaxiv.filter((t) => !listed.has(t.name) && matches(t))) {
+    const why = listing.error ? "" : t.access === "research" ? `<span class="badge warn">allowed, not listed by alphaXiv</span>` : `<span class="badge">listed when alphaXiv is signed in</span>`;
+    root.append(el(`<div class="card"><h3><code>mcp__alphaxiv__${esc(t.name)}</code><span class="badge">${t.access}</span>${why}</h3></div>`));
+  }
+  if (!root.querySelector(".card")) root.append(el(`<div class="empty">No tool matches “${esc(state.q)}”.</div>`));
+  return root;
+}
+
+function mentionLinks(texts) {
+  const box = el(`<div class="mentions"></div>`);
+  for (const [label, n] of [...texts].sort((a, b) => b[1] - a[1])) {
+    const doc = docById.get(label);
+    const chip = el(`<span class="badge ${doc ? "link" : ""}">${esc(label)}${n > 1 ? ` ×${n}` : ""}</span>`);
+    if (doc) chip.onclick = (e) => { e.stopPropagation(); go(doc.tab, doc.id); };
+    else if (label === "orx MCP tools") chip.onclick = (e) => { e.stopPropagation(); go("mcp"); };
+    box.append(chip);
+  }
+  return box;
+}
+
+function cli() {
+  const root = el(`<div></div>`);
+  const filters = el(`<div class="filters">
+    <label><input type="checkbox" ${state.showHidden ? "checked" : ""}> Show hidden commands</label>
+    <label>Named in agent text <select><option value="all">either</option><option value="yes">yes</option><option value="no">no</option></select></label>
+  </div>`);
+  filters.querySelector("input").onchange = (e) => { state.showHidden = e.target.checked; render(); };
+  const select = filters.querySelector("select");
+  select.value = state.taught;
+  select.onchange = () => { state.taught = select.value; render(); };
+  root.append(filters);
+  root.append(el(`<p class="note">“Named in” counts the agent texts whose <code>orx …</code> spans resolve to the command. Click a row for its flags.</p>`));
+
+  const q = state.q.toLowerCase();
+  const table = el(`<table class="cli"><thead><tr><th>Command</th><th>About</th><th>Named in</th><th>Flags</th></tr></thead><tbody></tbody></table>`);
+  const body = table.querySelector("tbody");
+  const visible = commands.filter((c) => {
+    if (!c.path) return false;
+    if (!state.showHidden && c.hidden) return false;
+    const taught = c.texts.size > 0;
+    if (state.taught === "yes" && !taught) return false;
+    if (state.taught === "no" && (taught || c.subcommands.length)) return false;
+    return !q || `${c.path} ${c.about ?? ""} ${c.args.map((a) => `${a.long ?? ""} ${a.help ?? ""}`).join(" ")}`.toLowerCase().includes(q);
+  });
+  for (const c of visible) {
+    const n = c.texts.size;
+    const named = n ? `${n} text${n > 1 ? "s" : ""}` : c.subcommands.length ? (taughtBelow(c) ? `<span class="meta">via subcommands</span>` : `<span class="badge warn">never</span>`) : c.hidden ? `<span class="meta">never</span>` : `<span class="badge warn">never</span>`;
+    const flagCount = c.args.filter((a) => !a.positional).length;
+    const row = el(`<tr class="cmd ${c.hidden ? "hidden-cmd" : ""}" id="cmd-${esc(c.path)}" tabindex="0" aria-expanded="${state.open.has(c.path)}">
+      <td style="padding-left:${8 + (c.depth - 1) * 18}px"><code>orx ${highlight(c.path, state.q)}</code>${c.hidden ? ` <span class="badge">hidden</span>` : ""}</td>
+      <td>${highlight(c.about ?? "", state.q)}</td><td class="num">${named}</td><td class="num">${flagCount || ""}</td></tr>`);
+    const toggle = () => { state.open.has(c.path) ? state.open.delete(c.path) : state.open.add(c.path); render(); };
+    row.onclick = toggle;
+    row.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } };
+    body.append(row);
+    if (!state.open.has(c.path)) continue;
+    const detail = el(`<tr class="detail"><td colspan="4"></td></tr>`);
+    const cell = detail.firstElementChild;
+    if (c.longAbout) cell.append(el(`<div class="desc">${highlight(c.longAbout, state.q)}</div>`));
+    if (c.aliases.length) cell.append(el(`<p class="note">Aliases: ${c.aliases.map((a) => `<code>${esc(a)}</code>`).join(", ")}</p>`));
+    if (c.args.length) {
+      const rows = c.args.map((a) => {
+        const name = a.positional ? `&lt;${esc(a.id)}&gt;` : spellings(a).map(esc).join(", ");
+        const taught = a.positional ? "" : flagTaught(c, a) || (a.hidden ? `<span class="meta">never</span>` : `<span class="badge warn">never</span>`);
+        const tags = [a.required && "required", a.hidden && "hidden"].filter(Boolean).map((t) => ` <span class="badge">${t}</span>`).join("");
+        const values = a.values.length && a.values.join() !== "true,false" ? `<div class="meta mono">${a.values.map(esc).join(" | ")}</div>` : "";
+        return `<tr><td><code>${name}</code>${tags}</td><td>${highlight(a.help ?? "", state.q)}${values}</td><td class="num">${taught}</td></tr>`;
+      });
+      cell.append(el(`<table><thead><tr><th>Argument</th><th>Help</th><th>Named</th></tr></thead><tbody>${rows.join("")}</tbody></table>`));
+    }
+    if (n) { cell.append(el(`<p class="note" style="margin:10px 0 0">Named in</p>`)); cell.append(mentionLinks(c.texts)); }
+    body.append(detail);
+  }
+  root.append(visible.length ? table : el(`<div class="empty">No command matches.</div>`));
+  return root;
+}
+
+function documents(tab) {
+  const root = el(`<div class="split"></div>`);
+  const list = el(`<nav class="list" aria-label="${tab}"></nav>`);
+  const q = state.q.toLowerCase();
+  const items = docs.filter((d) => d.tab === tab && (!q || `${d.id}\n${d.content}`.toLowerCase().includes(q)));
+  if (!items.some((d) => d.id === state.selected[tab]) && items[0]) state.selected[tab] = items[0].id;
+  for (const d of items) {
+    const b = el(`<button class="${d.parent ? "child" : ""}" aria-current="${d.id === state.selected[tab]}"><span>${esc(d.label)}${d.skill && !d.skill.inLocalSet ? ` <span class="badge">--full only</span>` : ""}</span><span class="size">≈${fmt(tokens(d.content))}</span></button>`);
+    b.onclick = () => go(tab, d.id);
+    list.append(b);
+  }
+  for (const p of tab === "prompts" ? slashAliases : []) {
+    if (q && !p.label.toLowerCase().includes(q)) continue;
+    const b = el(`<button><span>${esc(p.label)} <span class="meta">expands ${esc(p.expands)}</span></span></button>`);
+    b.onclick = () => go("skills", p.expands);
+    list.append(b);
+  }
+  root.append(list);
+  const doc = docById.get(state.selected[tab]);
+  const view = el(`<section class="doc"></section>`);
+  if (!items.length || !doc) view.append(el(`<div class="empty">Nothing matches “${esc(state.q)}”.</div>`));
+  else {
+    const lines = doc.content.split("\n").length;
+    view.append(el(`<h2 style="margin-top:0">${esc(doc.parent ? `${doc.parent} · ${doc.label}` : doc.label)} <span class="meta">${fmt(lines)} lines · ≈${fmt(tokens(doc.content))} tokens</span></h2>`));
+    if (doc.skill) {
+      const slash = slashAliases.filter((p) => p.expands === doc.id).map((p) => `<code>${esc(p.label)}</code>`);
+      const local = doc.skill.inLocalSet ? "" : " Installed only by <code>orx install-skills --full</code>.";
+      const note = `${slash.length ? `The ${slash.join(", ")} command sends this body.` : ""}${local}`;
+      if (note) view.append(el(`<p class="note">${note}</p>`));
+    }
+    const used = commands.filter((c) => c.texts.has(doc.id));
+    if (used.length) {
+      const p = el(`<p class="note">Names ${used.length} command${used.length > 1 ? "s" : ""}: </p>`);
+      used.forEach((c, i) => { const a = el(`<span class="link mono">orx ${esc(c.path)}</span>`); a.onclick = () => go("cli", c.path); p.append(a); if (i < used.length - 1) p.append(", "); });
+      view.append(p);
+    }
+    view.append(el(`<pre>${highlight(doc.content, state.q)}</pre>`));
+  }
+  root.append(view);
+  return root;
+}
+
+render();
+</script>
+</body>
+</html>

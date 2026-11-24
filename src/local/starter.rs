@@ -407,7 +407,7 @@ fn fingerprint(brief: &str, locale: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-const SYSTEM_PROMPT: &str = "You help a researcher start work in an AI research \
+pub(super) const SYSTEM_PROMPT: &str = "You help a researcher start work in an AI research \
 workspace where a coding agent runs experiments for them. You reply with JSON only.";
 
 /// Rules both prompt kinds share; the JSON shape is what `parse_prompts` reads.

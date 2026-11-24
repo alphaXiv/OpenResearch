@@ -1,6 +1,6 @@
 ---
 name: orx-customize
-description: "Save reusable skills and LaTeX templates with `orx skills add` and `orx templates add`, and add or present agents and model providers with `orx agents`. Use when the user asks to create, import, or add a skill or template to OpenResearch for use across projects, or to add, name or fix how an agent, provider or model endpoint shows in OpenResearch."
+description: "Add skills, LaTeX templates, agents or model providers to OpenResearch. Use when the user asks to save one for every project, or to fix how an agent or model shows."
 ---
 
 # Customize OpenResearch

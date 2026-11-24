@@ -236,8 +236,8 @@ pub(crate) async fn keep_modal_bills(data_dir: std::path::PathBuf) {
     }
 }
 
-/// What `millis` of running time costs at `quote`.
-fn cost(quote: &crate::store::Quote, millis: i64) -> u64 {
+/// What `millis` of running time costs at `quote`, in micros.
+pub(crate) fn cost(quote: &crate::store::Quote, millis: i64) -> u64 {
     let micros = u128::from(quote.amount_micros) * millis.max(0) as u128;
     let per = u128::from(quote.per.millis());
     ((micros + per / 2) / per) as u64

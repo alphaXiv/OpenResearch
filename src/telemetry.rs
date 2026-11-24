@@ -1493,6 +1493,18 @@ pub(crate) const FIRST_ACTIONS: [&str; 7] = [
 pub(crate) const MODEL_CALLOUT_KINDS: [&str; 2] = ["release", "free"];
 pub(crate) const MODEL_CALLOUT_ACTIONS: [&str; 3] = ["shown", "opened", "dismissed"];
 pub(crate) const MODEL_PICKER_SECTIONS: [&str; 5] = ["free", "favorites", "lab", "older", "search"];
+pub(crate) const WORKSPACE_PANES: [&str; 10] = [
+    "search",
+    "files",
+    "artifacts",
+    "experiments",
+    "terminal",
+    "compute",
+    "side_chat",
+    "changes",
+    "subagent",
+    "active_experiment",
+];
 
 /// `text` as the API's bounded label, which a longer one would fail with the whole batch it rides in.
 fn bounded_label(text: &str) -> Option<&str> {
@@ -1555,6 +1567,13 @@ pub(crate) fn capture_model_picked(
         "model_picked",
         json!({ "section": section, "model": model, "harness": harness, "new": new, "free": free }),
     );
+}
+
+pub(crate) fn capture_pane_opened(pane: &str) {
+    if !WORKSPACE_PANES.contains(&pane) {
+        return;
+    }
+    capture("pane_opened", json!({ "pane": pane }));
 }
 
 pub(crate) fn capture_onboarding_step_viewed(step: &str) {
@@ -2249,6 +2268,7 @@ mod tests {
             ("demo_welcome_choice", "cli_demo_welcome_choice"),
             ("model_callout", "cli_model_callout"),
             ("model_picked", "cli_model_picked"),
+            ("pane_opened", "cli_pane_opened"),
         ] {
             let p = build_payload(bare, "did", json!({}));
             assert_eq!(
@@ -2644,11 +2664,19 @@ mod tests {
             payload["context"]["signIn"] = json!(state);
             payload
         });
+        let panes = WORKSPACE_PANES.map(|pane| {
+            build_payload(
+                "pane_opened",
+                "cli-release-contract-test",
+                json!({ "pane": pane }),
+            )
+        });
         for payload in payloads
             .into_iter()
             .chain(launch_payloads)
             .chain(localized)
             .chain(signed_in)
+            .chain(panes)
         {
             assert_eq!(post_payload(&payload).await, DeliveryOutcome::Acknowledged);
         }

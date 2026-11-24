@@ -1661,7 +1661,7 @@ fn fail_running_compaction(parts: &mut [WirePart]) {
 /// A compaction summary is a whole transcript, not a title — it needs room.
 const COMPACT_SUMMARY_TIMEOUT: Duration = Duration::from_secs(180);
 
-const COMPACT_SYSTEM_PROMPT: &str = "You are compacting a coding chat so it can continue in a fresh session. \
+pub(super) const COMPACT_SYSTEM_PROMPT: &str = "You are compacting a coding chat so it can continue in a fresh session. \
 Summarize the transcript below: what the user is trying to do, the decisions taken and why, the files and commands that matter, \
 what is done, and what is still open. Keep specifics — paths, ids, names, numbers. Write the summary only.";
 
@@ -17239,7 +17239,7 @@ for line in sys.stdin:
                         !ended
                     );
                     assert_eq!(
-                        prompt.contains("orx skill orx-experiment-runs"),
+                        prompt.contains("orx skill experiment-runs/watcher"),
                         source != "look" || !ended
                     );
                     match source {

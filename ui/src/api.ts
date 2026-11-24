@@ -1194,7 +1194,10 @@ type UiEvent =
   | { name: "project_starter_clicked"; slot: number }
   | { name: "first_action"; surface: FirstActionSurface; action: FirstAction }
   | { name: "model_callout"; kind: "release" | "free"; action: "shown" | "opened" | "dismissed"; model: string; harness: string }
-  | { name: "model_picked"; section: "free" | "favorites" | "lab" | "older" | "search"; model: string; harness: string; new: boolean; free: boolean };
+  | { name: "model_picked"; section: "free" | "favorites" | "lab" | "older" | "search"; model: string; harness: string; new: boolean; free: boolean }
+  | { name: "pane_opened"; pane: WorkspacePane };
+
+export type WorkspacePane = "search" | "files" | "artifacts" | "experiments" | "terminal" | "compute" | "side_chat" | "changes" | "subagent" | "active_experiment";
 
 export type HarnessId =
   | "claude-code"

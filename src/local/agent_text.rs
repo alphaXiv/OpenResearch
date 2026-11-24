@@ -1,7 +1,10 @@
 //! Structural checks over every text an agent reads: the playbook, the `orx
-//! skill` overview, the bundled skills and the slash-skill expansions.
+//! skill` overview, the bundled skills, the slash-skill expansions and the
+//! prompts orx installs or sends. `write_agent_surface` exports the same text,
+//! with the CLI and MCP tools, for `scripts/agent-surface.mjs`.
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use serde_json::{json, Value};
 
 use super::agent_skills::{self, SkillSet};
 use super::model::LocalProject;
@@ -67,26 +70,52 @@ fn rendered() -> Vec<(String, String)> {
         ),
     ];
     for skill in super::skills::CATALOG {
-        for github_enabled in [false, true] {
-            for has_request in [false, true] {
+        for github_enabled in [true, false] {
+            for has_request in [true, false] {
                 let text = super::skills::instructions(skill.name, has_request, github_enabled);
-                out.push((format!("/{}", skill.name), text.unwrap()));
+                let variant = match (github_enabled, has_request) {
+                    (true, true) => String::new(),
+                    (github, request) => format!(
+                        " ({}{})",
+                        if github { "GitHub" } else { "local" },
+                        if request { "" } else { ", no request" }
+                    ),
+                };
+                out.push((format!("/{}{variant}", skill.name), text.unwrap()));
             }
         }
     }
     out
 }
 
+/// Prompts sent or installed as written.
+fn fixed_prompts() -> Vec<(String, String)> {
+    [
+        ("chat-format.md", super::opencode::CHAT_FORMAT),
+        ("orx skill", crate::commands::skill::SKILL_MD),
+        ("global orx skill", super::harness::CLAUDE_SKILL),
+        ("Codex /orx prompt", super::harness::CODEX_PROMPT),
+        (
+            "alphaXiv MCP instructions",
+            crate::commands::alphaxiv_mcp::INSTRUCTIONS,
+        ),
+        (
+            "compaction system prompt",
+            super::chat::COMPACT_SYSTEM_PROMPT,
+        ),
+        ("starter system prompt", super::starter::SYSTEM_PROMPT),
+    ]
+    .map(|(label, text)| (label.into(), text.into()))
+    .into()
+}
+
 fn all_text() -> Vec<(String, String)> {
     let mut out = rendered();
-    out.push(("SKILL.md".into(), crate::commands::skill::SKILL_MD.into()));
+    out.extend(fixed_prompts());
     let skills = [SkillSet::Local, SkillSet::Full].map(agent_skills::skills);
     for skill in skills.into_iter().flatten() {
         out.push((skill.name.into(), skill.content.into()));
-        out.push((
-            format!("{} description", skill.name),
-            skill.description.into(),
-        ));
+        out.push((format!("{} description", skill.name), skill.description()));
         for resource in skill.resources {
             out.push((
                 format!("{}/{}", skill.name, resource.path),
@@ -158,11 +187,7 @@ fn every_orx_command_in_agent_text_parses() {
     let mut checked = 0;
     let mut failures = Vec::new();
     for (label, text) in all_text() {
-        let spans = text.split('`').chain(text.lines());
-        for span in spans.filter_map(|s| s.trim().strip_prefix("orx")) {
-            if !(span.is_empty() || span.starts_with(char::is_whitespace)) {
-                continue;
-            }
+        for span in orx_spans(&text) {
             for args in command_variants(span) {
                 checked += 1;
                 let argv = std::iter::once("orx".to_owned()).chain(args);
@@ -269,6 +294,14 @@ fn every_orx_line_in_agent_text_folds() {
 
 const PLACEHOLDER: &str = "PLACEHOLDER";
 
+/// What follows `orx` in each code span and line that runs it.
+fn orx_spans(text: &str) -> impl Iterator<Item = &str> {
+    text.split('`')
+        .chain(text.lines())
+        .filter_map(|s| s.trim().strip_prefix("orx"))
+        .filter(|span| span.is_empty() || span.starts_with(char::is_whitespace))
+}
+
 /// Expands a documented command line into concrete argument vectors: `<placeholder>`
 /// becomes one argument, each `[optional]` or `(choice)` group is included, a
 /// `|` inside a group or a `move/archive` word yields one variant per choice,
@@ -353,4 +386,166 @@ fn shell_words(line: &str) -> Vec<String> {
     }
     words.extend(word);
     words
+}
+
+/// Exports what agents are given as JSON at `$ORX_AGENT_SURFACE`.
+#[test]
+#[ignore = "run by scripts/agent-surface.mjs"]
+fn write_agent_surface() {
+    use crate::commands::alphaxiv_mcp::{LIBRARY_READ_TOOLS, RESEARCH_TOOLS, WRITE_TOOLS};
+    use crate::commands::up::agent_tools;
+
+    let path = std::env::var_os("ORX_AGENT_SURFACE")
+        .expect("ORX_AGENT_SURFACE names the output file; run node scripts/agent-surface.mjs");
+
+    let tools = agent_tools::tools("claude");
+    let alphaxiv: Vec<Value> = [
+        ("research", RESEARCH_TOOLS),
+        ("library", LIBRARY_READ_TOOLS),
+        ("write", WRITE_TOOLS),
+    ]
+    .into_iter()
+    .flat_map(|(access, names)| {
+        names
+            .iter()
+            .map(move |name| json!({ "name": name, "access": access }))
+    })
+    .collect();
+
+    let full = agent_skills::skills(SkillSet::Full);
+    let playbook = playbook_md(&sample_project(), &ProjectState::default());
+    let mut prompts = vec![json!({ "label": "playbook", "content": playbook })];
+    let mut texts = vec![("playbook".to_owned(), playbook)];
+    for slash in super::skills::CATALOG {
+        let label = format!("/{}", slash.name);
+        if let Some(skill) = full.iter().find(|skill| skill.content == slash.template) {
+            prompts.push(json!({ "label": label, "expands": skill.name }));
+            continue;
+        }
+        let text = super::skills::instructions(slash.name, true, true).unwrap();
+        prompts.push(json!({ "label": label, "content": text }));
+        texts.push((label, text));
+    }
+    for (label, text) in fixed_prompts() {
+        prompts.push(json!({ "label": label, "content": text }));
+        texts.push((label, text));
+    }
+    texts.push(("orx MCP tools".to_owned(), tools.to_string()));
+
+    let local: Vec<&str> = agent_skills::skills(SkillSet::Local)
+        .iter()
+        .map(|skill| skill.name)
+        .collect();
+    let mut skills = Vec::new();
+    for skill in full {
+        texts.push((skill.name.to_owned(), skill.content.to_owned()));
+        texts.push((skill.name.to_owned(), skill.description()));
+        // Scripts and templates are run or copied, not read.
+        let docs = skill.resources.iter().filter(|r| r.path.ends_with(".md"));
+        let mut resources = Vec::new();
+        for resource in docs {
+            texts.push((
+                format!("{}/{}", skill.name, resource.path),
+                resource.content.to_owned(),
+            ));
+            resources.push(json!({ "path": resource.path, "content": resource.content }));
+        }
+        skills.push(json!({
+            "name": skill.name,
+            "description": skill.description(),
+            "content": skill.content,
+            "inLocalSet": local.contains(&skill.name),
+            "resources": resources,
+        }));
+    }
+
+    let root = crate::Cli::command();
+    let mut mentions = Vec::new();
+    for (label, text) in &texts {
+        for span in orx_spans(text) {
+            let variants = command_variants(span);
+            let Some(first) = variants.first() else {
+                continue;
+            };
+
+            let mut command = &root;
+            let mut path = Vec::new();
+            for word in first {
+                if let Some(sub) = command.find_subcommand(word) {
+                    path.push(sub.get_name().to_owned());
+                    command = sub;
+                }
+            }
+
+            let mut flags: Vec<&str> = variants
+                .iter()
+                .flatten()
+                .filter(|word| word.starts_with('-'))
+                .map(|word| word.split('=').next().unwrap())
+                .collect();
+            flags.sort();
+            flags.dedup();
+            mentions.push(json!({ "text": label, "command": path.join(" "), "flags": flags }));
+        }
+    }
+
+    let surface = json!({
+        "mcp": {
+            "approve": crate::commands::mcp::approve_tool(),
+            "tools": tools,
+            "antigravityTools": agent_tools::tools("antigravity"),
+            "alphaxiv": alphaxiv,
+        },
+        "cli": command_json(&root, ""),
+        "mentions": mentions,
+        "prompts": prompts,
+        "skills": skills,
+    });
+    std::fs::write(&path, serde_json::to_vec_pretty(&surface).unwrap()).unwrap();
+}
+
+fn command_json(command: &clap::Command, parent: &str) -> Value {
+    let path = if command.get_name() == "orx" {
+        String::new()
+    } else {
+        format!("{parent} {}", command.get_name()).trim().to_owned()
+    };
+    let args: Vec<Value> = command
+        .get_arguments()
+        .filter(|arg| !matches!(arg.get_id().as_str(), "help" | "version"))
+        .map(|arg| {
+            let values: Vec<String> = arg
+                .get_possible_values()
+                .iter()
+                .filter(|value| !value.is_hide_set())
+                .map(|value| value.get_name().to_owned())
+                .collect();
+            json!({
+                "id": arg.get_id().as_str(),
+                "long": arg.get_long(),
+                "short": arg.get_short().map(String::from),
+                "aliases": arg.get_all_aliases().unwrap_or_default(),
+                "help": arg.get_help().map(|help| help.to_string()),
+                "hidden": arg.is_hide_set(),
+                "required": arg.is_required_set(),
+                "positional": arg.is_positional(),
+                "values": values,
+            })
+        })
+        .collect();
+    let subcommands: Vec<Value> = command
+        .get_subcommands()
+        .filter(|sub| sub.get_name() != "help")
+        .map(|sub| command_json(sub, &path))
+        .collect();
+    json!({
+        "name": command.get_name(),
+        "path": path,
+        "about": command.get_about().map(|about| about.to_string()),
+        "longAbout": command.get_long_about().map(|about| about.to_string()),
+        "aliases": command.get_all_aliases().collect::<Vec<_>>(),
+        "hidden": command.is_hide_set(),
+        "args": args,
+        "subcommands": subcommands,
+    })
 }

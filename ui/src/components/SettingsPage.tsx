@@ -4004,6 +4004,7 @@ const LOCALE_CHOICES: { id: Locale; label: string }[] = [
   { id: "ru", label: "Русский" },
   { id: "tr", label: "Türkçe" },
   { id: "vi", label: "Tiếng Việt" },
+  { id: "te", label: "తెలుగు" },
 ];
 
 function AppearanceTab() {

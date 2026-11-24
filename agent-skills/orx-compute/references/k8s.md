@@ -57,4 +57,4 @@ The submit-time contract is:
   included. An image that can never be pulled fails the run
   with the pull error.
 
-See [run monitoring](../SKILL.md#who-watches-a-run).
+See [run monitoring](watching.md).

@@ -110,9 +110,9 @@ pub(crate) fn migrate_project_scoped(root: &Path) {
 
 // --- frontmatter --------------------------------------------------------------
 
-struct Frontmatter {
-    name: String,
-    description: String,
+pub(crate) struct Frontmatter {
+    pub(crate) name: String,
+    pub(crate) description: String,
 }
 
 /// Parse the `name:`/`description:` from a `SKILL.md` YAML frontmatter block.
@@ -120,7 +120,7 @@ struct Frontmatter {
 /// a folded/literal block (`>-`, `|`), and a value continued on the following
 /// indented lines. A skill whose frontmatter we can't read is a skill the user
 /// never sees, so this errs towards reading it.
-fn parse_frontmatter(content: &str) -> Result<Frontmatter> {
+pub(crate) fn parse_frontmatter(content: &str) -> Result<Frontmatter> {
     parse_frontmatter_with_name(content, None)
 }
 

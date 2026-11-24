@@ -1,6 +1,6 @@
 ---
 name: orx-reports
-description: "Write and organize durable outputs in the artifacts directory. Use before creating or organizing artifacts, including reports, summaries, and figures."
+description: "Write files meant to outlast the chat into the artifacts directory. Use before writing a report, a summary or any other artifact."
 ---
 
 An artifact is a project-wide deliverable that a human researcher will read and analyze. This can include reports, figures, and HTML pages, and more. Written files become project artifacts immediately. The Artifacts panel lists only the artifacts directory, never your worktree. If a script builds a deliverable in the worktree, such as a folder or a zip, move it into the artifacts directory before the handoff, or copy it if Git tracks it.
@@ -26,6 +26,6 @@ Load `orx-results` when the report makes claims derived from run results.
 
 Use relative links within reports, for example
 `![Final accuracy](final-accuracy.svg)` from `learning-rate-study.md`.
-In the chat handoff, link every finished output using the session playbook's
-evidence-and-links contract, including the full path, for example
+In the chat handoff, link every finished output with the playbook's file tag
+and its full path, for example
 `<file path="artifacts/learning-rate-study/final-accuracy.svg" />`.

@@ -32,7 +32,12 @@ impl Api for ModalAccount {
     async fn quote(&self, _run: &WatchedRun, launch: &LaunchSpec) -> Result<Option<Quote>> {
         let spec: modal::ModalJobSpec = serde_json::from_value(launch.options.clone())?;
         modal::ensure_env().await?;
-        modal::hourly_price(&spec).await.map(Some)
+        let resources = modal::ModalResources {
+            gpu: spec.gpu,
+            cpu: spec.cpu,
+            memory: spec.memory,
+        };
+        modal::hourly_price(&resources).await.map(Some)
     }
     async fn recover(&self, _intent: &RunIntent) -> Recovery {
         api::unknown(

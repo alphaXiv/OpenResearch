@@ -91,8 +91,14 @@ Direct editor saves do not use the lock and can race with `set`; close or reload
 an editor before a CLI update rather than editing concurrently.
 Skill refreshes, upgrades, and session cleanup do not own or delete this file.
 
-Keep a short section for each backend/host: verified environment activation,
-data paths, relevant constraints, and documentation links. Example:
+Never write the file with file-edit tools or shell redirects. Preserve the
+user's guidance; replace obsolete steps instead of appending run logs. Never
+store credentials or invent cluster commands. Read linked cluster instructions
+before using unfamiliar scheduler options.
+
+Keep a short section for each backend/host: working commands, verified
+environment activation, data paths, relevant constraints, and documentation
+links. Example:
 
 ```markdown
 ## SSH: lab
@@ -104,7 +110,8 @@ data paths, relevant constraints, and documentation links. Example:
 
 Read current settings and the recipe each time; an earlier session prompt can
 be stale. Markdown is guidance, never an automatically executed setup script.
-Preserve the fixed run command and launch through `orx exp run`.
+Instructions do not change the configured backend or authorize bypassing the
+launch contract: preserve the fixed run command and launch through `orx exp run`.
 
 ## Slurm connection loss
 

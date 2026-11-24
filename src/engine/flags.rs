@@ -550,7 +550,7 @@ fn tuning(run: &StoredRun, flag: &Value) -> String {
         ),
         _ => return String::new(),
     };
-    format!("\n{advice} See `orx skill orx-experiment-runs`.")
+    format!("\n{advice} See `orx skill experiment-runs/watcher`.")
 }
 
 /// A batch of notices as one message: the watcher's flags in it say what they share once.
