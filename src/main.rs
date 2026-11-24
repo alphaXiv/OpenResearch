@@ -713,7 +713,8 @@ pub enum ViewCommand {
 #[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExpRunArgs {
     pub exp_id: String,
-    /// Estimate stage and total duration from the parent without launching a run.
+    /// Estimate stage and total duration from the parent, and their cost on the chosen compute,
+    /// without launching a run.
     #[arg(long)]
     #[serde(skip)]
     pub estimate: bool,

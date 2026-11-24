@@ -729,6 +729,8 @@
   "activity_creating_an_experiment": "Bir deney oluşturuluyor…",
   "activity_launched_experiment": "{experiment} başlattı",
   "activity_launching_experiment": "Bir deney çalıştırması başlatılıyor…",
+  "activity_estimated_run": "Bir deney çalıştırmasını tahmin etti",
+  "activity_estimating_run": "Bir deney çalıştırması tahmin ediliyor…",
   "activity_loaded_research_guides_one": "{count} araştırma kılavuzu yükledi",
   "activity_loaded_research_guides_other": "{count} araştırma kılavuzu yükledi",
   "activity_loaded_skills_one": "{count} beceri yükledi",

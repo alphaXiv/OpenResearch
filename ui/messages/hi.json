@@ -703,6 +703,8 @@
   "activity_creating_an_experiment": "प्रयोग बनाया जा रहा है…",
   "activity_launched_experiment": "{experiment} शुरू किया",
   "activity_launching_experiment": "प्रयोग रन शुरू किया जा रहा है…",
+  "activity_estimated_run": "एक प्रयोग रन का अनुमान लगाया",
+  "activity_estimating_run": "प्रयोग रन का अनुमान लगाया जा रहा है…",
   "activity_loaded_research_guides_one": "{count} शोध गाइड लोड की",
   "activity_loaded_research_guides_other": "{count} शोध गाइड लोड कीं",
   "activity_loaded_skills_one": "{count} स्किल लोड की",

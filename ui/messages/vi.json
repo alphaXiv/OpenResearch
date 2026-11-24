@@ -703,6 +703,8 @@
   "activity_creating_an_experiment": "Đang tạo một thí nghiệm…",
   "activity_launched_experiment": "Đã khởi chạy {experiment}",
   "activity_launching_experiment": "Đang khởi chạy một lượt chạy thí nghiệm…",
+  "activity_estimated_run": "Đã ước tính một lượt chạy thí nghiệm",
+  "activity_estimating_run": "Đang ước tính một lượt chạy thí nghiệm…",
   "activity_loaded_research_guides_one": "Đã tải {count} hướng dẫn nghiên cứu",
   "activity_loaded_research_guides_other": "Đã tải {count} hướng dẫn nghiên cứu",
   "activity_loaded_skills_one": "Đã tải {count} kỹ năng",

@@ -703,6 +703,8 @@
   "activity_creating_an_experiment": "Tworzenie eksperymentu…",
   "activity_launched_experiment": "Uruchomiono {experiment}",
   "activity_launching_experiment": "Uruchamianie eksperymentu…",
+  "activity_estimated_run": "Oszacowano eksperyment",
+  "activity_estimating_run": "Szacowanie eksperymentu…",
   "activity_loaded_research_guides_one": "Wczytane przewodniki badawcze: {count}",
   "activity_loaded_research_guides_other": "Wczytane przewodniki badawcze: {count}",
   "activity_loaded_skills_one": "Wczytane umiejętności: {count}",

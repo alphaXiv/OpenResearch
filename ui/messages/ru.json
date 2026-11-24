@@ -703,6 +703,8 @@
   "activity_creating_an_experiment": "Создание эксперимента…",
   "activity_launched_experiment": "Запуск {experiment}",
   "activity_launching_experiment": "Запуск эксперимента…",
+  "activity_estimated_run": "Эксперимент оценён",
+  "activity_estimating_run": "Оценка эксперимента…",
   "activity_loaded_research_guides_one": "Загружено руководств по исследованию: {count}",
   "activity_loaded_research_guides_other": "Загружено руководств по исследованию: {count}",
   "activity_loaded_skills_one": "Загружено навыков: {count}",

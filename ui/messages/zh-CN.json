@@ -697,6 +697,8 @@
   "activity_creating_an_experiment": "正在创建实验…",
   "activity_launched_experiment": "已启动 {experiment}",
   "activity_launching_experiment": "正在启动实验运行…",
+  "activity_estimated_run": "已估算实验运行",
+  "activity_estimating_run": "正在估算实验运行…",
   "activity_loaded_research_guides_one": "已加载 {count} 份研究指南",
   "activity_loaded_research_guides_other": "已加载 {count} 份研究指南",
   "activity_loaded_skills_one": "已加载 {count} 个技能",
