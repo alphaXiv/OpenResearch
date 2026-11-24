@@ -7,7 +7,7 @@ orx keeps a researcher's work on their own machine. Projects, experiments, runs,
 | Directory | Default location | Holds |
 | --- | --- | --- |
 | config | `~/.config/openresearch` | settings, credentials, the SSH hosts saved in orx, the telemetry outbox, the locks that cover the data directory as a whole |
-| data | `~/.local/share/openresearch` | the store, repositories, worktrees, agent homes, run logs, artifacts, attachments, the telemetry outbox of commands run in chats, per-run state |
+| data | `~/.local/share/openresearch` | the store, repositories, worktrees, agent homes, run logs, artifacts, attachments, per-run state |
 | cache | `~/.cache/openresearch` | what orx can download again: managed agent copies, price lists, the model feed; also the repositories older versions kept here, which [migrations](#migrations-follow-paths) move out |
 
 Config and data honour their XDG variable; data and cache take an environment override and a setting (`src/config.rs`, `store::data_dir`).
