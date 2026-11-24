@@ -121,6 +121,11 @@ export function unwrapShellBody(input: string): string {
   return input;
 }
 
+/** orx by any name it ships under: `orx`, or the desktop app's `OpenResearch` it links to. */
+export function isOrxExecutable(word: string): boolean {
+  return /^(?:orx|OpenResearch)(?:\.exe)?$/i.test(word.split(/[\\/]/).pop() ?? "");
+}
+
 /** The argv after an `orx` executable in shell command position. */
 export function orxArgvFromTokens(tokens: readonly string[]): string[] | null {
   let index = 0;
@@ -137,7 +142,7 @@ export function orxArgvFromTokens(tokens: readonly string[]): string[] | null {
     if (["-v", "-V"].includes(tokens[index])) return null;
     while (tokens[index]?.startsWith("-")) index++;
   }
-  if (tokens[index]?.split("/").pop() !== "orx") return null;
+  if (!isOrxExecutable(tokens[index] ?? "")) return null;
   return tokens.slice(index + 1);
 }
 
@@ -218,12 +223,15 @@ export function parseOrxLit(command: string | readonly string[]): OrxLitCall | n
   return { kind, source: discoverSource, strategy, query: positionals[1] || undefined };
 }
 
+/** The orx executable as a script names it: `orx`, or a path to `orx` or the desktop app's `OpenResearch`, quoted or not. */
+const ORX_WORD = String.raw`["']?(?:[^\s"';&|()]*[\\/])?(?:orx|OpenResearch)(?:\.exe)?["']?`;
+
 export function recordedDiscoveryQueries(command: string, output: string, strategy: string): string[] {
   const headings = new Set(output.split(/\r?\n/).filter((line) => line.startsWith("=== ")).map((line) => line.slice(4)));
   const queries: string[] = [];
   for (const loop of command.matchAll(/\bfor\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+([^;\n]+);\s*do\b([\s\S]*?)\bdone\b/g)) {
     const [, variable, values, body] = loop;
-    const search = new RegExp(`(?:^|[;\\n])\\s*orx\\s+discover\\s+${strategy}\\s+"?\\$${variable}"?(?=\\s|[;|]|$)`);
+    const search = new RegExp(`(?:^|[;\\n])\\s*${ORX_WORD}\\s+discover\\s+${strategy}\\s+"?\\$${variable}"?(?=\\s|[;|]|$)`);
     if (!search.test(body) || !body.includes(`echo "=== $${variable}"`)) continue;
     const literals = shellWords(values, true);
     for (const query of literals) {
@@ -238,7 +246,7 @@ export function loopPaperIds(command: string): string[] {
   const ids: string[] = [];
   for (const loop of command.matchAll(/\bfor\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+([^;\n]+);\s*do\b([\s\S]*?)\bdone\b/g)) {
     const [, variable, values, body] = loop;
-    if (!new RegExp(`(?:^|[;\\n&|]|\\s)orx\\s+paper\\s+"?\\$\\{?${variable}\\}?"?(?=\\s|[;|&]|$)`).test(body)) continue;
+    if (!new RegExp(`(?:^|[;\\n&|(]|\\s)${ORX_WORD}\\s+paper\\s+"?\\$\\{?${variable}\\}?"?(?=\\s|[;|&)]|$)`).test(body)) continue;
     ids.push(...shellWords(values, true).filter(Boolean));
   }
   return ids;
