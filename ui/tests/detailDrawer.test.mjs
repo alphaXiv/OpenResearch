@@ -21,7 +21,7 @@ const props = {
 };
 
 /** Renders the drawer against a backend whose Trackio store holds `trackioRuns`; returns the runs whose logs it read. */
-async function show(overrides, trackioRuns = []) {
+async function show(overrides, trackioRuns = [], sessions = []) {
   const logs = [];
   serve((path) => {
     const log = path.match(/^\/api\/runs\/([^/]+)\/log/);
@@ -30,6 +30,8 @@ async function show(overrides, trackioRuns = []) {
       return { generation: "g", offset: 0, dataBase64: "", nextOffset: 0, eof: true };
     }
     if (path === "/api/compute/hosts") return [];
+    if (path.startsWith("/api/chat/sessions")) return { sessions };
+    if (path.startsWith("/api/projects/project-a/code-tree")) return { root: "repo", branch: "main", entries: ["notes.md"] };
     if (path === "/api/trackio/projects/project-a/runs") {
       return { dashboardUrl: trackioRuns.length ? "http://127.0.0.1:7860" : null, project: "p", runs: trackioRuns };
     }
@@ -164,4 +166,23 @@ test("Stop asks first; Escape keeps the run, a refusal stays in the dialog, and 
   await click(find('[role="dialog"] button', m.experiments_stop_run()));
   assert.equal(cancels.length, 2);
   assert.equal(dialog(), null);
+});
+
+const described = { ...props.experiment, description: '<file path="notes.md" />', chatSessionId: "chat-a", createdAt: 1 };
+
+async function openDescribedFile(sessions) {
+  const opened = [];
+  const { container } = await show({ view: "overview", experiment: described, experiments: [], onOpenFile: (...args) => opened.push(args) }, [], sessions);
+  const chip = container.querySelector(".file-chip");
+  assert.equal(chip.disabled, false);
+  await click(chip);
+  return opened[0];
+}
+
+test("a file reference in the overview description opens the file in the experiment's chat", async () => {
+  assert.deepEqual((await openDescribedFile([{ id: "chat-a", harness: "claude" }])).slice(0, 2), ["notes.md", "chat-a"]);
+});
+
+test("a file reference opens without the chat once the chat is deleted", async () => {
+  assert.deepEqual((await openDescribedFile([{ id: "chat-b" }])).slice(0, 2), ["notes.md", null]);
 });

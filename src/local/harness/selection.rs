@@ -14,10 +14,14 @@ impl std::fmt::Display for ModelSelectionError {
 
 impl std::error::Error for ModelSelectionError {}
 
+/// Whether `model` names one model a chat can pin; `default` and Claude's `opusplan` leave the
+/// choice to the agent, so the model would move under the chat.
 pub(crate) fn concrete_model(model: &str) -> bool {
     !model.trim().is_empty() && !matches!(model, "default" | "opusplan")
 }
 
+/// The model a new chat starts on: the configured one, added to `models` when the catalog lacks
+/// it, else the newest of the harness's flagship family, base variants first on a version tie.
 pub(crate) fn resolve_models(
     harness: &str,
     models: &mut Vec<ModelInfo>,

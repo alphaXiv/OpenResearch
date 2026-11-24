@@ -156,7 +156,8 @@ fn validate_logo(logo: &str) -> Result<()> {
 /// Writes the name, icon and logo of the Settings row `key`: a found agent's id, an account's id,
 /// or `opencode:` and a provider's, endpoint's or found provider's id. Logos live in
 /// `agent-labels.json` for every row, as do the names and icons of rows with no record of their
-/// own. True when OpenCode's model names carry the change.
+/// own, so the records stay as an older orx reads them. True when OpenCode's model names carry the
+/// change.
 pub fn edit(key: &str, edit: &Edit) -> Result<bool> {
     if let Some(Some(logo)) = &edit.logo {
         validate_logo(logo)?;

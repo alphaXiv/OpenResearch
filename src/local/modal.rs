@@ -9,9 +9,6 @@ use crate::error::{anyhow, Result};
 use crate::jobs::{huggingface as hf, modal};
 use crate::store::LaunchSpec;
 
-/// Modal app all orx sandboxes are grouped under (visible in the Modal dashboard).
-const MODAL_APP: &str = "openresearch";
-
 /// Requires `--flavor <name>`: a Modal GPU (t4, l4, a10g, a100, a100-80gb, l40s, h100, h200,
 /// …) or `cpu` / `cpu-large` for CPU-only.
 pub fn launch_spec(
@@ -45,7 +42,7 @@ pub fn launch_spec(
         memory: resources.memory,
         env: HashMap::new(),
         timeout_seconds,
-        app: MODAL_APP.to_string(),
+        app: modal::run_app(run_id),
         tags: super::run_labels(&args.exp_id, run_id)?,
         source_archive: Some(source.path.clone()),
     };

@@ -26,7 +26,8 @@ pub(crate) fn harnesses() -> impl Iterator<Item = &'static str> {
     )
 }
 
-/// The agent `harness` installs as its runtime, which comes and goes with it.
+/// The agent `harness` installs as its runtime, which comes and goes with it. Node.js stays
+/// when an agent goes: it also runs agents the user installed.
 pub(crate) fn runtime(harness: &str) -> Option<&'static str> {
     (harness == "pi-acp").then_some("pi")
 }

@@ -4,9 +4,9 @@
 //! The whole dir is a self-contained, relocatable unit, so a move is: validate
 //! target → checkpoint the DB → copy the tree (streaming byte progress) → verify
 //! → swap the persisted path in `settings.json` (after which `store::data_dir()`
-//! returns the new path) → delete the old copy. Non-destructive: the old tree
-//! survives until the copy is verified and the path is swapped, so an
-//! interruption never loses data.
+//! returns the new path). Non-destructive: the old tree survives until the copy
+//! is verified and the path is swapped, and after a copy the old tree is kept
+//! (see [`move_data_dir`]), so an interruption never loses data.
 //!
 //! The caller (the `up` handler) is responsible for refusing a move while a run
 //! or chat turn is in flight — this module assumes writers are quiesced enough

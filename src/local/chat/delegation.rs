@@ -401,6 +401,9 @@ impl PendingPrompt {
                 .collect();
             return format!("set {}", names.join(", "));
         }
+        if self.kind() == "question" {
+            return "answer its question".into();
+        }
         format!(
             "approve {}",
             self.prompt.tool.as_deref().unwrap_or("a step")
@@ -428,6 +431,12 @@ pub fn pending_prompt(store: &Store, session_id: &str) -> Result<Option<PendingP
             })
         })
     }))
+}
+
+/// Whether another chat may answer `pending`: only a delegate's questions
+/// are; the user answers every chat they opened.
+pub fn asks_agents(store: &Store, chat_id: &str, pending: &PendingPrompt) -> Result<bool> {
+    Ok(pending.kind() == "question" && store.delegation(chat_id)?.parent.is_some())
 }
 
 pub(super) fn question_text(id: &str, model: &str, pending: &PendingPrompt) -> String {
@@ -468,11 +477,13 @@ pub fn status(
 ) -> Result<String> {
     let model = target.model.clone().unwrap_or_default();
     let pending = pending_prompt(store, &target.id)?;
+    let asks_agents = match &pending {
+        Some(pending) => asks_agents(store, &target.id, pending)?,
+        None => false,
+    };
     let turn = store.latest_chat_turn(&target.id)?;
     let mut text = match (&pending, working, &turn) {
-        (Some(pending), _, _) if pending.kind() == "question" => {
-            question_text(&target.id, &model, pending)
-        }
+        (Some(pending), _, _) if asks_agents => question_text(&target.id, &model, pending),
         (Some(pending), _, _) => format!(
             "Chat `{}` ({model}) waits for the user to {} in that chat.",
             target.id,
@@ -1001,6 +1012,17 @@ mod tests {
                 .map(|pending| pending.id),
             Some("perm".into()),
             "the questions of a batch are asked in order"
+        );
+        store.remove_chat_delegate(&child.id).unwrap();
+        assert_eq!(
+            kinds(),
+            ["answer"],
+            "only the user answers a chat that is not a delegate"
+        );
+        let status = status(&store, &child, false, &parent.id).unwrap();
+        assert!(
+            status.contains("waits for the user to answer its question"),
+            "{status}"
         );
         let plan_exit = WirePrompt {
             kind: "question".into(),

@@ -1789,6 +1789,7 @@
   "settings_found_opencode": "OpenCode에 있음",
   "settings_found_config_file": "설정 파일",
   "settings_found_env_note": "환경의 {name}이(가) 이 제공업체의 키를 제공합니다. 제거하려면 {name}을(를) 설정한 곳에서 삭제하거나 여기서 제공업체를 끄세요.",
+  "settings_found_env_saved_note": "환경 탭의 {name}이(가) 이 제공업체의 키를 제공합니다. 제거하려면 그곳에서 삭제하거나 여기서 제공업체를 끄세요.",
   "settings_found_config_note": "이 제공업체를 삭제하려면 {path}에서 제거하거나 여기서 끄세요.",
   "settings_remove_found_description": "이 컴퓨터의 OpenCode에서도 제거됩니다. 로그인과 OpenCode 설정의 항목이 함께 삭제됩니다.",
   "add_agent_hide_free_models": "OpenCode 무료 모델 숨기기",

@@ -41,8 +41,8 @@ Import `test`, `expect`, `send` and `composer` from `src/test.ts`.
   set up what the test is not about, through the routes the dashboard calls; the journey itself
   clicks and types.
 - **Nothing leaves the machine unlisted.** A test fails on any request off the machine that
-  `listedEgress` in `src/outside.ts` does not name. Adding one is a product decision: list it in
-  [arc/storage.md](../arc/storage.md) first.
+  `listedEgress` in `src/outside.ts` does not name. A new kind of traffic is a product decision: list it in
+  [arc/storage.md](../arc/storage.md) first; a new host for a listed kind goes in `listedEgress` alone.
 
 `lint.ts` rejects the ways a spec hides a race, as alphaXiv's `no-e2e-race-hiding` does: no
 `waitForTimeout` or sleeps, no `toPass` retries, no `networkidle`, no `force: true`, no serial
