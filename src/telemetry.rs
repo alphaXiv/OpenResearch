@@ -437,6 +437,71 @@ fn outbox_dir() -> PathBuf {
     crate::config::config_dir().join("telemetry-outbox")
 }
 
+/// Where a command run in a chat leaves its events for `orx up` to send: orx lets an
+/// agent's sandbox write the data directory, not the config directory.
+fn chat_outbox_dir() -> PathBuf {
+    crate::store::data_dir().join("telemetry-outbox")
+}
+
+fn queued_payload_paths() -> Vec<PathBuf> {
+    [outbox_dir(), chat_outbox_dir()]
+        .iter()
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"))
+        .collect()
+}
+
+/// A chat command's event is about a kilobyte; anything far larger was not queued by orx.
+const CHAT_OUTBOX_MAX_BYTES: u64 = 1 << 20;
+
+/// The queued payload at `path`, or `None` for a file that is not one.
+fn read_queued_payload(path: &std::path::Path) -> std::io::Result<Option<serde_json::Value>> {
+    if path.parent() != Some(chat_outbox_dir().as_path()) {
+        return Ok(serde_json::from_slice(&std::fs::read(path)?).ok());
+    }
+    read_chat_queued_payload(path)
+}
+
+/// An agent can write the chat outbox and whatever is read is posted as is, so a link is
+/// never followed, a pipe never waited on, and only the one event `send_or_stage` names
+/// the file for is accepted.
+fn read_chat_queued_payload(path: &std::path::Path) -> std::io::Result<Option<serde_json::Value>> {
+    use std::io::Read as _;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(
+        &mut options,
+        libc::O_NOFOLLOW | libc::O_NONBLOCK,
+    );
+    // FILE_FLAG_OPEN_REPARSE_POINT: open a link itself, not its target.
+    #[cfg(windows)]
+    std::os::windows::fs::OpenOptionsExt::custom_flags(&mut options, 0x0020_0000);
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    file.take(CHAT_OUTBOX_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > CHAT_OUTBOX_MAX_BYTES {
+        return Ok(None);
+    }
+
+    let payload = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+    let named = path.file_stem().and_then(|stem| stem.to_str());
+    Ok(payload.filter(|payload| {
+        payload["events"]
+            .as_array()
+            .is_some_and(|events| events.len() == 1)
+            && payload["events"][0]["eventId"].as_str() == named
+    }))
+}
+
 /// How reading `settings.json` turned out. The corrupt case is kept distinct
 /// from absent so a mutation refuses to clobber a file that might still hold a
 /// persisted opt-out we just failed to parse (a torn write, a hand-edit) —
@@ -930,8 +995,11 @@ async fn post_payload(payload: &serde_json::Value) -> DeliveryOutcome {
     }
 }
 
-fn persist_payload(event_id: uuid::Uuid, payload: &serde_json::Value) -> Option<PathBuf> {
-    let dir = outbox_dir();
+fn persist_payload(
+    dir: PathBuf,
+    event_id: uuid::Uuid,
+    payload: &serde_json::Value,
+) -> Option<PathBuf> {
     std::fs::create_dir_all(&dir).ok()?;
     let path = dir.join(format!("{event_id}.json"));
     crate::local::git::atomic_write_with_mode(
@@ -980,18 +1048,11 @@ fn is_consent_payload(payload: &serde_json::Value) -> bool {
 }
 
 fn remove_queued_product_events() {
-    let Ok(entries) = std::fs::read_dir(outbox_dir()) else {
-        return;
-    };
-    for path in entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"))
-    {
-        let Ok(bytes) = std::fs::read(&path) else {
+    for path in queued_payload_paths() {
+        let Ok(payload) = read_queued_payload(&path) else {
             continue;
         };
-        let keep = serde_json::from_slice(&bytes).is_ok_and(|payload| is_consent_payload(&payload));
+        let keep = payload.is_some_and(|payload| is_consent_payload(&payload));
         if !keep {
             let _ = std::fs::remove_file(path);
         }
@@ -1046,7 +1107,7 @@ fn transfer_pending_events() {
         let Ok(event_id) = uuid::Uuid::parse_str(&id) else {
             continue;
         };
-        if persist_payload(event_id, &payload).is_some() {
+        if persist_payload(outbox_dir(), event_id, &payload).is_some() {
             let _ = store.acknowledge_pending_telemetry(&id);
         }
     }
@@ -1066,14 +1127,7 @@ pub(crate) fn retry_outbox() {
         return;
     }
     transfer_pending_events();
-    let Ok(entries) = std::fs::read_dir(outbox_dir()) else {
-        return;
-    };
-    let mut paths: Vec<_> = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"))
-        .collect();
+    let mut paths = queued_payload_paths();
     sort_oldest_first(&mut paths, |path| {
         std::fs::metadata(path)
             .and_then(|meta| meta.modified())
@@ -1081,10 +1135,10 @@ pub(crate) fn retry_outbox() {
     });
     // ponytail: no eviction preserves retryable events; move to SQLite if queue scans become costly.
     for path in paths.into_iter().take(20) {
-        let Ok(bytes) = std::fs::read(&path) else {
+        let Ok(payload) = read_queued_payload(&path) else {
             continue;
         };
-        let Ok(payload) = serde_json::from_slice(&bytes) else {
+        let Some(payload) = payload else {
             let _ = std::fs::remove_file(path);
             continue;
         };
@@ -1114,19 +1168,18 @@ fn spawn_event(
 }
 
 /// An agent's sandbox may proxy a send and report the agent's command as failed
-/// when exit cuts the send off, so a command run in an `orx up` chat stages its
-/// events for `orx up` to deliver.
+/// when exit cuts the send off, so a command run in an `orx up` chat leaves its
+/// events for `orx up` to deliver. A file, not the store: a second connection
+/// would wait out the busy timeout whenever a chat holds the write lock.
 fn send_or_stage(
     event_id: uuid::Uuid,
     payload: serde_json::Value,
 ) -> Option<tokio::task::JoinHandle<()>> {
     if crate::local::chat::in_local_session() {
-        if let Ok(store) = crate::store::Store::open() {
-            let _ = store.stage_telemetry(&event_id.to_string(), &payload);
-        }
+        persist_payload(chat_outbox_dir(), event_id, &payload);
         return None;
     }
-    let path = persist_payload(event_id, &payload);
+    let path = persist_payload(outbox_dir(), event_id, &payload);
     Some(tokio::spawn(deliver_payload(path, payload)))
 }
 
@@ -1235,7 +1288,7 @@ pub(crate) async fn record_consent(agreed: bool) {
     }
     let event_id = uuid::Uuid::new_v4();
     let payload = consent_payload(agreed, &consent_distinct_id(agreed), event_id);
-    let path = persist_payload(event_id, &payload);
+    let path = persist_payload(outbox_dir(), event_id, &payload);
     let send = deliver_queued_payload(path, payload);
     // Cap the wait so the settings POST / command return promptly even if the
     // network is slow; the send itself also has its own 3s request timeout.
@@ -2946,14 +2999,56 @@ mod tests {
             build_payload_with_id("command", "install", event_id, json!({ "command": "exp" }));
 
         assert!(send_or_stage(event_id, payload.clone()).is_none());
-        assert_eq!(
-            crate::store::Store::open()
-                .unwrap()
-                .pending_telemetry()
-                .unwrap(),
-            vec![(event_id.to_string(), payload)]
-        );
+        let staged = chat_outbox_dir().join(format!("{event_id}.json"));
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&staged).unwrap()).unwrap();
+        assert_eq!(written, payload);
+        assert_eq!(queued_payload_paths(), vec![staged.clone()]);
         assert!(!outbox_dir().exists());
+        assert!(!crate::store::data_dir().join("orx.db").exists());
+
+        set_persisted_disabled(true).unwrap();
+        assert!(!staged.exists());
+    }
+
+    #[test]
+    fn the_chat_outbox_reads_only_events_queued_under_their_own_name() {
+        if !crate::config::in_test_child(TELEMETRY_ENV) {
+            return;
+        }
+        let event_id = uuid::Uuid::new_v4();
+        let payload =
+            build_payload_with_id("command", "install", event_id, json!({ "command": "exp" }));
+        std::fs::create_dir_all(chat_outbox_dir()).unwrap();
+        let queued = chat_outbox_dir().join(format!("{event_id}.json"));
+        std::fs::write(&queued, serde_json::to_vec(&payload).unwrap()).unwrap();
+        assert_eq!(read_queued_payload(&queued).unwrap(), Some(payload.clone()));
+
+        let renamed = chat_outbox_dir().join(format!("{}.json", uuid::Uuid::new_v4()));
+        std::fs::rename(&queued, &renamed).unwrap();
+        assert_eq!(read_queued_payload(&renamed).unwrap(), None);
+
+        // A setup snapshot names its file for the batch, not its first event.
+        let snapshot = outbox_dir().join("batch.json");
+        std::fs::create_dir_all(outbox_dir()).unwrap();
+        std::fs::write(&snapshot, serde_json::to_vec(&payload).unwrap()).unwrap();
+        assert_eq!(
+            read_queued_payload(&snapshot).unwrap(),
+            Some(payload.clone())
+        );
+
+        #[cfg(unix)]
+        {
+            let private = chat_outbox_dir().join("private.txt");
+            std::fs::write(&private, serde_json::to_vec(&payload).unwrap()).unwrap();
+            std::os::unix::fs::symlink(&private, &queued).unwrap();
+            assert!(read_queued_payload(&queued).is_err());
+
+            let pipe = chat_outbox_dir().join(format!("{}.json", uuid::Uuid::new_v4()));
+            let name = std::ffi::CString::new(pipe.to_str().unwrap()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+            assert_eq!(read_queued_payload(&pipe).unwrap(), None);
+        }
     }
 
     #[test]

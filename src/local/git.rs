@@ -123,15 +123,16 @@ pub fn migrate_legacy_project_worktrees(
     Ok(())
 }
 
-/// Side chats resolve to the worktree of the chat they branched from.
+/// Side chats resolve to the worktree of the chat they branched from. Takes the
+/// caller's store: a second connection opened inside its write transaction would
+/// wait out the busy timeout against it.
 pub fn existing_session_worktree_path(
+    store: &crate::store::Store,
     project: &crate::local::model::LocalProject,
     session_id: &str,
-) -> PathBuf {
-    let owner = crate::store::Store::open()
-        .and_then(|store| store.chat_worktree_owner(session_id))
-        .unwrap_or_else(|_| session_id.to_string());
-    owner_worktree_path(project, &owner)
+) -> Result<PathBuf> {
+    let owner = store.chat_worktree_owner(session_id)?;
+    Ok(owner_worktree_path(project, &owner))
 }
 
 fn owner_worktree_path(project: &crate::local::model::LocalProject, session_id: &str) -> PathBuf {
@@ -1292,6 +1293,7 @@ pub(crate) fn restore_local_repository(
 /// baseline branch itself would claim it and block every sibling; the agent
 /// checks out its own experiment branch from there.
 pub fn ensure_session_worktree(
+    store: &crate::store::Store,
     project: &crate::local::model::LocalProject,
     session_id: &str,
 ) -> Result<PathBuf> {
@@ -1299,7 +1301,7 @@ pub fn ensure_session_worktree(
     if !is_repository(repo_path) {
         return Err(anyhow!("{} is not a Git repository", repo_path.display()));
     }
-    let owner = crate::store::Store::open()?.chat_worktree_owner(session_id)?;
+    let owner = store.chat_worktree_owner(session_id)?;
     let dir = owner_worktree_path(project, &owner);
     let start_ref = super::demo::session_start_ref(
         repo_path,
@@ -1494,7 +1496,7 @@ fn lost_worktree_head(repo: &Path, dir: &Path) -> Option<String> {
 /// playbook contract. Best-effort: cleanup must never block the delete.
 pub fn remove_session_worktree(project: &crate::local::model::LocalProject, session_id: &str) {
     let repo_path = Path::new(&project.repo_path);
-    let dir = existing_session_worktree_path(project, session_id);
+    let dir = owner_worktree_path(project, session_id);
     remove_session_worktree_at(repo_path, &dir);
 }
 

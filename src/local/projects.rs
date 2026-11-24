@@ -552,7 +552,7 @@ pub fn split_chat_project(
     request: &ChatProjectMove,
 ) -> Result<LocalProject> {
     let (name, target) = new_project_place(&request.name, &request.path)?;
-    let worktree = git::existing_session_worktree_path(project, owner);
+    let worktree = git::existing_session_worktree_path(store, project, owner)?;
     let has_worktree = worktree.join(".git").exists();
     // The new repository can't hold staged changes the chat never committed.
     if has_worktree && !git::git(Some(&worktree), &["diff", "--cached", "--name-only"])?.is_empty()
