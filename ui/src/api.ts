@@ -797,6 +797,8 @@ export type RemoteSessionStatus =
   | "needsUpdate"
   | "applying"
   | "connected"
+  /** Connected and usable while this computer's build installs beside the running host. */
+  | "updating"
   | "restarting"
   | "reconnecting"
   | "disconnected";
@@ -815,6 +817,7 @@ export interface RemoteSessionInfo {
   version: string | null;
   /** The remote's version, or its canary tag; null when unknown. */
   buildId: string | null;
+  /** The remote API's level: a route added after the remote's level is missing there, so gate its entry point on this. */
   dashboardProtocol: number | null;
   gatewayUrl: string;
   error: string | null;
@@ -824,6 +827,8 @@ export interface RemoteSessionInfo {
   installPaths: RemoteInstallPaths | null;
   uiPreferences: { theme: string | null; locale: string | null };
   canStartNewHost: boolean;
+  /** The remote runs a build older than this computer's, which can install its own there. */
+  updateAvailable: boolean;
 }
 
 /** `production` only for an official release built by the project's CI. */
@@ -831,7 +836,7 @@ export type BuildChannel = "production" | "development";
 
 export type RuntimeInfo =
   | { kind: "local"; version: string; buildChannel: BuildChannel }
-  | { kind: "ssh"; version: string; buildChannel: BuildChannel; dashboardProtocol: number; session: RemoteSessionInfo };
+  | { kind: "ssh"; version: string; buildChannel: BuildChannel; session: RemoteSessionInfo };
 
 export interface RemoteStopPreview {
   instanceId: string;
@@ -2837,6 +2842,9 @@ export function createApi(
   const reconnectRemoteSession = (id: string) =>
     post<RemoteSessionInfo>(`/api/remote/sessions/${encodeURIComponent(id)}/reconnect`);
 
+  const updateRemoteSession = (id: string) =>
+    post<RemoteSessionInfo>(`/api/remote/sessions/${encodeURIComponent(id)}/update`);
+
   const disconnectRemoteSession = (id: string) =>
     post<RemoteSessionInfo>(`/api/remote/sessions/${encodeURIComponent(id)}/disconnect`);
 
@@ -2844,6 +2852,8 @@ export function createApi(
     post<RemoteSessionInfo>("/_orx/install", paths);
 
   const reconnectCurrentRemote = () => post<RemoteSessionInfo>("/_orx/reconnect");
+
+  const updateCurrentRemote = () => post<RemoteSessionInfo>("/_orx/update");
 
   const disconnectCurrentRemote = () => post<RemoteSessionInfo>("/_orx/disconnect");
 
@@ -3572,9 +3582,11 @@ export function createApi(
     listRemoteSessions,
     createRemoteSession,
     reconnectRemoteSession,
+    updateRemoteSession,
     disconnectRemoteSession,
     installRemoteSession,
     reconnectCurrentRemote,
+    updateCurrentRemote,
     disconnectCurrentRemote,
     startCurrentRemoteHost,
     getRemoteStopPreview,

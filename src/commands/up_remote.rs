@@ -42,7 +42,15 @@ use crate::{browser, UpArgs};
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// The level of the remote API this build serves, which only grows from
+/// [`MIN_DASHBOARD_PROTOCOL`] on. Bump it when the UI must know a route exists before calling it.
 pub(crate) const DASHBOARD_PROTOCOL: u32 = 8;
+/// The oldest remote API this laptop drives; every server from it on keeps each route and field it shipped.
+const MIN_DASHBOARD_PROTOCOL: u32 = 8;
+
+fn drivable(protocol: Option<u32>) -> bool {
+    protocol.is_some_and(|protocol| protocol >= MIN_DASHBOARD_PROTOCOL)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,6 +60,8 @@ pub(crate) enum RemoteSessionStatus {
     NeedsUpdate,
     Applying,
     Connected,
+    /// Connected and usable while this computer's build installs beside the running host.
+    Updating,
     Reconnecting,
     Restarting,
     Disconnected,
@@ -101,6 +111,25 @@ pub(crate) struct RemoteSessionInfo {
     pub install_paths: Option<RemoteInstallPathsInfo>,
     pub ui_preferences: RemoteUiPreferences,
     pub can_start_new_host: bool,
+    /// The host runs a build older than this computer's, which can install its own there.
+    pub update_available: bool,
+}
+
+impl RemoteSessionInfo {
+    fn set_build(&mut self, version: &str, build_id: Option<&str>, protocol: Option<u32>) {
+        self.version = Some(version.into());
+        self.build_id = build_id.map(Into::into);
+        self.dashboard_protocol = protocol;
+        self.update_available = crate::telemetry::build_channel() == "production"
+            && crate::updates::build_is_newer(
+                (
+                    &crate::updates::current_version(),
+                    crate::updates::current_build_id(),
+                ),
+                version,
+                build_id,
+            );
+    }
 }
 
 #[derive(Clone)]
@@ -307,6 +336,7 @@ impl RemoteSessionManager {
             install_paths: None,
             ui_preferences: preferences,
             can_start_new_host: false,
+            update_available: false,
         };
         let client = crate::net::loopback_client()
             .redirect(reqwest::redirect::Policy::none())
@@ -398,6 +428,10 @@ impl RemoteSessionManager {
     pub(crate) async fn reconnect(&self, id: &str) -> Result<RemoteSessionInfo> {
         let session = self.session(id).await?;
         Ok(reconnect_session(session).await)
+    }
+
+    pub(crate) async fn update(&self, id: &str) -> Result<RemoteSessionInfo> {
+        install_and_connect(self.session(id).await?, None).await
     }
 
     pub(crate) async fn disconnect(&self, id: &str) -> Result<RemoteSessionInfo> {
@@ -533,26 +567,20 @@ async fn prepare_remote_session(session: Arc<RemoteSession>, generation: u64) {
     }
 }
 
-fn protocol_mismatch(
+fn protocol_too_old(
     host: &str,
     build_id: Option<&str>,
     version: &str,
     protocol: Option<u32>,
-    newer: bool,
 ) -> String {
     let build = build_id.unwrap_or(version);
     let theirs = protocol.map_or("an unknown dashboard protocol".into(), |protocol| {
         format!("dashboard protocol {protocol}")
     });
-    let ours = format!(
-        "{} (dashboard protocol {DASHBOARD_PROTOCOL})",
+    format!(
+        "'{host}' runs OpenResearch {build} ({theirs}), too old for this computer's {}, which needs dashboard protocol {MIN_DASHBOARD_PROTOCOL} or newer. Reconnect it in the local dashboard (`orx up`) and choose Update; its running work is kept.",
         crate::updates::current_build_id()
-    );
-    if newer {
-        format!("'{host}' runs OpenResearch {build} ({theirs}), newer than this computer's {ours}. Run `orx update` on this computer, then reconnect.")
-    } else {
-        format!("'{host}' runs OpenResearch {build} ({theirs}), older than this computer's {ours}. Reconnect it in the local dashboard (`orx up`) and choose Update; its running work is kept.")
-    }
+    )
 }
 
 async fn prepare_remote_session_inner(session: Arc<RemoteSession>, generation: u64) {
@@ -671,30 +699,21 @@ async fn prepare_remote_session_inner(session: Arc<RemoteSession>, generation: u
                     return;
                 }
             };
-        if protocol != Some(DASHBOARD_PROTOCOL) {
+        if !drivable(protocol) {
             let mut update_paths = paths.clone();
             update_paths.binary = remote_orx.path.clone();
-            let message = protocol
-                .filter(|protocol| *protocol > DASHBOARD_PROTOCOL)
-                .map(|_| {
-                    protocol_mismatch(
-                        &host,
-                        remote_orx.build_id.as_deref(),
-                        &remote_orx.version,
-                        protocol,
-                        true,
-                    )
-                })
-                .or_else(|| (crate::telemetry::build_channel() != "production").then(|| {
-                    "This development build cannot install an unreleased public version. Build this branch for the remote machine and replace the binary at the path shown below."
-                        .to_string()
-                }));
+            let message = (crate::telemetry::build_channel() != "production").then(|| {
+                "This development build cannot install an unreleased public version. Build this branch for the remote machine and replace the binary at the path shown below."
+                    .to_string()
+            });
             update_session_if_current(&session, generation, |info| {
                 info.status = RemoteSessionStatus::NeedsUpdate;
                 info.error = message;
-                info.version = Some(remote_orx.version.clone());
-                info.build_id = remote_orx.build_id.clone();
-                info.dashboard_protocol = protocol;
+                info.set_build(
+                    &remote_orx.version,
+                    remote_orx.build_id.as_deref(),
+                    protocol,
+                );
                 info.install_paths = Some((&update_paths).into());
             })
             .await;
@@ -727,55 +746,31 @@ async fn prepare_remote_session_inner(session: Arc<RemoteSession>, generation: u
     }
     let protocol = Some(descriptor.dashboard_protocol);
     if !update_session_if_current(&session, generation, |info| {
-        info.version = Some(descriptor.version.clone());
-        info.build_id = descriptor.build_id.clone();
-        info.dashboard_protocol = protocol;
+        info.set_build(
+            &descriptor.version,
+            descriptor.build_id.as_deref(),
+            protocol,
+        );
     })
     .await
     {
         return;
     }
-    if descriptor.control_protocol != CONTROL_PROTOCOL {
-        let newer = descriptor.control_protocol > CONTROL_PROTOCOL
-            || descriptor.dashboard_protocol > DASHBOARD_PROTOCOL;
+    if descriptor.control_protocol < CONTROL_PROTOCOL {
         update_session_if_current(&session, generation, |info| {
-            info.status = if newer {
-                RemoteSessionStatus::Disconnected
-            } else {
-                RemoteSessionStatus::NeedsUpdate
-            };
+            info.status = RemoteSessionStatus::NeedsUpdate;
             info.install_paths = None;
-            info.error = Some(if newer {
-                protocol_mismatch(
-                    &host,
-                    descriptor.build_id.as_deref(),
-                    &descriptor.version,
-                    protocol,
-                    true,
-                )
-            } else {
-                format!(
-                    "'{host}' runs OpenResearch {}, which cannot restart into an update. Stop it before updating.",
-                    descriptor.build_id.as_deref().unwrap_or(&descriptor.version)
-                )
-            });
+            info.update_available = false;
+            info.error = Some(format!(
+                "'{host}' runs OpenResearch {}, which cannot restart into an update. Stop it before updating.",
+                descriptor.build_id.as_deref().unwrap_or(&descriptor.version)
+            ));
         })
         .await;
         return;
     }
-    if protocol != Some(DASHBOARD_PROTOCOL) {
-        let message = protocol
-            .filter(|protocol| *protocol > DASHBOARD_PROTOCOL)
-            .map(|_| {
-                protocol_mismatch(
-                    &host,
-                    descriptor.build_id.as_deref(),
-                    &descriptor.version,
-                    protocol,
-                    true,
-                )
-            })
-            .or_else(|| (crate::telemetry::build_channel() != "production").then(|| "Build this branch for the remote machine and replace its OpenResearch binary, then reconnect.".into()));
+    if !drivable(protocol) {
+        let message = (crate::telemetry::build_channel() != "production").then(|| "Build this branch for the remote machine and replace its OpenResearch binary, then reconnect.".into());
         update_session_if_current(&session, generation, |info| {
             info.status = RemoteSessionStatus::NeedsUpdate;
             info.error = message;
@@ -802,55 +797,77 @@ async fn prepare_remote_session_inner(session: Arc<RemoteSession>, generation: u
     .await;
 }
 
+/// Installs this computer's build on the host, then connects to it. `requested` names the paths
+/// for a first install; an update keeps the host's binary path and storage.
 async fn install_and_connect(
     session: Arc<RemoteSession>,
-    requested: RemoteInstallPathsInfo,
+    requested: Option<RemoteInstallPathsInfo>,
 ) -> Result<RemoteSessionInfo> {
     let _operation = session.operation.lock().await;
-    let (previous, remote_protocol, update_binary) = {
+    let (previous, update_available, gated_binary, host) = {
         let info = session.info.read().await;
         (
             info.status,
-            info.dashboard_protocol,
+            info.update_available,
             info.install_paths
                 .as_ref()
                 .map(|paths| paths.binary.clone()),
+            info.host.clone(),
         )
     };
+    let live = previous == RemoteSessionStatus::Connected;
     if !matches!(
         previous,
         RemoteSessionStatus::NeedsInstall | RemoteSessionStatus::NeedsUpdate
-    ) {
+    ) && !(live && update_available)
+    {
         return Ok(session.info.read().await.clone());
     }
-    if remote_protocol.is_some_and(|protocol| protocol > DASHBOARD_PROTOCOL) {
-        let info = session.info.read().await;
-        return Err(anyhow!(protocol_mismatch(
-            &info.host,
-            info.build_id.as_deref(),
-            info.version.as_deref().unwrap_or("unknown"),
-            remote_protocol,
-            true,
-        )));
-    }
-    let update_binary = if previous == RemoteSessionStatus::NeedsUpdate {
-        Some(update_binary.ok_or_else(|| {
-            anyhow!("Reconnect to check the remote install path before updating.")
-        })?)
-    } else {
-        None
-    };
     if crate::telemetry::build_channel() != "production" {
         return Err(anyhow!(
             "This development build cannot install an unreleased remote protocol. Build this branch for the remote machine and place the binary at the selected path."
         ));
     }
-    let generation = advance_generation(&session, false);
-    let host = session.info.read().await.host.clone();
-    if !set_session_state_if_current(&session, generation, RemoteSessionStatus::Applying, None)
-        .await
+    let update_binary = match previous {
+        RemoteSessionStatus::NeedsUpdate => Some(gated_binary.ok_or_else(|| {
+            anyhow!("Reconnect to check the remote install path before updating.")
+        })?),
+        RemoteSessionStatus::Connected => Some(
+            find_remote_orx(&session.target, &host)
+                .await?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "OpenResearch is no longer installed on '{host}'. Reconnect to install it."
+                    )
+                })?
+                .path,
+        ),
+        _ => None,
+    };
+    let requested = match (&update_binary, requested) {
+        (None, None) => return Err(anyhow!("Choose where to install OpenResearch on '{host}'.")),
+        (_, requested) => requested,
+    };
+    let generation = if live {
+        session.generation.load(Ordering::SeqCst)
+    } else {
+        advance_generation(&session, false)
+    };
     {
-        return Ok(session.info.read().await.clone());
+        let mut info = session.info.write().await;
+        // The connection may have dropped while the binary was found.
+        if session.generation.load(Ordering::SeqCst) != generation
+            || live && info.status != previous
+        {
+            return Ok(info.clone());
+        }
+        info.status = if live {
+            RemoteSessionStatus::Updating
+        } else {
+            RemoteSessionStatus::Applying
+        };
+        info.error = None;
+        info.repair_command = None;
     }
     let result = tokio::time::timeout(INSTALL_TIMEOUT, async {
         let current = remote_install_paths(&session.target, &host).await?;
@@ -858,6 +875,12 @@ async fn install_and_connect(
         save_remote_install_paths(&session.target, &host, &paths).await?;
         let remote_orx = install_remote_orx(&session.target, &host, &paths).await?;
         let protocol = remote_dashboard_protocol(&session.target, &host, &remote_orx.path).await?;
+        if !drivable(protocol) {
+            return Err(anyhow!(
+                "After installing, OpenResearch at {} on '{host}' is still too old for this computer. Replace that binary and try again.",
+                remote_orx.path
+            ));
+        }
         Ok::<_, crate::error::Error>((paths, remote_orx, protocol))
     })
     .await
@@ -868,6 +891,13 @@ async fn install_and_connect(
         Err(error) => {
             let repair_command = repair_command_for(&error);
             update_session_if_current(&session, generation, |info| {
+                // A failed update leaves the running host, and this connection to it, as they were.
+                if live {
+                    if info.status == RemoteSessionStatus::Updating {
+                        info.status = RemoteSessionStatus::Connected;
+                    }
+                    return;
+                }
                 info.status = RemoteSessionStatus::Disconnected;
                 info.error = Some(error.to_string());
                 info.repair_command = repair_command;
@@ -879,26 +909,29 @@ async fn install_and_connect(
     if session.generation.load(Ordering::SeqCst) != generation {
         return Ok(session.info.read().await.clone());
     }
-    if protocol != Some(DASHBOARD_PROTOCOL) {
-        set_session_state_if_current(
-            &session,
-            generation,
-            RemoteSessionStatus::Disconnected,
-            Some("The installed remote binary does not support this dashboard protocol.".into()),
-        )
-        .await;
-        return Err(anyhow!("The installed remote binary is incompatible."));
-    }
     {
         let mut info = session.info.write().await;
         if session.generation.load(Ordering::SeqCst) != generation {
             return Ok(info.clone());
         }
-        info.version = Some(remote_orx.version.clone());
-        info.build_id = remote_orx.build_id.clone();
-        info.dashboard_protocol = protocol;
+        info.set_build(
+            &remote_orx.version,
+            remote_orx.build_id.as_deref(),
+            protocol,
+        );
         info.install_paths = None;
     }
+    // From here the host restarts, so the old connection must stop reporting on it.
+    let generation = if live {
+        let generation = advance_generation(&session, false);
+        if let Some(control) = session.connection.lock().await.take() {
+            stop_connection(control).await;
+        }
+        *session.route.write().await = None;
+        generation
+    } else {
+        generation
+    };
     let expected = session.expected_instance.read().unwrap().clone();
     let result = async {
         if let Some(instance) = &expected {
@@ -1192,19 +1225,31 @@ async fn connect_once(
             };
         }
     };
-    if descriptor.control_protocol != CONTROL_PROTOCOL
-        || descriptor.dashboard_protocol != DASHBOARD_PROTOCOL
-    {
-        let newer = descriptor.control_protocol > CONTROL_PROTOCOL
-            || descriptor.dashboard_protocol > DASHBOARD_PROTOCOL;
-        return ConnectionEnd::Terminal(protocol_mismatch(
+    let protocol = Some(descriptor.dashboard_protocol);
+    if descriptor.control_protocol < CONTROL_PROTOCOL {
+        return ConnectionEnd::Terminal(format!(
+            "'{}' runs OpenResearch {}, which cannot restart into an update. Stop it before updating.",
+            session.info.read().await.host,
+            descriptor.build_id.as_deref().unwrap_or(&descriptor.version)
+        ));
+    }
+    if !drivable(protocol) {
+        return ConnectionEnd::Terminal(protocol_too_old(
             &session.info.read().await.host,
             descriptor.build_id.as_deref(),
             &descriptor.version,
-            Some(descriptor.dashboard_protocol),
-            newer,
+            protocol,
         ));
     }
+    // Another computer may have updated the host since this one last attached.
+    update_session_if_current(session, generation, |info| {
+        info.set_build(
+            &descriptor.version,
+            descriptor.build_id.as_deref(),
+            protocol,
+        );
+    })
+    .await;
     let local_port = match reserve_loopback_port() {
         Ok(port) => port,
         Err(error) => return ConnectionEnd::Terminal(error.to_string()),
@@ -1488,10 +1533,9 @@ async fn authenticated_health(
         .get("dashboardProtocol")
         .and_then(serde_json::Value::as_u64)
         .and_then(|protocol| u32::try_from(protocol).ok());
-    if protocol != Some(DASHBOARD_PROTOCOL) {
-        let newer = protocol.is_some_and(|protocol| protocol > DASHBOARD_PROTOCOL);
-        return Err(ConnectionEnd::Terminal(protocol_mismatch(
-            host, None, version, protocol, newer,
+    if !drivable(protocol) {
+        return Err(ConnectionEnd::Terminal(protocol_too_old(
+            host, None, version, protocol,
         )));
     }
     if health.get("instanceId").and_then(serde_json::Value::as_str)
@@ -1540,6 +1584,7 @@ fn workspace_router(session: Arc<RemoteSession>) -> Router {
         .route("/_orx/ssh/connect", get(gateway_ssh_connect))
         .route("/_orx/ssh/repair", get(gateway_ssh_repair))
         .route("/_orx/install", post(gateway_install))
+        .route("/_orx/update", post(gateway_update))
         .route("/_orx/reconnect", post(gateway_reconnect))
         .route("/_orx/start-host", post(gateway_start_new_host))
         .route("/_orx/disconnect", post(gateway_disconnect))
@@ -1736,6 +1781,7 @@ async fn gateway_runtime(State(session): State<Arc<RemoteSession>>) -> Json<serd
         "kind": "ssh",
         "version": env!("CARGO_PKG_VERSION"),
         "buildChannel": crate::telemetry::build_channel(),
+        // Read by older dashboards, which stay open across a laptop's update.
         "dashboardProtocol": DASHBOARD_PROTOCOL,
         "session": session.info.read().await.clone(),
     }))
@@ -1745,7 +1791,14 @@ async fn gateway_install(
     State(session): State<Arc<RemoteSession>>,
     Json(paths): Json<RemoteInstallPathsInfo>,
 ) -> Response {
-    match install_and_connect(session, paths).await {
+    match install_and_connect(session, Some(paths)).await {
+        Ok(info) => Json(serde_json::json!(info)).into_response(),
+        Err(error) => gateway_error(StatusCode::BAD_REQUEST, error.to_string()),
+    }
+}
+
+async fn gateway_update(State(session): State<Arc<RemoteSession>>) -> Response {
+    match install_and_connect(session, None).await {
         Ok(info) => Json(serde_json::json!(info)).into_response(),
         Err(error) => gateway_error(StatusCode::BAD_REQUEST, error.to_string()),
     }
@@ -2154,12 +2207,11 @@ pub async fn run(host: &str, args: UpArgs) -> Result<()> {
                 ));
             }
             RemoteSessionStatus::NeedsUpdate => {
-                return Err(anyhow!(current.error.unwrap_or_else(|| protocol_mismatch(
+                return Err(anyhow!(current.error.unwrap_or_else(|| protocol_too_old(
                     host,
                     current.build_id.as_deref(),
                     current.version.as_deref().unwrap_or("unknown"),
                     current.dashboard_protocol,
-                    false,
                 ))));
             }
             RemoteSessionStatus::Disconnected => {
@@ -2231,14 +2283,18 @@ impl RemoteInstallPaths {
 
 fn install_paths_for_request(
     mut current: RemoteInstallPaths,
-    requested: RemoteInstallPathsInfo,
+    requested: Option<RemoteInstallPathsInfo>,
     update_binary: Option<String>,
 ) -> RemoteInstallPaths {
-    if let Some(binary) = update_binary {
-        current.binary = binary;
-        current
-    } else {
-        current.with_requested(requested.binary, requested.database, requested.cache)
+    match (update_binary, requested) {
+        (Some(binary), _) => {
+            current.binary = binary;
+            current
+        }
+        (None, Some(requested)) => {
+            current.with_requested(requested.binary, requested.database, requested.cache)
+        }
+        (None, None) => current,
     }
 }
 
@@ -3182,6 +3238,7 @@ mod tests {
                 install_paths: None,
                 ui_preferences: RemoteUiPreferences::default(),
                 can_start_new_host: false,
+                update_available: false,
             }),
             route: RwLock::new(None),
             operation: Mutex::new(()),
@@ -3606,18 +3663,17 @@ mod tests {
     }
 
     #[test]
-    fn a_host_on_another_protocol_is_named_with_both_builds_and_the_fix() {
-        let newer = protocol_mismatch("box", Some("canary-9"), "0.3.0", Some(99), true);
-        assert!(newer.contains("'box'"));
-        assert!(newer.contains("canary-9"));
-        assert!(newer.contains("protocol 99"));
-        assert!(newer.contains(crate::updates::current_build_id()));
-        assert!(newer.contains("`orx update`"));
-
-        let older = protocol_mismatch("box", None, "0.1.0", None, false);
-        assert!(older.contains("0.1.0"));
-        assert!(older.contains("unknown dashboard protocol"));
+    fn a_host_too_old_to_drive_is_named_with_both_builds_and_the_fix() {
+        let older = protocol_too_old("box", Some("canary-9"), "0.1.0", Some(7));
+        assert!(older.contains("'box'"));
+        assert!(older.contains("canary-9"));
+        assert!(older.contains("protocol 7"));
+        assert!(older.contains(crate::updates::current_build_id()));
         assert!(older.contains("choose Update"));
+
+        let unknown = protocol_too_old("box", None, "0.1.0", None);
+        assert!(unknown.contains("0.1.0"));
+        assert!(unknown.contains("unknown dashboard protocol"));
     }
 
     #[tokio::test]
@@ -3658,19 +3714,17 @@ mod tests {
             .await
             .is_ok());
 
-        let Err(ConnectionEnd::Terminal(newer)) =
-            health(DASHBOARD_PROTOCOL + 1, "instance", "10.0.0").await
-        else {
-            panic!("a newer protocol must end the attachment");
-        };
         assert!(
-            newer.contains("'box'") && newer.contains("10.0.0") && newer.contains("`orx update`")
+            health(DASHBOARD_PROTOCOL + 1, "instance", "9.9.9")
+                .await
+                .is_ok(),
+            "a newer API keeps every route this laptop calls"
         );
 
         let Err(ConnectionEnd::Terminal(older)) =
-            health(DASHBOARD_PROTOCOL - 1, "instance", "0.1.0").await
+            health(MIN_DASHBOARD_PROTOCOL - 1, "instance", "0.1.0").await
         else {
-            panic!("an older protocol must end the attachment");
+            panic!("a protocol below the floor must end the attachment");
         };
         assert!(
             older.contains("'box'") && older.contains("0.1.0") && older.contains("choose Update")
@@ -4275,11 +4329,11 @@ mod tests {
         let current = sample_paths();
         let updated = install_paths_for_request(
             current.clone(),
-            RemoteInstallPathsInfo {
+            Some(RemoteInstallPathsInfo {
                 binary: "/ignored/bin/orx".into(),
                 database: "/ignored/orx.db".into(),
                 cache: "/ignored/repos".into(),
-            },
+            }),
             Some("/opt/openresearch/bin/orx".into()),
         );
         assert_eq!(updated.binary, "/opt/openresearch/bin/orx");
@@ -4357,13 +4411,14 @@ mod tests {
     }
 
     #[test]
-    fn remote_status_wire_model_has_eight_states() {
+    fn remote_status_wire_model_has_nine_states() {
         let statuses = [
             RemoteSessionStatus::Connecting,
             RemoteSessionStatus::NeedsInstall,
             RemoteSessionStatus::NeedsUpdate,
             RemoteSessionStatus::Applying,
             RemoteSessionStatus::Connected,
+            RemoteSessionStatus::Updating,
             RemoteSessionStatus::Reconnecting,
             RemoteSessionStatus::Restarting,
             RemoteSessionStatus::Disconnected,
@@ -4380,6 +4435,7 @@ mod tests {
                 "needsUpdate",
                 "applying",
                 "connected",
+                "updating",
                 "reconnecting",
                 "restarting",
                 "disconnected",
