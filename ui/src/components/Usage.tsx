@@ -175,17 +175,12 @@ function soonestCredit(resets: PlanResets): ResetCredit | undefined {
 
 const fmtDate = (ms: number) => new Intl.DateTimeFormat(getLocale(), { month: "short", day: "numeric" }).format(ms);
 
-/** A plan's resets and Use…, which confirms against the plan's lowest window before spending one. */
-function ResetRow({ plan, resets }: { plan: PlanUsage; resets: PlanResets }) {
+/** Spends the plan's soonest reset after a dialog that confirms against its lowest window. */
+export function useSpendReset(plan: PlanUsage, resets: PlanResets) {
   const workspace = useWorkspace();
   const credit = soonestCredit(resets);
-  const name = resets.available === 1 && credit?.title
-    ? credit.title
-    : (new Intl.PluralRules(getLocale()).select(resets.available) === "one" ? m.usage_reset_count_one : m.usage_reset_count_other)({ count: resets.available });
-  const expires = credit?.expiresAt ? Date.parse(credit.expiresAt) : NaN;
-
-  // A press in the dialog closes the popover around this row, so every outcome is said in the dialog or a toast.
-  const confirm = () => {
+  // A press in the dialog closes the popover around the button, so every outcome is said in the dialog or a toast.
+  return () => {
     const low = lowestWindow(plan);
     // One key per attempt, sent again when a failed attempt is retried, so it never spends two resets.
     let attempt: string | null = null;
@@ -208,6 +203,16 @@ function ResetRow({ plan, resets }: { plan: PlanUsage; resets: PlanResets }) {
       },
     });
   };
+}
+
+/** A plan's resets and Use…, which confirms against the plan's lowest window before spending one. */
+function ResetRow({ plan, resets }: { plan: PlanUsage; resets: PlanResets }) {
+  const credit = soonestCredit(resets);
+  const name = resets.available === 1 && credit?.title
+    ? credit.title
+    : (new Intl.PluralRules(getLocale()).select(resets.available) === "one" ? m.usage_reset_count_one : m.usage_reset_count_other)({ count: resets.available });
+  const expires = credit?.expiresAt ? Date.parse(credit.expiresAt) : NaN;
+  const confirm = useSpendReset(plan, resets);
 
   return <div data-plan-resets className="col-span-4 flex flex-wrap items-center gap-x-1 text-xs text-subtext">
     <span dir="auto">{Number.isFinite(expires) ? m.usage_reset_use_by({ reset: name, date: fmtDate(expires) }) : name}</span>

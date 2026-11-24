@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
 import { Message } from "../src/components/ChatPanel.tsx";
-import { fmtDuration } from "../src/api.ts";
 import { m } from "../src/paraglide/messages.js";
 import { autoDir } from "../src/i18n.ts";
 import { render } from "./render.mjs";
@@ -177,42 +176,17 @@ test("only the last turn in a row offers recovery", async () => {
 
 const openCodeFreeLimit = "Free usage limit reached. Connect a provider or subscribe to OpenCode Go to keep going, or switch models.";
 
-test("a usage-limited OpenCode turn offers Try again and shows the provider's reset wait", async () => {
-  // Far enough out that the rendered duration cannot drift between render and assertion.
-  const resetAt = Date.now() + 26 * 3600_000 + 5 * 60_000;
+test("a usage-limited OpenCode turn offers Try again outside the raw error", async () => {
   const { container, button, recovered } = await renderFailure(
-    { errorKind: "opencode_terminal", cause: "usage_limit", recoveryAction: "continue", resetAt },
+    { errorKind: "opencode_terminal", cause: "usage_limit", recoveryAction: "continue" },
     undefined,
     openCodeFreeLimit,
   );
   assert.ok(container.textContent.includes(m.chat_session_limit_reached()));
-  assert.ok(
-    container.textContent.includes(m.chat_usage_resets_in({ time: fmtDuration(26 * 3600_000 + 5 * 60_000) })),
-    "the known reset renders as information beside the button",
-  );
   const tryAgain = button(m.chat_try_again());
   assert.ok(tryAgain && !tryAgain.closest("details"), "Try again sits outside the raw error");
-  assert.equal(tryAgain.disabled, false, "the provider, not the timestamp, decides whether the quota is back");
   tryAgain.click();
   assert.deepEqual(recovered, [["turn-2", "continue"]]);
-});
-
-test("a usage limit without a readable reset still offers Try again and counts down nothing", async () => {
-  const { container, button } = await renderFailure(
-    { errorKind: "opencode_terminal", cause: "usage_limit", recoveryAction: "retry" },
-    undefined,
-    openCodeFreeLimit,
-  );
-  assert.ok(button(m.chat_try_again()));
-  assert.ok(!container.textContent.includes(m.chat_usage_resets_in({ time: "" })));
-  // An already-due reset is no wait either.
-  const due = await renderFailure(
-    { errorKind: "opencode_terminal", cause: "usage_limit", recoveryAction: "retry", resetAt: Date.now() - 1000 },
-    undefined,
-    openCodeFreeLimit,
-  );
-  assert.ok(due.button(m.chat_try_again()));
-  assert.ok(!due.container.textContent.includes(m.chat_usage_resets_in({ time: "" })));
 });
 
 test("a usage limit recorded before the cause existed still reads as one and recovers", async () => {

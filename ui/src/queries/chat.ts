@@ -572,6 +572,15 @@ export const mutStopBackgroundTask = mutations.define({
   describeResult: null,
 });
 
+export const mutSetChatLimitTimer = mutations.define({
+  id: "chat/limit-timer",
+  mutate: (ws: Workspace, sessionId: string, stopped: boolean) => ws.api.setChatLimitTimer(sessionId, stopped),
+  optimistic: () => {},
+  key: ({ args: [ws, sessionId] }) => [ws.identity, sessionId],
+  describe: "change the usage reset timer",
+  describeResult: null,
+});
+
 export const mutRecoverChatTurn = mutations.define({
   id: "chat/turn/recover",
   mutate: (ws: Workspace, sessionId: string, turnId: string, action: "retry" | "continue", options: TurnOptions) =>

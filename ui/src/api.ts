@@ -1674,8 +1674,6 @@ export interface ChatToolState {
     harness?: HarnessId;
     profile?: string | null;
     recoveryAction?: "retry" | "continue";
-    /** Epoch ms when a usage limit that failed the turn resets, if known. */
-    resetAt?: number | null;
     [k: string]: unknown;
   };
   output?: string;
@@ -1792,8 +1790,18 @@ export interface UsageReport {
   /** Spend of accounts not on one of `plans`; empty while `plans` is null. */
   agents: AgentSpend[];
   compute: BackendSpend[];
+  /** Accounts that refused a turn on their usage limit; absent from an older orx up. */
+  limits?: UsageLimit[];
   /** The chat `?chat=` asked about. */
   chat?: ChatSpend;
+}
+
+/** An agent account out of usage: its chats wait for `resetAt` (epoch ms). */
+export interface UsageLimit {
+  harness: HarnessId;
+  /** The agent profile's id; null for the user's own sign-in. */
+  profile: string | null;
+  resetAt: number;
 }
 
 export interface ChatSpend {
@@ -1905,6 +1913,8 @@ export interface ChatSession {
   /** What `/goal` asked the agent to keep working toward; null when unset. */
   goal?: string | null;
   autonomy: Autonomy;
+  /** The user stopped this chat's wait for its account's usage reset: nothing it holds sends on its own. */
+  limitTimerStopped?: boolean;
   reasoningLevel: string | null;
   /** Hidden from the default Recents list, but fully intact and resumable. */
   archived: boolean;
@@ -3433,6 +3443,10 @@ export function createApi(
   const interruptChat = (sessionId: string) =>
     post<{ ok: boolean }>(`/api/chat/sessions/${sessionId}/interrupt`);
 
+  /** Stops the chat's wait for its account's usage reset, or starts it; started after the reset, it sends what the chat holds. */
+  const setChatLimitTimer = (sessionId: string, stopped: boolean) =>
+    post<{ ok: boolean }>(`/api/chat/sessions/${sessionId}/limit-timer`, { stopped });
+
   const stopAndArchiveChat = (sessionId: string) =>
     post<ChatSession>(`/api/chat/sessions/${sessionId}/stop-and-archive`);
 
@@ -3754,6 +3768,7 @@ export function createApi(
     forkChatTurn,
     selectChatBranch,
     interruptChat,
+    setChatLimitTimer,
     stopAndArchiveChat,
     stopBackgroundTask,
     respondChat,

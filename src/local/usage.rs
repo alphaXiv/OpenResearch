@@ -23,6 +23,8 @@ pub struct UsageReport {
     /// Spend of accounts not on one of `plans`; empty while `plans` is None.
     pub agents: Vec<AgentSpend>,
     pub compute: Vec<BackendSpend>,
+    /// Accounts that refused a turn on their usage limit, and when each resets.
+    pub limits: Vec<crate::store::UsageLimit>,
     /// The chat `?chat=` asked about.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat: Option<ChatSpend>,
@@ -664,6 +666,20 @@ pub fn observed(host: &Arc<ChatHost>, harness: &str, profile: Option<&str>) {
         PLANS.read(claimed, &host.codex).await;
         host.emit_event("usage.changed", json!({}));
     });
+}
+
+/// When the account's last plan read says its used-up windows all reset (epoch ms); None when it
+/// has no read or no window is used up.
+pub fn exhausted_until(harness: &str, profile: Option<&str>) -> Option<i64> {
+    let plans = PLANS.report()?;
+    let plan = plans
+        .iter()
+        .find(|plan| plan.harness == harness && plan.profile.as_deref() == profile)?;
+    plan.windows
+        .iter()
+        .filter(|window| window.model.is_none() && window.remaining_percent <= 0.0)
+        .filter_map(|window| crate::local::native_chats::parse_iso_ms(window.resets_at.as_deref()?))
+        .max()
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 use tokio::sync::broadcast::error::RecvError;
 
 use super::*;
-use crate::local::harness::codex::AccountError;
+use crate::local::harness::codex::{AccountError, ResetOutcome};
 use crate::local::usage::{ChatSpend, Reader, Sweep, UsageReport, PLANS};
 
 /// How long a sweep waits for the harness list's first full check.
@@ -50,6 +50,7 @@ async fn report(
         Ok(UsageReport {
             plans,
             chat,
+            limits: store.usage_limits()?,
             ..week
         })
     })
@@ -172,5 +173,12 @@ pub(super) async fn reset(
             format!("{message} Try again; it won't use a second reset."),
         ),
     })?;
+    // Each of these leaves the account with its limits refilled.
+    if matches!(
+        outcome,
+        ResetOutcome::Reset | ResetOutcome::NothingToReset | ResetOutcome::AlreadyRedeemed
+    ) {
+        state.chat.lift_usage_limit(("codex", profile));
+    }
     Ok(Json(json!({ "outcome": outcome })))
 }
