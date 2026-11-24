@@ -1,8 +1,3 @@
----
-name: orx-instances
-description: "Create standalone OpenResearch compute instances with `orx instance create`. Use when the user wants a persistent machine for manual or ad-hoc work rather than an experiment run."
----
-
 # Standalone instances
 
 Provision a persistent instance in an organization when the user wants to SSH

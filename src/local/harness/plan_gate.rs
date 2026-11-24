@@ -33,7 +33,6 @@ use serde_json::{json, Value};
 /// subcommand can turn them into a write). Kept in lockstep with `main.rs`'s `Command`
 /// enum; `readonly_verbs_are_real_commands` guards against a rename.
 const WHOLE_VERB_READS: &[&str] = &[
-    "alphaxiv",
     "projects",
     "orgs",
     "runs",
@@ -335,6 +334,14 @@ fn is_readonly_orx(tokens: &[&str], stage: &str) -> bool {
         ),
         // Verbs with a write subcommand: allow only the read-only subcommand(s).
         "project" => matches!(subcommand(&mut rest), Some("view")),
+        "alphaxiv" => match subcommand(&mut rest) {
+            Some("library" | "tools") => true,
+            Some("call") => rest.next().is_some_and(|tool| {
+                use crate::commands::alphaxiv_mcp::{LIBRARY_READ_TOOLS, RESEARCH_TOOLS};
+                RESEARCH_TOOLS.contains(&tool) || LIBRARY_READ_TOOLS.contains(&tool)
+            }),
+            _ => false,
+        },
         "exp" => match subcommand(&mut rest) {
             Some("run") => {
                 use clap::Parser;
@@ -597,6 +604,18 @@ mod tests {
     }
 
     #[test]
+    fn alphaxiv_reads_freely_and_gates_library_writes() {
+        assert!(allowed("orx alphaxiv library --json"));
+        assert!(allowed("orx alphaxiv tools discover_papers"));
+        assert!(allowed(
+            "orx alphaxiv call answer_pdf_queries '{\"paper\": \"1706.03762\", \"queries\": [\"warmup\"]}'"
+        ));
+        assert!(!allowed("orx alphaxiv call save_papers_to_folder '{}'"));
+        assert!(!allowed("orx alphaxiv call create_folder '{}'"));
+        assert!(!allowed("orx alphaxiv call"));
+    }
+
+    #[test]
     fn agents_lists_freely_and_gates_its_changes() {
         assert!(allowed("orx agents"));
         assert!(allowed("orx agents --json | head -20"));
@@ -832,7 +851,7 @@ mod tests {
             );
         }
         // The verbs with mixed read/write subcommands must also be real.
-        for verb in ["project", "exp", "agents"] {
+        for verb in ["project", "exp", "agents", "alphaxiv"] {
             assert!(real.contains(verb), "`{verb}` is not a real orx command");
         }
     }

@@ -73,7 +73,7 @@ pub(super) async fn agent_tools(
     }
 }
 
-fn tools(harness: &str) -> Value {
+pub(crate) fn tools(harness: &str) -> Value {
     let longest = longest_wait(harness);
     let wait_timeout = format!(
         "Default {}, at most {longest}. Chats still working when it expires keep working.",

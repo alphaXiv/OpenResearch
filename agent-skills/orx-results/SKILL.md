@@ -1,7 +1,27 @@
 ---
 name: orx-results
-description: "Interpret and summarize measured experiment results. Invoke before reporting measured results, including summarizing a completed run, comparing runs, evaluating an outcome, or recommending a next experiment from run evidence; retrieve missing output with `orx-logs`."
+description: "Read run logs and report measured results. Use before summarizing or comparing runs, debugging a failed run, or proposing a next experiment from evidence."
 ---
+
+## Find the evidence
+
+`orx exp status <expId> --run <runId>` lists the measures a run reported and how
+each compares with the parent's run; it is the quick read while a run is live.
+The log is the evidence:
+
+```sh
+orx runs                            # run ids
+orx logs <runId>                    # where the log is kept, its size, and its end
+rg -n 'metric|summary' <log-path>   # search each file it printed
+```
+
+For a finished run, `orx logs` prints the log's local file, or several kept
+ranges when the middle of a long log isn't on this computer, then the end of
+it. The preview is not the result, and truncated output is not evidence of
+absence: search or read each printed file with native file tools until the
+relevant lines are found. A live run's output stays on its compute host: `orx logs`
+prints its size so far and the end of what is available, and `orx exp status`
+gives its stage and measures.
 
 ## Validate before reporting
 
@@ -13,40 +33,22 @@ run-derived claim, confirm that:
 - the relevant trajectory is recoverable for a long run; and
 - the cited file lines actually contain the supporting output.
 
-`orx exp status <expId> --run <runId>` lists the measures the run reported and
-how each compares with the parent's run; confirm a number in the log before
-citing it. Load `orx-logs` when supporting output still needs retrieving. Cite the verified
-measurements using the session playbook’s evidence-and-links contract.
+Confirm a number from `orx exp status` in the log before citing it, and cite
+each claim with the playbook's run and file tags.
 
 ## Summarize an experiment
 
-Choose one primary representation for each measured comparison: a graph, a
-table, or prose. Explain the conclusion and limitations in brief prose.
+Briefly explain what changed, what ran, and what the evidence shows, with the
+conclusion and limitations in prose. Give each measured comparison one
+representation: a graph, a table, or prose. A second one must offer a distinct
+reading, not the same data again: never a table and a graph of the same
+measurements, and a subset, condensation or derivation of them doesn't count as
+distinct. An interactive graph with linked source data already gives exact
+values, so put headline numbers in the prose instead of a table.
 
-Choose prose and selective visuals that make the result easiest to understand.
-If you choose to use multiple representations or visuals, make sure they do not
-contain duplicate data or show the same thing two different ways. They should
-each offer a distinct way of interpreting the experiment’s results — one visual
-will suffice for most experiments.
-For example, do not show both a table and graph of the same data — just show the graph.
-
-An interactive graph and linked source data already provide exact-value lookup;
-a table of those values is not a useful fallback. Subsetting, condensing, or
-deriving values from the same measurements does not make a second representation
-complementary. Put useful headline values or changes in the prose interpretation
-instead. Before sending, remove any table or visual that repeats a comparison
-already represented.
-
-Briefly explain what changed, what ran, and what the evidence shows. When the
-measured results suit a supported `orx-figures` template and a graph makes the
-result easier to understand, prefer an interactive figure inline alongside
-that summary. Reuse an existing figure where possible and link its source data.
-
-This is a rule of thumb, not a required output. Skip the visualization when
-there is no suitable structured data, no appropriate template, or no useful
-visual comparison. Do not invent data, additional runs, or graph views to
-satisfy the preference; a concise text summary can be the complete result.
-
-Default to one graph. Offer a dropdown only when multiple views of the same
-data answer distinct, useful questions. Multiple series alone do not require
-a dropdown, and one useful view does not need a selector.
+When the results suit an `orx-figures` template and a graph makes them easier
+to understand, prefer one interactive figure inline, reusing an existing one
+and linking its source data. Skip it when there is no structured data, no
+suitable template or no useful comparison; never invent data or runs to fill
+one, and a concise text summary can be the whole result. Add a dropdown only
+when several views of the same data answer distinct questions.

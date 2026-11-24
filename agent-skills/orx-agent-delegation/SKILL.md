@@ -1,6 +1,6 @@
 ---
 name: orx-agent-delegation
-description: "Delegate tasks to other models and chats with the orx MCP server's `delegate`, `wait`, `subscribe`, `answer` and `chats` tools. Covers standalone briefs, worktrees, compute authorization, nesting, questions and finding other chats. Use before delegating, opening another chat or coordinating with chats around you."
+description: "Hand work to another model or chat, or find the chats around you, through the orx MCP tools. Use before delegating, opening another chat, or coordinating with other chats."
 ---
 
 # Delegate to another chat

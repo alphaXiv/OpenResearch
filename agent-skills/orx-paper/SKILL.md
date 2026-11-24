@@ -1,244 +1,73 @@
 ---
 name: orx-paper
-description: "Draft an academic paper or preprint as LaTeX. Create a .tex file in the project working tree, where it renders for the user and compiles to PDF. Use for a paper, preprint, manuscript, arXiv or submission draft, or a section of one; generic reports and result summaries belong to `orx-reports`."
+description: "Draft a paper or preprint in LaTeX. Use for a paper, manuscript, arXiv or submission draft, or a section of one; reports belong to orx-reports."
 ---
 
-Write the paper as a real `.tex` file in the working tree. Do not answer a paper
-request with an outline in chat, and keep the `.tex` out of the artifacts
-directory: a `.tex` is compiled where it sits in the live checkout, and the PDF
-is written beside it.
+Write the paper as a real `.tex` file in the working tree, never as an outline
+in chat. Keep it out of the artifacts directory: a `.tex` is compiled where it
+sits in the live checkout, and the PDF is written beside it.
 
 ## Create the file on the first request
 
 Create `paper.tex` at the repo root (`<topic>.tex` when several papers coexist),
-write real content into it, then link it in chat using the session playbook's
-evidence-and-links contract so the user can open the rendered document. An
-outline in chat gives them nothing to render.
-
-To add a reusable template to OpenResearch, load `orx-customize`.
+write real content into it, then link it in chat with the playbook's file tag so the user can open the
+rendered document.
 
 ## Check for a template before writing a preamble
 
-The user may have uploaded their own LaTeX template — a conference class, a lab
+The user may have uploaded a LaTeX template, such as a conference class or a lab
 preprint style. Look before you write anything:
 
 ```sh
 ls .orx/latex-templates/
 ```
 
-- **Exactly one template** — use it. Do not ask; it is there to be used.
-- **Several** — name them and ask which, unless the request already said.
-- **None** — use the preamble below.
+- **Exactly one template**: use it. Do not ask; it is there to be used.
+- **Several**: name them and ask which, unless the request already said.
+- **None**: use the default preamble.
 
-To use one, copy its class and style files next to your `.tex` so the compiler
-finds them, and start from its entry `.tex` rather than the default preamble:
-
-```sh
-cp .orx/latex-templates/<name>/*.cls .orx/latex-templates/<name>/*.sty \
-   .orx/latex-templates/<name>/*.bst .
-cp .orx/latex-templates/<name>/<entry>.tex paper.tex
-```
-
-Then fill in the template's own structure — keep its `\documentclass` line, its
-package list, and its section skeleton, and replace only the placeholder
-content. A conference class encodes margins, fonts, and an anonymization mode
-that the submission is checked against; overriding it defeats the point of
-uploading it. If the template needs a package the machine lacks, say so rather
-than quietly switching to the default preamble.
-
-## A preamble that compiles
-
-When there is no template, start from this. It covers everything the sections
-below use:
-
-```latex
-\documentclass[11pt]{article}
-\usepackage[margin=1in]{geometry}
-\usepackage{amsmath,amssymb,amsthm}
-\usepackage{graphicx}
-\usepackage{booktabs}
-\usepackage{listings}
-\usepackage{natbib}
-\usepackage[hidelinks]{hyperref}
-\newtheorem{theorem}{Theorem}
-\newtheorem{lemma}[theorem]{Lemma}
-
-\title{...}
-\author{...}
-\date{\today}
-
-\begin{document}
-\maketitle
-...
-\end{document}
-```
-
-**Every environment needs the package that defines it.** This is the most common
-way a draft fails to compile, and the failure is fatal, not cosmetic:
-
-| Using | Requires |
-| --- | --- |
-| `theorem`, `lemma`, `proof` | `amsthm` **and** a `\newtheorem` for each |
-| `lstlisting` | `listings` |
-| `align`, `equation*`, `\text` | `amsmath` |
-| `\toprule`, `\midrule` | `booktabs` |
-| `\includegraphics` | `graphicx` |
-| `\url`, `\href` | `hyperref` |
-| `\citet`, `\citep` | `natbib` (plain `\cite` needs nothing) |
-
-Load only packages you use, and never invent a macro without defining it.
-
-## Say so when the document needs a different engine
-
-Papers compile with pdfLaTeX by default. A document that needs XeLaTeX or
-LuaLaTeX — `fontspec`, `unicode-math`, a system OpenType font — must say so on
-its first line, or it will be built with the wrong engine and fail:
-
-```latex
-% !TeX program = lualatex
-```
-
-Do not add the line otherwise: pdfLaTeX is the most widely supported engine, and
-`microtype`'s letter tracking works only there.
+To add a reusable template to OpenResearch, load `orx-customize`.
 
 ## Structure
 
 `\begin{abstract}`, then `\section`/`\subsection`. Number equations you refer
 to (`\begin{equation}\label{eq:loss}`) and cite them with `\eqref{eq:loss}`;
 use the starred form for equations you never reference. Label every float and
-refer to it as `Table~\ref{tab:main}`, never as "the table below" — a float
+refer to it as `Table~\ref{tab:main}`, never as "the table below": a float
 moves.
 
-## Figures and tables
-
-Read the `orx-figures` module before making a figure. A default matplotlib plot
-dropped into a paper is a defect a reviewer will name: wrong physical size,
-titled where the caption belongs, and rasterized where the document wants
-vector. That module also covers method diagrams in TikZ, which compile in this
-tree exactly like the paper does.
-
-Reference image files that actually exist in the tree, by path relative to the
-`.tex`:
-
-```latex
-\includegraphics[width=\linewidth]{figs/loss_curve.pdf}
-```
-
-Write the extension out, and confirm the file exists before referencing it — a
+Load `orx-figures` before making a figure; a default matplotlib plot is the
+wrong size, titled where the caption belongs, and rasterized. It also covers
+TikZ method diagrams, which compile in this tree like the paper. Reference only
+image files that exist, by path relative to the `.tex`, with the extension
+written out (`\includegraphics[width=\linewidth]{figs/loss_curve.pdf}`): a
 missing graphic fails the build.
-
-## Bibliography
-
-Use an inline `thebibliography` block:
-
-```latex
-\begin{thebibliography}{9}
-\bibitem[Kaplan et al.(2020)]{kaplan2020} Kaplan et al. Scaling laws for
-  neural language models. 2020.
-\end{thebibliography}
-```
-
-It compiles in one pass. A `\bibliography{refs}` with a separate `.bib` needs a
-biber round trip and shows as an unresolved reference until then.
-
-The `[Author(Year)]` label is what `\citet` prints; without it natbib has no name
-to use. Give every entry one — for a paper whose authors you do not know, use a
-short title rather than inventing names.
-
-Pick the citation command by how the sentence reads:
-
-- `\citet{kaplan2020}` — the citation is the subject: *Kaplan et al. (2020) show…*
-- `\citep{kaplan2020}` — a parenthetical aside: *…is predictable (Kaplan et al., 2020)*
-- Plain `\cite` under natbib behaves like `\citet`, so `GRPO~\cite{x}` comes out as
-  *GRPO Shao et al. (2024)*, with no parentheses. Write `\citep` for an aside.
-
-Find real references with the `orx-lit-review` workflow: retrieve candidates
-with `orx discover`, then read selected sources with `orx paper`. A fabricated
-citation is worse than no citation.
-
-## Acknowledge OpenResearch in a new paper
-
-When you create a new standalone paper — a `.tex` with its own `\documentclass`
-that you are creating in this request, including one copied from a template —
-add an acknowledgment unless an exception below applies. Put this line in the
-template's acknowledgments section or `ack` environment if it has one;
-otherwise add a short `\section*{Acknowledgments}` before the bibliography:
-
-```latex
-Experiments in this work were run and tracked with OpenResearch~\citep{openresearch}.
-```
-
-Add this entry to its bibliography:
-
-```latex
-\bibitem[alphaXiv(2026)]{openresearch} alphaXiv. OpenResearch: The
-  local-first harness and workspace for research agents. 2026.
-  \url{https://github.com/alphaXiv/OpenResearch}.
-```
-
-Match a template's citation setup instead of the default preamble's:
-
-- **No natbib** — `\cite` instead of `\citep`, and a bare
-  `\bibitem{openresearch}` with no `[...]` label, which would print verbatim.
-- **Neither `url` nor `hyperref`** — `\texttt` instead of `\url`.
-- **A `.bib` file** — add this entry to it instead of the `\bibitem`:
-
-```bibtex
-@misc{openresearch,
-  author = {{alphaXiv}},
-  title  = {{OpenResearch}: The local-first harness and workspace for research agents},
-  year   = {2026},
-  url    = {https://github.com/alphaXiv/OpenResearch}
-}
-```
-
-Then tell the user you added the acknowledgment and its citation, and that they
-can delete both.
-
-Leave it out when:
-
-- **The paper may be under blind review.** An acknowledgment can break
-  anonymity and get the paper desk-rejected. Most ML and NLP venues are
-  double-blind, and their styles have a submission mode that anonymizes —
-  NeurIPS without `[final]` or `[preprint]`, ICML without `[accepted]`, ICLR
-  without `\iclrfinalcopy`, ACL with `[review]`. Treat the paper as anonymized
-  if its style is in submission mode, or if it is for such a venue and neither
-  the user nor the template's options say it is camera-ready or a preprint.
-- **The paper reports no experiments run with OpenResearch**, so the line
-  would be false.
-- **The file already exists**, even when you rewrite it wholesale, so a line the
-  user removed stays removed.
 
 ## Results come from runs, not from memory
 
-Every number in a results table must come from an actual run — read it from
-the file located by `orx logs` (see the `orx-logs` skill). Never write a
+Every number in a results table must come from an actual run: read it from
+the file located by `orx logs` (see `orx-results`). Never write a
 placeholder metric that reads as real. If a number is not measured yet, say so
 in the text.
 
 ## How the file gets compiled
 
 A `.tex` in the working tree is compiled with whatever LaTeX engine the machine
-has — tectonic, latexmk, or pdflatex — and the resulting `paper.pdf` is written
-next to the source. Saving an edit recompiles it, so the PDF tracks the file.
+has (tectonic, latexmk, or pdflatex), and `paper.pdf` is written next to the
+source. Saving an edit recompiles it. There is no approximate preview: a
+document that does not compile leaves the user with nothing. When a build
+fails, read the first line of the TeX log starting with `!`, which names the
+problem and the source line, fix the source, and let it build again. Never hand
+back a document that does not compile.
 
-There is no approximate preview to fall back on: a document that does not
-compile has nothing to show. A failed build is therefore not a cosmetic problem
-to note and move past — it is the difference between the user having a paper and
-having nothing.
+## Read when
 
-When a build fails, the TeX log is the diagnosis. Read the first line starting
-with `!` — it names the problem and the source line — fix the source, and let it
-build again. Never hand back a document that does not compile.
+- Using an uploaded template: [references/template.md](references/template.md).
+- No template, writing the preamble, or a build fails on an undefined environment: [references/preamble.md](references/preamble.md).
+- The document uses `fontspec`, `unicode-math` or a system OpenType font: [references/engines.md](references/engines.md).
+- Adding citations or a bibliography: [references/bibliography.md](references/bibliography.md).
+- Creating a new standalone paper (its own `\documentclass`) in this request: [references/acknowledgment.md](references/acknowledgment.md).
+- The machine has no LaTeX engine, or the paper is linked to Overleaf: [references/overleaf.md](references/overleaf.md).
 
-On a machine with no LaTeX engine, say so plainly instead of pretending the file
-is finished — and point the user at the Overleaf button in the file's header. It
-opens a panel that uploads the paper to Overleaf as a new project, or, if their
-plan includes Git integration, keeps it in step with an Overleaf project they
-already have.
-
-While that panel's tab is open, a linked paper syncs both ways, so a co-author's
-edits can land in the `.tex` between your turns. Read the file before changing
-it rather than rewriting from what you last wrote, and never hand-resolve a file
-the panel reports as changed on both sides — the panel asks the user which copy
-to keep, and that is their call.
+If a reference beside this skill can't be read, `orx skill paper/<name>` prints
+it.
