@@ -2664,11 +2664,19 @@ mod tests {
             payload["context"]["signIn"] = json!(state);
             payload
         });
+        let panes = WORKSPACE_PANES.map(|pane| {
+            build_payload(
+                "pane_opened",
+                "cli-release-contract-test",
+                json!({ "pane": pane }),
+            )
+        });
         for payload in payloads
             .into_iter()
             .chain(launch_payloads)
             .chain(localized)
             .chain(signed_in)
+            .chain(panes)
         {
             assert_eq!(post_payload(&payload).await, DeliveryOutcome::Acknowledged);
         }
