@@ -1,3 +1,4 @@
+use std::io::{BufRead, Write};
 use std::process::Command;
 
 #[test]
@@ -78,6 +79,10 @@ fn estimate_reads_parent_counts_without_launching_or_changing_the_command() {
         "{stdout}"
     );
     assert!(stdout.contains("Total: about 31 min"), "{stdout}");
+    assert!(
+        stdout.contains("Cost: orx has no price for --backend local"),
+        "{stdout}"
+    );
     assert!(!marker.exists());
     assert_eq!(
         db.query_row("SELECT COUNT(*) FROM runs", [], |row| row.get::<_, i64>(0))
@@ -93,6 +98,87 @@ fn estimate_reads_parent_counts_without_launching_or_changing_the_command() {
         .unwrap(),
         saved_command
     );
+
+    let hardware = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", hardware.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in hardware.incoming() {
+            let mut stream = stream.unwrap();
+            let mut request = std::io::BufReader::new(&stream);
+            let mut line = String::new();
+            while request.read_line(&mut line).unwrap() > 2 {
+                line.clear();
+            }
+            let body = r#"[{"name":"h200","unitCostMicroUSD":6000000,"unitLabel":"hour"}]"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        }
+    });
+    let priced = command()
+        .args(["exp", "run", "child", "--estimate"])
+        .args(["--backend", "hf", "--flavor", "h200"])
+        .env("HF_ENDPOINT", &endpoint)
+        .env("NO_PROXY", "127.0.0.1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&priced.stdout);
+    assert!(priced.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("Price: $6.00/hr for --backend hf --flavor h200, from 127.0.0.1"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("Cost: about $3.10"), "{stdout}");
+
+    let unlisted = command()
+        .args(["exp", "run", "child", "--estimate"])
+        .args(["--backend", "hf", "--flavor", "a100-large"])
+        .env("HF_ENDPOINT", &endpoint)
+        .env("NO_PROXY", "127.0.0.1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&unlisted.stdout);
+    assert!(unlisted.status.success(), "{stdout}");
+    assert!(stdout.contains("Total: about 31 min"), "{stdout}");
+    assert!(
+        stdout.contains("Cost: unknown for --backend hf --flavor a100-large: "),
+        "{stdout}"
+    );
+
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let silent_endpoint = format!("http://{}", silent.local_addr().unwrap());
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in silent.incoming() {
+            held.push(stream.unwrap());
+        }
+    });
+    let stalled = command()
+        .args(["exp", "run", "child", "--estimate"])
+        .args(["--backend", "hf", "--flavor", "h200"])
+        .env("HF_ENDPOINT", &silent_endpoint)
+        .env("NO_PROXY", "127.0.0.1")
+        .env("ORX_TEST_SPEEDUP", "60")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&stalled.stdout);
+    assert!(stalled.status.success(), "{stdout}");
+    assert!(stdout.contains("Total: about 31 min"), "{stdout}");
+    assert!(
+        stdout.contains("Cost: unknown for --backend hf --flavor h200: no price within"),
+        "{stdout}"
+    );
+
+    let refused = command()
+        .args(["exp", "run", "child", "--estimate"])
+        .args(["--backend", "ssh", "--flavor", "h200"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("--flavor"));
 
     let preview = command()
         .args([

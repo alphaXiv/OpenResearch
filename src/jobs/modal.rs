@@ -523,13 +523,13 @@ pub async fn inspect_job(sandbox_id: &str) -> Result<Option<JobState>> {
     }))
 }
 
-/// What a sandbox with `spec`'s resources costs per hour, at the workspace's own rates.
-pub async fn hourly_price(spec: &ModalJobSpec) -> Result<crate::store::Quote> {
+/// What a sandbox with `resources` costs per hour, at the workspace's own rates.
+pub async fn hourly_price(resources: &ModalResources) -> Result<crate::store::Quote> {
     let out = launcher_capture(&["rates"], None, Some(Duration::from_secs(60)), None).await?;
     let rates: HashMap<String, String> = serde_json::from_slice(&out)
         .map_err(|e| anyhow!("Unreadable modal rates output: {}", e))?;
     Ok(crate::store::Quote {
-        amount_micros: sandbox_hourly_micros(&rates, spec)?,
+        amount_micros: sandbox_hourly_micros(&rates, resources)?,
         per: crate::store::Per::Hour,
         currency: "USD".into(),
         source: "modal.com".into(),
@@ -572,7 +572,10 @@ pub async fn billed_by_app(since: i64) -> Result<HashMap<String, u64>> {
 const DEFAULT_CPU: f64 = 0.125;
 const DEFAULT_MEMORY_MIB: u64 = 128;
 
-fn sandbox_hourly_micros(rates: &HashMap<String, String>, spec: &ModalJobSpec) -> Result<u64> {
+fn sandbox_hourly_micros(
+    rates: &HashMap<String, String>,
+    resources: &ModalResources,
+) -> Result<u64> {
     let rate = |names: &[&str]| -> Result<f64> {
         names
             .iter()
@@ -581,11 +584,11 @@ fn sandbox_hourly_micros(rates: &HashMap<String, String>, spec: &ModalJobSpec) -
             .filter(|rate| rate.is_finite() && *rate >= 0.0)
             .ok_or_else(|| anyhow!("Modal's rates have no {}", names[0]))
     };
-    let mut dollars = spec.cpu.unwrap_or(DEFAULT_CPU)
+    let mut dollars = resources.cpu.unwrap_or(DEFAULT_CPU)
         * rate(&["cpu_hour_cost_sandbox", "cpu_hour_cost"])?
-        + spec.memory.unwrap_or(DEFAULT_MEMORY_MIB) as f64 / 1024.0
+        + resources.memory.unwrap_or(DEFAULT_MEMORY_MIB) as f64 / 1024.0
             * rate(&["mem_gib_hour_cost_sandbox", "mem_gib_hour_cost"])?;
-    if let Some(gpu) = &spec.gpu {
+    if let Some(gpu) = &resources.gpu {
         let (name, count) = gpu.split_once(':').unwrap_or((gpu, "1"));
         let count: f64 = count
             .trim()
@@ -1296,18 +1299,11 @@ class Sandbox:
         assert!(refused.message.contains("bash: not found"), "{refused}");
     }
 
-    fn priced_spec(gpu: Option<&str>, cpu: Option<f64>, memory: Option<u64>) -> ModalJobSpec {
-        ModalJobSpec {
-            script: String::new(),
-            image: "python:3.12".into(),
+    fn priced(gpu: Option<&str>, cpu: Option<f64>, memory: Option<u64>) -> ModalResources {
+        ModalResources {
             gpu: gpu.map(str::to_string),
             cpu,
             memory,
-            env: HashMap::new(),
-            timeout_seconds: 60,
-            app: "openresearch".into(),
-            tags: HashMap::new(),
-            source_archive: None,
         }
     }
 
@@ -1327,22 +1323,21 @@ class Sandbox:
         .collect();
         // Modal's default reservation: 0.125 cores, 128 MiB.
         let base = 0.125 * 0.5 + 0.125 * 0.25;
-        let micros = |spec| sandbox_hourly_micros(&rates, &spec).unwrap();
-        assert_eq!(micros(priced_spec(None, None, None)), (base * 1e6) as u64);
+        let micros = |resources| sandbox_hourly_micros(&rates, &resources).unwrap();
+        assert_eq!(micros(priced(None, None, None)), (base * 1e6) as u64);
         assert_eq!(
-            micros(priced_spec(Some("H100:2"), None, None)),
+            micros(priced(Some("H100:2"), None, None)),
             ((8.0 + base) * 1e6) as u64
         );
         assert_eq!(
-            micros(priced_spec(Some("A100"), None, None)),
-            micros(priced_spec(Some("A100-40GB"), None, None))
+            micros(priced(Some("A100"), None, None)),
+            micros(priced(Some("A100-40GB"), None, None))
         );
         assert_eq!(
-            micros(priced_spec(Some("A100-80GB!"), Some(8.0), Some(32768))),
+            micros(priced(Some("A100-80GB!"), Some(8.0), Some(32768))),
             ((3.0 + 8.0 * 0.5 + 32.0 * 0.25) * 1e6) as u64
         );
-        let unknown =
-            sandbox_hourly_micros(&rates, &priced_spec(Some("Z9"), None, None)).unwrap_err();
+        let unknown = sandbox_hourly_micros(&rates, &priced(Some("Z9"), None, None)).unwrap_err();
         assert!(
             unknown.to_string().contains("gpu_hour_cost_z9"),
             "{unknown}"
@@ -1376,7 +1371,7 @@ class Workspace:
     def from_context(): return Workspace()
 "#,
         );
-        let quote = hourly_price(&priced_spec(Some("L4"), Some(2.0), Some(4096)))
+        let quote = hourly_price(&priced(Some("L4"), Some(2.0), Some(4096)))
             .await
             .unwrap();
         std::fs::remove_dir_all(dir).unwrap();

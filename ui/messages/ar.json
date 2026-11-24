@@ -702,6 +702,8 @@
   "activity_creating_an_experiment": "جارٍ إنشاء تجربة…",
   "activity_launched_experiment": "أطلق {experiment}",
   "activity_launching_experiment": "جارٍ إطلاق تشغيل تجربة…",
+  "activity_estimated_run": "قدّر تشغيل تجربة",
+  "activity_estimating_run": "جارٍ تقدير تشغيل تجربة…",
   "activity_loaded_research_guides_one": "أدلة البحث المحمّلة: {count}",
   "activity_loaded_research_guides_other": "أدلة البحث المحمّلة: {count}",
   "activity_loaded_skills_one": "المهارات المحمّلة: {count}",

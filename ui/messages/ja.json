@@ -703,6 +703,8 @@
   "activity_creating_an_experiment": "実験を作成中…",
   "activity_launched_experiment": "{experiment} を開始しました",
   "activity_launching_experiment": "実験の実行を開始中…",
+  "activity_estimated_run": "実験の実行を見積もりました",
+  "activity_estimating_run": "実験の実行を見積もり中…",
   "activity_loaded_research_guides_one": "研究ガイドを {count} 件読み込みました",
   "activity_loaded_research_guides_other": "研究ガイドを {count} 件読み込みました",
   "activity_loaded_skills_one": "スキルを {count} 件読み込みました",

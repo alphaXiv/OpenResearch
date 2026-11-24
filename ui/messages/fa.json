@@ -697,6 +697,8 @@
   "activity_creating_an_experiment": "در حال ساختن آزمایش…",
   "activity_launched_experiment": "{experiment} آغاز شد",
   "activity_launching_experiment": "در حال آغاز اجرای آزمایش…",
+  "activity_estimated_run": "اجرای آزمایش برآورد شد",
+  "activity_estimating_run": "در حال برآورد اجرای آزمایش…",
   "activity_loaded_research_guides_one": "{count} راهنمای پژوهشی بارگیری شد",
   "activity_loaded_research_guides_other": "{count} راهنمای پژوهشی بارگیری شد",
   "activity_loaded_skills_one": "{count} مهارت بارگیری شد",

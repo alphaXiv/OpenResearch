@@ -703,6 +703,8 @@
   "activity_creating_an_experiment": "실험 생성 중…",
   "activity_launched_experiment": "{experiment} 시작 완료",
   "activity_launching_experiment": "실험 실행 시작 중…",
+  "activity_estimated_run": "실험 실행 추정됨",
+  "activity_estimating_run": "실험 실행 추정 중…",
   "activity_loaded_research_guides_one": "연구 가이드 {count}개 불러오기 완료",
   "activity_loaded_research_guides_other": "연구 가이드 {count}개 불러오기 완료",
   "activity_loaded_skills_one": "스킬 {count}개 불러오기 완료",

@@ -1810,7 +1810,16 @@ function computeToolActivity(part: ChatPart): ToolActivity {
           litCall: litCall ?? undefined,
         };
       }
-      if (commandInvokesOrx(command, "exp\\s+run")) {
+      const runSegments = orxCommandSegments(command, "exp\\s+run");
+      if (runSegments.length > 0 && runSegments.every((segment) => orxArgv(segment.raw)?.includes("--estimate"))) {
+        return {
+          kind: "run",
+          label: m.activity_estimated_run(),
+          progressLabel: m.activity_estimating_run(),
+          litCall: litCall ?? undefined,
+        };
+      }
+      if (runSegments.length > 0) {
         return {
           kind: "run",
           label: m.chat_panel_started_an_experiment_run(),

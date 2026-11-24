@@ -703,6 +703,8 @@
   "activity_creating_an_experiment": "Creating an experiment…",
   "activity_launched_experiment": "Launched {experiment}",
   "activity_launching_experiment": "Launching an experiment run…",
+  "activity_estimated_run": "Estimated an experiment run",
+  "activity_estimating_run": "Estimating an experiment run…",
   "activity_loaded_research_guides_one": "Loaded {count} research guide",
   "activity_loaded_research_guides_other": "Loaded {count} research guides",
   "activity_loaded_skills_one": "Loaded {count} skill",

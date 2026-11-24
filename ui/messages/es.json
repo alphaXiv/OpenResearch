@@ -703,6 +703,8 @@
   "activity_creating_an_experiment": "Creando un experimento…",
   "activity_launched_experiment": "Lanzó {experiment}",
   "activity_launching_experiment": "Lanzando una ejecución del experimento…",
+  "activity_estimated_run": "Estimó una ejecución de experimento",
+  "activity_estimating_run": "Estimando una ejecución del experimento…",
   "activity_loaded_research_guides_one": "Cargó {count} guía de investigación",
   "activity_loaded_research_guides_other": "Cargó {count} guías de investigación",
   "activity_loaded_skills_one": "Cargó {count} habilidad",
