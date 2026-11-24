@@ -1,8 +1,12 @@
+use std::time::Duration;
+
+use crate::client::SandboxTarget;
 use crate::engine::{estimate, monitor, view};
 use crate::error::{anyhow, Result};
-use crate::store::Store;
+use crate::local::spend::cost;
+use crate::store::{Per, Quote, Store};
 
-pub(super) fn run(store: &Store, args: &crate::ExpRunArgs) -> Result<()> {
+pub(super) async fn run(store: &Store, mut args: crate::ExpRunArgs) -> Result<()> {
     let experiment = crate::local::resolve::resolve_experiment(store, &args.exp_id)?;
     let settings = store.run_monitor_json(&experiment.id)?;
     let plan = view::stored_plan(&experiment.id, settings.as_deref())?;
@@ -22,6 +26,14 @@ pub(super) fn run(store: &Store, args: &crate::ExpRunArgs) -> Result<()> {
     if plan.is_empty() {
         return Err(anyhow!("Experiment {} has no stage plan. Set every stage with `orx exp view set {} --config plan.json`, then estimate again.", experiment.id, experiment.id));
     }
+    crate::local::apply_compute_default(
+        store,
+        &experiment.project_id,
+        &mut args.backend,
+        &mut args.flavor,
+    )?;
+    let backend = args.backend.get_or_insert_with(|| "local".into()).clone();
+    crate::compute::validate_run_args(&args)?;
     let mut parent = None;
     if let Some(id) = &experiment.parent_experiment_id {
         let experiment = store
@@ -42,6 +54,13 @@ pub(super) fn run(store: &Store, args: &crate::ExpRunArgs) -> Result<()> {
             }
         }
     }
+    let compute = match &args.flavor {
+        Some(flavor) => format!("--backend {backend} --flavor {flavor}"),
+        None => format!("--backend {backend}"),
+    };
+    let quote = tokio::time::timeout(Duration::from_secs(60), price(&backend, &args))
+        .await
+        .unwrap_or_else(|_| Err(anyhow!("no price within 60 s")));
     println!("Command: {command}");
     match &parent {
         Some((experiment, run, _)) => println!("Parent timing: {} — {}", experiment.display_name(), run.id),
@@ -51,13 +70,118 @@ pub(super) fn run(store: &Store, args: &crate::ExpRunArgs) -> Result<()> {
         "{}",
         report(
             &plan,
-            parent.as_ref().map(|(_, _, snapshot)| snapshot.as_ref())
+            parent.as_ref().map(|(_, _, snapshot)| snapshot.as_ref()),
+            &compute,
+            &quote,
         )
     );
     Ok(())
 }
 
-fn report(plan: &[orx_signals::Stage], parent: Option<&orx_signals::Snapshot>) -> String {
+/// What the run's compute charges for running time, priced before launch the way its backend
+/// bills; None where orx has no price for the backend.
+async fn price(backend: &str, args: &crate::ExpRunArgs) -> Result<Option<Quote>> {
+    use crate::jobs::{huggingface as hf, modal, openresearch};
+
+    let flavor = || {
+        args.flavor
+            .as_deref()
+            .ok_or_else(|| anyhow!("pass the --flavor the run will use"))
+    };
+    let quote = match backend {
+        "hf" => hf::hardware_price(&hf::endpoint(), flavor()?).await?,
+        // Estimates are plan-mode reads: use Modal's interpreter as set up, never install one.
+        "modal" => modal::hourly_price(&modal::resolve_flavor(flavor()?)).await?,
+        "openresearch" => {
+            let creds = crate::config::load_credentials()
+                .await?
+                .ok_or_else(|| anyhow!("OpenResearch requires `orx login`."))?;
+            let target = openresearch::parse_flavor(
+                flavor()?,
+                args.disk.unwrap_or(100),
+                args.provider.clone(),
+            )?;
+            // The offer a launch gets: the cheapest that fits, the way openresearch.sh picks it.
+            let dollars = match target {
+                SandboxTarget::New {
+                    gpu,
+                    gpu_count,
+                    disk_gb,
+                    provider,
+                } => {
+                    let offers = crate::client::list_catalog(&creds).await?.offers;
+                    let cheapest = offers
+                        .iter()
+                        .filter(|offer| {
+                            let disk_fits = offer.disk.sizable
+                                || offer
+                                    .disk
+                                    .included_gb
+                                    .is_some_and(|gb| gb >= disk_gb as f64);
+                            let provider_fits = provider
+                                .as_ref()
+                                .is_none_or(|name| offer.provider.eq_ignore_ascii_case(name));
+                            offer.gpu.eq_ignore_ascii_case(&gpu)
+                                && offer.gpu_count == gpu_count
+                                && disk_fits
+                                && provider_fits
+                        })
+                        .map(|offer| offer.price_per_hour)
+                        .filter(|dollars| dollars.is_finite() && *dollars >= 0.0)
+                        .min_by(f64::total_cmp);
+                    let (from, flag) = match &provider {
+                        Some(name) => (format!(" from {name}"), format!(" --provider {name}")),
+                        None => Default::default(),
+                    };
+                    cheapest.ok_or_else(|| anyhow!("OpenResearch has no {gpu_count}× {gpu} offer{from} with {disk_gb} GB of disk now; list them with `orx compute --gpu {gpu} --count {gpu_count}{flag}`"))?
+                }
+                SandboxTarget::NewCpu {
+                    cpu_flavor,
+                    vcpu_count,
+                } => crate::client::list_cpu_catalog(&creds)
+                    .await?
+                    .offers
+                    .into_iter()
+                    .filter(|offer| {
+                        offer.cpu_flavor == cpu_flavor && offer.vcpus == vcpu_count as f64
+                    })
+                    .map(|offer| offer.price_per_hour)
+                    .filter(|dollars| dollars.is_finite() && *dollars >= 0.0)
+                    .min_by(f64::total_cmp)
+                    .ok_or_else(|| {
+                        anyhow!("OpenResearch has no {cpu_flavor} offer with {vcpu_count} vCPUs now; list them with `orx compute --cpu`")
+                    })?,
+            };
+            Quote {
+                amount_micros: (dollars * 1e6).round() as u64,
+                per: Per::Hour,
+                currency: "USD".into(),
+                source: "openresearch.sh".into(),
+                quoted_at: crate::store::now_ms(),
+            }
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(quote))
+}
+
+/// Dollars to the cent, or to two significant digits below one.
+fn usd(micros: u64) -> String {
+    let dollars = micros as f64 / 1e6;
+    let decimals = if micros == 0 || dollars >= 0.01 {
+        2
+    } else {
+        (1.0 - dollars.log10().floor()) as usize
+    };
+    format!("${dollars:.decimals$}")
+}
+
+fn report(
+    plan: &[orx_signals::Stage],
+    parent: Option<&orx_signals::Snapshot>,
+    compute: &str,
+    price: &Result<Option<Quote>>,
+) -> String {
     let timed: Vec<_> = parent
         .into_iter()
         .map(|p| (p, true, estimate::TimedBy::Parent))
@@ -137,15 +261,32 @@ fn report(plan: &[orx_signals::Stage], parent: Option<&orx_signals::Snapshot>) -
     lines.push(
         "Not included: queueing, provisioning, and changes in hardware or per-step work.".into(),
     );
-    if unknown.is_empty() {
+    let bound = if unknown.is_empty() {
         lines.push(format!("Total: about {}", duration(total)));
+        "about"
     } else {
         lines.push(format!(
             "Total: at least {} ({} not timed)",
             duration(total),
             unknown.join(", ")
         ));
-        lines.push(format!("This is a floor: {} are not timed. Tell the user the total is unknown or run a short calibration before promising a duration.", unknown.join(", ")));
+        "at least"
+    };
+    match price {
+        Ok(Some(quote)) => {
+            let hourly = usd(cost(quote, Per::Hour.millis() as i64));
+            let spent = usd(cost(quote, total.round() as i64));
+            lines.push(format!(
+                "Price: {hourly}/hr for {compute}, from {}",
+                quote.source
+            ));
+            lines.push(format!("Cost: {bound} {spent}"));
+        }
+        Ok(None) => lines.push(format!("Cost: orx has no price for {compute}")),
+        Err(error) => lines.push(format!("Cost: unknown for {compute}: {error:#}")),
+    }
+    if !unknown.is_empty() {
+        lines.push(format!("This is a floor: {} are not timed. Tell the user the total is unknown or run a short calibration before promising a duration or cost.", unknown.join(", ")));
     }
     lines.join("\n")
 }
@@ -183,7 +324,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let text = report(&plan, Some(&parent()));
+        let text = report(&plan, Some(&parent()), "--backend local", &Ok(None));
         assert!(
             text.contains("600 steps; the parent took 3 s each"),
             "{text}"
@@ -199,8 +340,69 @@ mod tests {
             text.contains("Total: at least 31 min (eval not timed)"),
             "{text}"
         );
-        assert!(report(&plan[..2], Some(&parent())).contains("Total: about 31 min"));
-        assert!(report(&plan, None).contains("download, train, eval not timed"));
+        assert!(
+            report(&plan[..2], Some(&parent()), "--backend local", &Ok(None))
+                .contains("Total: about 31 min")
+        );
+        assert!(report(&plan, None, "--backend local", &Ok(None))
+            .contains("download, train, eval not timed"));
+    }
+
+    #[test]
+    fn sizing_prices_the_total_at_the_backend_rate() {
+        let plan = orx_signals::plan(
+            &json!([
+                {"phase":"download"}, {"phase":"train", "of":600, "unit":"steps"}, {"phase":"eval"}
+            ]),
+            false,
+        )
+        .unwrap();
+        let quote = |amount_micros, per| {
+            Ok(Some(Quote {
+                amount_micros,
+                per,
+                currency: "USD".into(),
+                source: "huggingface.co".into(),
+                quoted_at: 0,
+            }))
+        };
+        let h200 = quote(6_000_000, Per::Hour);
+        let text = report(
+            &plan[..2],
+            Some(&parent()),
+            "--backend hf --flavor h200",
+            &h200,
+        );
+        assert!(
+            text.contains("Price: $6.00/hr for --backend hf --flavor h200, from huggingface.co"),
+            "{text}"
+        );
+        assert!(text.contains("Cost: about $3.10"), "{text}");
+        let text = report(&plan, Some(&parent()), "--backend hf --flavor h200", &h200);
+        assert!(text.contains("Cost: at least $3.10"), "{text}");
+        assert!(text.lines().last().unwrap().contains("duration or cost"));
+
+        let cpu = quote(167, Per::Minute);
+        let text = report(
+            &plan[..2],
+            Some(&parent()),
+            "--backend hf --flavor cpu-basic",
+            &cpu,
+        );
+        assert!(text.contains("Price: $0.01/hr"), "{text}");
+        assert!(text.contains("Cost: about $0.0052"), "{text}");
+
+        let text = report(&plan[..2], Some(&parent()), "--backend ssh", &Ok(None));
+        assert!(
+            text.contains("Cost: orx has no price for --backend ssh"),
+            "{text}"
+        );
+        let missing = Err(anyhow!("pass the --flavor the run will use"));
+        let text = report(&plan[..2], Some(&parent()), "--backend hf", &missing);
+        assert!(
+            text.contains("Cost: unknown for --backend hf: pass the --flavor"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -219,7 +421,7 @@ mod tests {
             .unwrap();
         let plan =
             orx_signals::plan(&json!([{"phase":"train", "of":60, "unit":"steps"}]), false).unwrap();
-        let text = report(&plan, Some(&snapshot));
+        let text = report(&plan, Some(&snapshot), "--backend local", &Ok(None));
         assert!(
             text.contains("train: about 6 s — 60 steps; the parent took 100 ms each"),
             "{text}"
@@ -251,7 +453,7 @@ mod tests {
         );
         assert_eq!(stages[0].prior.unwrap().ms, 100_000.0);
 
-        let text = report(&plan, Some(&parent));
+        let text = report(&plan, Some(&parent), "--backend local", &Ok(None));
         assert!(text.contains("Total: about 1 min 40 s"), "{text}");
     }
 
@@ -265,7 +467,8 @@ mod tests {
             false,
         )
         .unwrap();
-        assert!(report(&plan, Some(&recorded)).contains("train not timed"));
+        assert!(report(&plan, Some(&recorded), "--backend local", &Ok(None))
+            .contains("train not timed"));
         recorded.phases[1].done = None;
         let plan = orx_signals::plan(
             &json!([
@@ -274,7 +477,9 @@ mod tests {
             false,
         )
         .unwrap();
-        assert!(report(&plan, Some(&recorded)).contains("train not timed"));
-        assert!(report(&plan, Some(&parent())).contains("Total: about 30 min"));
+        assert!(report(&plan, Some(&recorded), "--backend local", &Ok(None))
+            .contains("train not timed"));
+        assert!(report(&plan, Some(&parent()), "--backend local", &Ok(None))
+            .contains("Total: about 30 min"));
     }
 }
