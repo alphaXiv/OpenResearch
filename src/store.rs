@@ -1964,19 +1964,6 @@ impl Store {
             )?;
             schema.pragma_update(None, "user_version", 1)?;
         }
-        // A recovery card stored as a branch root, as a turn without a user message once left it,
-        // hides the chat's history above it.
-        schema.execute(
-            r#"UPDATE chat_messages AS m SET parent_id = (
-                   SELECT p.id FROM chat_messages p
-                   WHERE p.session_id = m.session_id
-                     AND (p.created_at, p.rowid) < (m.created_at, m.rowid)
-                   ORDER BY p.created_at DESC, p.rowid DESC LIMIT 1
-               )
-               WHERE m.parent_id IS NULL AND m.role = 'assistant'
-                 AND instr(m.parts_json, '"id":"turn-recovery"') > 0"#,
-            [],
-        )?;
         schema.execute_batch(include_str!("store/search.sql"))?;
         // Older builds of this branch created a one-root-per-project unique
         // index; multiple baselines are allowed, so make sure it's gone.
@@ -5598,6 +5585,23 @@ impl Store {
         }
         tx.commit()?;
         Ok(parent)
+    }
+
+    /// Reattaches each recovery card stored as a branch root, as a turn without a user message
+    /// once left it, to the message before it, since a root card hides the history above it.
+    pub fn reattach_root_recovery_cards(&self) -> Result<()> {
+        self.conn.execute(
+            r#"UPDATE chat_messages AS m SET parent_id = (
+                   SELECT p.id FROM chat_messages p
+                   WHERE p.session_id = m.session_id
+                     AND (p.created_at, p.rowid) < (m.created_at, m.rowid)
+                   ORDER BY p.created_at DESC, p.rowid DESC LIMIT 1
+               )
+               WHERE m.parent_id IS NULL AND m.role = 'assistant'
+                 AND instr(m.parts_json, '"id":"turn-recovery"') > 0"#,
+            [],
+        )?;
+        Ok(())
     }
 
     pub fn upsert_chat_recovery_message_if_actionable(
@@ -15594,22 +15598,20 @@ pub(crate) mod tests {
                 result_native_message_id: None,
                 native_harness: None,
             };
-        {
-            let store = Store::open_at(dir.clone()).unwrap();
-            store
-                .create_chat_session(&chat_session_fixture("chat"))
-                .unwrap();
-            for stored in [
-                message("u1", "user", None, "[]", 1),
-                message("a1", "assistant", Some("u1"), "[]", 2),
-                message("card", "assistant", None, &card, 3),
-                message("u2", "user", None, "[]", 4),
-            ] {
-                store.upsert_chat_message(&stored).unwrap();
-            }
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat"))
+            .unwrap();
+        for stored in [
+            message("u1", "user", None, "[]", 1),
+            message("a1", "assistant", Some("u1"), "[]", 2),
+            message("card", "assistant", None, &card, 3),
+            message("u2", "user", None, "[]", 4),
+        ] {
+            store.upsert_chat_message(&stored).unwrap();
         }
 
-        let store = Store::open_at(dir.clone()).unwrap();
+        store.reattach_root_recovery_cards().unwrap();
         let parent = |id: &str| store.get_chat_message(id).unwrap().unwrap().parent_id;
         assert_eq!(parent("card").as_deref(), Some("a1"));
         // A user's edit of the first message is a root of its own.

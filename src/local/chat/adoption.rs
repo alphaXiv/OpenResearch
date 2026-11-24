@@ -349,6 +349,9 @@ pub(super) async fn resume_turns(
     }
 
     let unfinished = if startup {
+        if let Err(error) = store.reattach_root_recovery_cards() {
+            eprintln!("orx up: chats whose history a recovery card hides stay hidden: {error:#}");
+        }
         store.reconcile_unfinished_chat_turns()?
     } else {
         store.reconcile_expired_unfinished_chat_turns(&chat.held_turn_leases())?
