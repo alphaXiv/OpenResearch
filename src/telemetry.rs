@@ -454,25 +454,52 @@ fn queued_payload_paths() -> Vec<PathBuf> {
         .collect()
 }
 
-/// The queued event at `path`, or `None` for a file orx did not queue there. An agent can
-/// write the chat outbox and whatever is read is posted as is, so a link is never followed
-/// and the payload must be the event its file is named for.
+/// A chat command's event is about a kilobyte; anything far larger was not queued by orx.
+const CHAT_OUTBOX_MAX_BYTES: u64 = 1 << 20;
+
+/// The queued payload at `path`, or `None` for a file that is not one.
 fn read_queued_payload(path: &std::path::Path) -> std::io::Result<Option<serde_json::Value>> {
+    if path.parent() != Some(chat_outbox_dir().as_path()) {
+        return Ok(serde_json::from_slice(&std::fs::read(path)?).ok());
+    }
+    read_chat_queued_payload(path)
+}
+
+/// An agent can write the chat outbox and whatever is read is posted as is, so a link is
+/// never followed, a pipe never waited on, and only the one event `send_or_stage` names
+/// the file for is accepted.
+fn read_chat_queued_payload(path: &std::path::Path) -> std::io::Result<Option<serde_json::Value>> {
     use std::io::Read as _;
 
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
+    std::os::unix::fs::OpenOptionsExt::custom_flags(
+        &mut options,
+        libc::O_NOFOLLOW | libc::O_NONBLOCK,
+    );
     // FILE_FLAG_OPEN_REPARSE_POINT: open a link itself, not its target.
     #[cfg(windows)]
     std::os::windows::fs::OpenOptionsExt::custom_flags(&mut options, 0x0020_0000);
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Ok(None);
+    }
     let mut bytes = Vec::new();
-    options.open(path)?.read_to_end(&mut bytes)?;
+    file.take(CHAT_OUTBOX_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > CHAT_OUTBOX_MAX_BYTES {
+        return Ok(None);
+    }
 
     let payload = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
     let named = path.file_stem().and_then(|stem| stem.to_str());
-    Ok(payload.filter(|payload| payload["events"][0]["eventId"].as_str() == named))
+    Ok(payload.filter(|payload| {
+        payload["events"]
+            .as_array()
+            .is_some_and(|events| events.len() == 1)
+            && payload["events"][0]["eventId"].as_str() == named
+    }))
 }
 
 /// How reading `settings.json` turned out. The corrupt case is kept distinct
@@ -1664,15 +1691,7 @@ mod tests {
         std::fs::create_dir_all(outbox_dir()).unwrap();
 
         let product = outbox_dir().join("product.json");
-        let consent_payload = build_payload(
-            "telemetry_consent",
-            CONSENT_SENTINEL_ID,
-            json!({ "agreed": false }),
-        );
-        let consent = outbox_dir().join(format!(
-            "{}.json",
-            consent_payload["events"][0]["eventId"].as_str().unwrap()
-        ));
+        let consent = outbox_dir().join("consent.json");
         let malformed = outbox_dir().join("malformed.json");
         let active = outbox_dir().join(".active.tmp");
         #[cfg(unix)]
@@ -1683,7 +1702,16 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        std::fs::write(&consent, serde_json::to_vec(&consent_payload).unwrap()).unwrap();
+        std::fs::write(
+            &consent,
+            serde_json::to_vec(&build_payload(
+                "telemetry_consent",
+                CONSENT_SENTINEL_ID,
+                json!({ "agreed": false }),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
         std::fs::write(&malformed, b"not-json").unwrap();
         std::fs::write(&active, b"partial").unwrap();
         #[cfg(unix)]
@@ -2984,25 +3012,42 @@ mod tests {
     }
 
     #[test]
-    fn the_outbox_reads_only_events_queued_under_their_own_name() {
+    fn the_chat_outbox_reads_only_events_queued_under_their_own_name() {
+        if !crate::config::in_test_child(TELEMETRY_ENV) {
+            return;
+        }
         let event_id = uuid::Uuid::new_v4();
         let payload =
             build_payload_with_id("command", "install", event_id, json!({ "command": "exp" }));
-        let dir = crate::local::git::TemporaryDirectory::new("telemetry-queued").unwrap();
-        let queued = dir.path().join(format!("{event_id}.json"));
+        std::fs::create_dir_all(chat_outbox_dir()).unwrap();
+        let queued = chat_outbox_dir().join(format!("{event_id}.json"));
         std::fs::write(&queued, serde_json::to_vec(&payload).unwrap()).unwrap();
         assert_eq!(read_queued_payload(&queued).unwrap(), Some(payload.clone()));
 
-        let renamed = dir.path().join(format!("{}.json", uuid::Uuid::new_v4()));
+        let renamed = chat_outbox_dir().join(format!("{}.json", uuid::Uuid::new_v4()));
         std::fs::rename(&queued, &renamed).unwrap();
         assert_eq!(read_queued_payload(&renamed).unwrap(), None);
 
+        // A setup snapshot names its file for the batch, not its first event.
+        let snapshot = outbox_dir().join("batch.json");
+        std::fs::create_dir_all(outbox_dir()).unwrap();
+        std::fs::write(&snapshot, serde_json::to_vec(&payload).unwrap()).unwrap();
+        assert_eq!(
+            read_queued_payload(&snapshot).unwrap(),
+            Some(payload.clone())
+        );
+
         #[cfg(unix)]
         {
-            let private = dir.path().join("private.json");
+            let private = chat_outbox_dir().join("private.txt");
             std::fs::write(&private, serde_json::to_vec(&payload).unwrap()).unwrap();
             std::os::unix::fs::symlink(&private, &queued).unwrap();
             assert!(read_queued_payload(&queued).is_err());
+
+            let pipe = chat_outbox_dir().join(format!("{}.json", uuid::Uuid::new_v4()));
+            let name = std::ffi::CString::new(pipe.to_str().unwrap()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+            assert_eq!(read_queued_payload(&pipe).unwrap(), None);
         }
     }
 
