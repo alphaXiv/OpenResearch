@@ -37,11 +37,13 @@ impl Window {
     }
 
     async fn open_from(exe: &Path) -> Self {
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+        // Below every OS's ephemeral range, so no other test's `bind(0)` takes it while the server restarts.
+        let port = loop {
+            let candidate = 20_000 + (uuid::Uuid::new_v4().as_u128() % 10_000) as u16;
+            if TcpListener::bind(("127.0.0.1", candidate)).is_ok() {
+                break candidate;
+            }
+        };
         let window = Self::start(exe, port);
         window.state().await;
         window
