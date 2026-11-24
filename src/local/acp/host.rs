@@ -1663,6 +1663,34 @@ mod tests {
         host.shutdown().await;
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn changed_skills_respawn_an_agent_only_once_its_detached_command_ends() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let host = Arc::new(Host::default());
+        let (cwd, launch) = (std::env::temp_dir(), definition("normal"));
+        let get = || host.get("skills", &launch, &cwd);
+        let client = get().await.unwrap();
+        let response = client
+            .request("session/new", json!({"cwd": cwd, "mcpServers": []}))
+            .await
+            .unwrap();
+        client.set_native_id(response["sessionId"].as_str().unwrap());
+        turn(&client, "detached").await;
+        crate::local::user_skills::save_skill_md(
+            b"---\nname: added\ndescription: Added mid-chat. Use when testing.\n---\nbody\n",
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(&get().await.unwrap(), &client));
+
+        turn(&client, "end-detached").await;
+        assert!(!Arc::ptr_eq(&get().await.unwrap(), &client));
+        assert!(client.closed.borrow().is_some());
+        host.shutdown().await;
+    }
+
     #[tokio::test]
     async fn alphaxiv_server_reaches_new_loaded_and_resumed_sessions() {
         use agent_client_protocol::schema::v1::NewSessionRequest;

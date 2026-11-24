@@ -461,6 +461,7 @@ impl AgentChild {
 
 /// Spawn `opencode serve` in the session's worktree and wait for it to come
 /// up healthy.
+#[expect(clippy::too_many_arguments)]
 async fn spawn_agent(
     project: &LocalProject,
     model: Option<&str>,
@@ -469,19 +470,15 @@ async fn spawn_agent(
     native_store: NativeStore,
     binary: ResolvedBinary,
     database: native_store::opencode_database::DatabaseLease,
+    skills: Option<u64>,
 ) -> Result<AgentChild> {
     // The clone/worktree setup inside can hit the network; keep it off the
     // async workers.
-    let (skills, (repo, config_override)) = {
+    let (repo, config_override) = {
         let (project, model) = (project.clone(), model.map(str::to_string));
         let session = session_id.to_string();
         tokio::task::spawn_blocking(move || {
-            use crate::local::harness::Harness;
-            let skills = crate::local::user_skills::fingerprint(
-                crate::local::harness::opencode::OpenCode.id(),
-            );
             write_agent_files(&project, model.as_deref(), &session, up_port)
-                .map(|files| (skills, files))
         })
         .await
         .map_err(|e| anyhow!("agent file task failed: {e}"))??
@@ -1020,6 +1017,7 @@ impl AgentHost {
             native_store,
             binary,
             database,
+            skills,
         )
         .await?;
         let mut inner = self.inner.lock().await;

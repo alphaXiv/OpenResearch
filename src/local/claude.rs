@@ -283,7 +283,7 @@ pub struct SpawnSpec {
     /// session holding `resume`'s history up to it.
     pub fork_at: Option<String>,
     pub config: SpawnConfig,
-    /// [`crate::local::user_skills::fingerprint`], taken before the turn copied skills in.
+    /// [`crate::local::user_skills::fingerprint`] of the catalog this turn loads.
     pub skills: Option<u64>,
 }
 
@@ -2567,7 +2567,7 @@ done
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn changed_skills_respawn_a_worker_only_once_its_background_work_ends() {
+    async fn changed_skills_spare_a_busy_worker_and_respawn_an_idle_one() {
         let host = ready_host();
         let chat = Arc::new(crate::local::chat::ChatHost::new(
             Arc::new(crate::local::opencode::AgentHost::new(None)),
@@ -2597,7 +2597,7 @@ done
 
         let idle = chat_echo_worker(&host, "idle", Weak::new()).await;
         let (tx, _rx) = mpsc::unbounded_channel();
-        let _ = host.acquire_turn(spec("idle"), tx).await;
+        assert!(host.acquire_turn(spec("idle"), tx).await.is_err());
         assert!(idle.terminated.load(Ordering::Acquire));
         host.shutdown().await;
     }

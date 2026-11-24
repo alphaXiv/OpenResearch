@@ -454,6 +454,16 @@ impl CodexClient {
         *self.last_active.lock().unwrap() = Instant::now();
     }
 
+    /// A background terminal outlives its turn, and a skills respawn must not end it.
+    async fn running_a_command(&self) -> bool {
+        let Some(pid) = self.child.lock().await.id() else {
+            return false;
+        };
+        tokio::task::spawn_blocking(move || crate::local::chat::runs_a_detached_command(pid))
+            .await
+            .unwrap_or(true)
+    }
+
     /// When this child was last used, or `None` while a turn or request is in flight.
     fn idle_since(&self) -> Option<Instant> {
         if self.terminated.load(Ordering::Acquire)
@@ -1069,7 +1079,8 @@ impl CodexHost {
             && client.profile.as_deref() == profile
             && bin.is_none_or(|bin| bin == client.bin)
             && client.alphaxiv_signed_in == crate::alphaxiv::signed_in()
-            && !crate::local::user_skills::changed(client.skills, skills)
+            && (!crate::local::user_skills::changed(client.skills, skills)
+                || client.running_a_command().await)
             && matches!(client.child.lock().await.try_wait(), Ok(None))
         {
             client.touch();

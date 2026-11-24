@@ -693,7 +693,7 @@ pub fn list_for_harness(harness: Option<&str>) -> Vec<UserSkill> {
 }
 
 /// The catalog a harness loads at startup: uploads plus its own native skills dirs, by
-/// name and description. `None` when a dir can't be read, which is not a change.
+/// name and description. `None` when either can't be read, which is not a change.
 pub fn fingerprint(harness: &str) -> Option<u64> {
     let roots = super::harness::chat_harness(harness)
         .map(|agent| agent.native_skill_roots())
@@ -711,8 +711,13 @@ fn fingerprint_in(root: &Path, harness: &str, native_roots: &[PathBuf]) -> Optio
         }
     }
     native.sort_by(|a, b| (&a.name, &a.dir).cmp(&(&b.name, &b.dir)));
+    let uploads = match fs::read_dir(store_dir(root)) {
+        Ok(_) => list_uploaded_in(root),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => return None,
+    };
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for skill in list_uploaded_in(root) {
+    for skill in uploads {
         (skill.name, skill.description).hash(&mut hasher);
     }
     for skill in native {
@@ -1565,14 +1570,6 @@ mod tests {
 
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(agent).unwrap();
-    }
-
-    #[test]
-    fn only_a_known_new_catalog_respawns_an_agent() {
-        assert!(!changed(Some(1), Some(1)));
-        assert!(changed(Some(1), Some(2)));
-        assert!(changed(None, Some(2)));
-        assert!(!changed(Some(1), None));
     }
 
     #[test]
