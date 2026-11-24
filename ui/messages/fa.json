@@ -1789,6 +1789,7 @@
   "settings_found_opencode": "در OpenCode",
   "settings_found_config_file": "فایل پیکربندی",
   "settings_found_env_note": "{name} در محیط شما کلید این ارائه‌دهنده را فراهم می‌کند. برای حذف آن، {name} را از جایی که تنظیمش کرده‌اید پاک کنید، یا ارائه‌دهنده را اینجا خاموش کنید.",
+  "settings_found_env_saved_note": "{name} در زبانهٔ محیط کلید این ارائه‌دهنده را فراهم می‌کند. برای حذف آن، آن را همان‌جا پاک کنید، یا ارائه‌دهنده را اینجا خاموش کنید.",
   "settings_found_config_note": "برای حذف این ارائه‌دهنده، آن را از {path} بردارید یا اینجا خاموشش کنید.",
   "settings_remove_found_description": "این کار آن را از OpenCode روی این رایانه هم حذف می‌کند: ورود آن و مدخلش در پیکربندی OpenCode شما.",
   "add_agent_hide_free_models": "پنهان کردن مدل‌های رایگان OpenCode",

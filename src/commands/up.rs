@@ -6160,7 +6160,7 @@ pub(super) fn env_key_error(key: &str) -> Option<String> {
     })
 }
 
-async fn set_env_var(Json(req): Json<SetEnvVarReq>) -> ApiResult {
+async fn set_env_var(State(state): State<AppState>, Json(req): Json<SetEnvVarReq>) -> ApiResult {
     let key = req.key.trim().to_string();
     if let Some(error) = env_key_error(&key) {
         return Err(bad_request(error));
@@ -6172,7 +6172,9 @@ async fn set_env_var(Json(req): Json<SetEnvVarReq>) -> ApiResult {
     if value.is_none() && req.description.is_none() {
         return Err(bad_request("give a value, a description, or both"));
     }
-    tokio::task::spawn_blocking(move || {
+
+    let rechecks = req.project_id.is_none() && value.is_some();
+    let response = tokio::task::spawn_blocking(move || -> ApiResult {
         let store = Store::open()?;
         let project = req.project_id.as_deref();
         if let Some(project) = project {
@@ -6199,14 +6201,25 @@ async fn set_env_var(Json(req): Json<SetEnvVarReq>) -> ApiResult {
         Ok(Json(env_settings_json(project)?))
     })
     .await
-    .map_err(|e| ApiError::from(anyhow!("env task failed: {e}")))?
+    .map_err(|e| ApiError::from(anyhow!("env task failed: {e}")))??;
+    // OpenCode turns providers on from keys in its environment.
+    if rechecks {
+        recheck_opencode(&state).await;
+    }
+    Ok(response)
 }
 
-async fn delete_env_var(Path(key): Path<String>, Query(scope): Query<EnvQuery>) -> ApiResult {
+async fn delete_env_var(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+    Query(scope): Query<EnvQuery>,
+) -> ApiResult {
     if !valid_env_key(&key) {
         return Err(bad_request("invalid key"));
     }
-    tokio::task::spawn_blocking(move || {
+
+    let rechecks = scope.project_id.is_none();
+    let response = tokio::task::spawn_blocking(move || -> ApiResult {
         let store = Store::open()?;
         let project = scope.project_id.as_deref();
         match project {
@@ -6219,7 +6232,11 @@ async fn delete_env_var(Path(key): Path<String>, Query(scope): Query<EnvQuery>) 
         Ok(Json(env_settings_json(project)?))
     })
     .await
-    .map_err(|e| ApiError::from(anyhow!("env task failed: {e}")))?
+    .map_err(|e| ApiError::from(anyhow!("env task failed: {e}")))??;
+    if rechecks {
+        recheck_opencode(&state).await;
+    }
+    Ok(response)
 }
 
 // --- data directory ---------------------------------------------------------
@@ -8644,6 +8661,33 @@ async fn remove_found_provider(State(state): State<AppState>, Path(id): Path<Str
             "OpenResearch added this provider. Remove it from its own row in Settings → Agents.",
         ));
     }
+
+    let env_key = state
+        .harnesses
+        .lock()
+        .await
+        .as_ref()
+        .and_then(|(_, payload)| {
+            let opencode = payload["harnesses"]
+                .as_array()?
+                .iter()
+                .find(|h| h["id"] == "opencode")?;
+            let found = opencode["foundProviders"]
+                .as_array()?
+                .iter()
+                .find(|found| found["id"] == id.as_str())?;
+            let from_env = found["sources"]
+                .as_array()?
+                .iter()
+                .any(|source| source == "env");
+            from_env.then(|| found["env"][0].as_str().map(str::to_owned))?
+        });
+    if let Some(var) = env_key {
+        return Err(bad_request(format!(
+            "`{var}` in your environment provides {id}. Remove it there, or turn this provider off."
+        )));
+    }
+
     let key = format!("opencode:{id}");
     tokio::task::spawn_blocking(move || {
         local::harness::opencode::delete_found_provider(&id)?;
@@ -11862,13 +11906,17 @@ mod tests {
             .unwrap()
             .create_local_project(&crate::store::tests::local_project_fixture(&project))
             .unwrap();
+        let state = test_state();
         let set = |value: Option<&str>, description: Option<&str>, project_id: Option<&str>| {
-            set_env_var(Json(SetEnvVarReq {
-                key: key.clone(),
-                value: value.map(str::to_string),
-                description: description.map(str::to_string),
-                project_id: project_id.map(str::to_string),
-            }))
+            set_env_var(
+                State(state.clone()),
+                Json(SetEnvVarReq {
+                    key: key.clone(),
+                    value: value.map(str::to_string),
+                    description: description.map(str::to_string),
+                    project_id: project_id.map(str::to_string),
+                }),
+            )
         };
         let row = |body: &Value, list: &str| {
             body[list]
@@ -11915,6 +11963,7 @@ mod tests {
         assert!(row(&body, "vars").is_some() && row(&body, "projectVars").is_some());
 
         let Json(body) = delete_env_var(
+            State(state.clone()),
             Path(key.clone()),
             Query(EnvQuery {
                 project_id: Some(project.clone()),
@@ -11927,9 +11976,13 @@ mod tests {
             row(&body, "vars").is_some(),
             "deleting the project's copy keeps every project's"
         );
-        let Json(body) = delete_env_var(Path(key.clone()), Query(EnvQuery { project_id: None }))
-            .await
-            .unwrap();
+        let Json(body) = delete_env_var(
+            State(state),
+            Path(key.clone()),
+            Query(EnvQuery { project_id: None }),
+        )
+        .await
+        .unwrap();
         assert!(row(&body, "vars").is_none());
         assert!(!Store::open()
             .unwrap()
@@ -14248,7 +14301,6 @@ mod tests {
                 r#"{"openai":{"kind":"key","key":"sk-test","name":"Work OpenAI"}}"#,
             )
             .unwrap();
-            std::env::set_var("XAI_API_KEY", "fixture-only");
             let store = Store::open().unwrap();
             store
                 .set_ui_json("hidden_agents", &["opencode:tinker", "opencode:openai", "cursor"])
@@ -14310,6 +14362,16 @@ mod tests {
                        "logo":"thinkingmachines","baseUrl":"https://tinker.example/v1","npm":"@ai-sdk/openai-compatible","sources":["config"]})
             );
             assert_eq!(rows[1]["removable"], true);
+            let refused = http
+                .delete(format!("http://{address}/api/opencode/found-providers/xai"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(refused.status().as_u16(), 400);
+            assert_eq!(
+                refused.json::<Value>().await.unwrap()["error"],
+                "`XAI_API_KEY` in your environment provides xai. Remove it there, or turn this provider off."
+            );
 
             let named = agents::label(&dashboard, "opencode:tinker", json!({"name":"Tinker Prod"}))
                 .await
@@ -14361,7 +14423,6 @@ mod tests {
                     .send()
             };
             for (id, status, error) in [
-                ("xai", 400, "`XAI_API_KEY` in your environment provides xai. Remove it there, or turn this provider off."),
                 ("openai", 400, "OpenResearch added this provider. Remove it from its own row in Settings → Agents."),
                 ("opencode", 400, "Choose a provider your OpenCode has."),
                 ("mistral", 404, "OpenResearch can't find where your OpenCode sets up mistral. Remove it in OpenCode, or turn this provider off."),
