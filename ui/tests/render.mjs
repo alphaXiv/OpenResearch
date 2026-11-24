@@ -84,6 +84,7 @@ const emptyBackend = [
   [/^GET \/api\/remote\/sessions$/, () => ({ sessions: [] })],
   [/^POST \/api\/telemetry\/(locale|event)$/, (init) => JSON.parse(init.body)],
   [/^GET \/api\/chat\/sessions$/, () => ({ sessions: [] })],
+  [/^GET \/api\/chat\/sessions\/[^/]+\/report$/, () => null],
   [/^GET \/api\/projects\/[^/]+\/ui-state$/, () => null],
   [/^POST \/api\/(settings|projects\/[^/]+)\/ui-state$/, (init) => JSON.parse(init.body)],
   [/^GET \/api\/projects\/[^/]+\/experiments$/, () => ({ experiments: [] })],

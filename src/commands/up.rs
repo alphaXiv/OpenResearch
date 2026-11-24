@@ -450,7 +450,32 @@ pub async fn run(args: UpArgs) -> Result<()> {
     let restart = state.restart.clone();
     let (stop_monitoring, stop) = tokio::sync::watch::channel(());
     let monitor = tokio::spawn(crate::engine::monitor::keep_current(engine, stop.clone()));
-    let watcher = tokio::spawn(crate::engine::watch::keep_watching(stop));
+    let reporter = tokio::spawn(crate::engine::watch::report::keep_reporting(
+        state.chat.clone(),
+        stop.clone(),
+    ));
+    let watcher = tokio::spawn(crate::engine::watch::keep_watching(
+        {
+            let state = state.clone();
+            move || {
+                let state = state.clone();
+                async move {
+                    let cached = state
+                        .harnesses
+                        .lock()
+                        .await
+                        .as_ref()
+                        .map(|(_, payload)| payload.clone());
+                    match cached {
+                        Some(payload) => payload,
+                        // Nothing detected yet, as when no page has opened: this starts detection.
+                        None => detected_harnesses(&state, &HarnessQuery::default()).await,
+                    }
+                }
+            }
+        },
+        stop,
+    ));
     let mut restarting = false;
     // A development rebuild, or a window gone without quitting, hands off like an update and exits.
     let mut handing_off = false;
@@ -481,7 +506,11 @@ pub async fn run(args: UpArgs) -> Result<()> {
     // Before agents go down: a turn their shutdown ends must not start the next queued message.
     state.chat.stop_admitting();
     drop(stop_monitoring);
-    for (name, task) in [("run monitor", monitor), ("watcher", watcher)] {
+    for (name, task) in [
+        ("run monitor", monitor),
+        ("watcher", watcher),
+        ("report writer", reporter),
+    ] {
         if let Err(error) = task.await {
             eprintln!("orx up: shutting down the {name}: {error}");
         }
@@ -1484,6 +1513,23 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             "/api/chat/sessions/{id}/compact",
             post(compact_chat_session),
         )
+        .route("/api/chat/sessions/{id}/report", get(chat_report))
+        .route(
+            "/api/chat/sessions/{id}/report/refresh",
+            post(refresh_chat_report),
+        )
+        .route(
+            "/api/chat/sessions/{id}/report/enabled",
+            post(set_chat_report_enabled),
+        )
+        .route(
+            "/api/chat/sessions/{id}/report/models",
+            get(chat_report_models),
+        )
+        .route(
+            "/api/chat/sessions/{id}/report/model",
+            post(set_chat_report_model),
+        )
         .route("/api/chat/active-runs", get(chat_active_runs))
         .route("/api/chat/shown-runs", get(chat_shown_runs))
         .route(
@@ -1680,13 +1726,12 @@ impl IntoResponse for ApiError {
     }
 }
 
+const DB_BUSY: &str = "OpenResearch's database is busy. Try again in a moment.";
+
 impl From<crate::error::Error> for ApiError {
     fn from(err: crate::error::Error) -> Self {
         if crate::store::is_db_locked(&err) {
-            return Self(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "OpenResearch's database is busy. Try again in a moment.".into(),
-            );
+            return Self(StatusCode::SERVICE_UNAVAILABLE, DB_BUSY.into());
         }
         Self(StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
     }
@@ -7636,6 +7681,7 @@ struct SetUiStateReq {
     model_sightings: Option<Value>,
     run_banner: Option<String>,
     run_watching: Option<bool>,
+    status_for_new_chats: Option<bool>,
     seen_nudges: Option<Vec<String>>,
 }
 
@@ -7831,6 +7877,9 @@ async fn set_ui_state(
         }
         if let Some(on) = req.run_watching {
             store.set_run_watching(on)?;
+        }
+        if let Some(on) = req.status_for_new_chats {
+            store.set_status_for_new_chats(on)?;
         }
         Ok(Json(json!(store.ui_state()?)))
     })
@@ -10912,6 +10961,135 @@ async fn get_chat_session(State(state): State<AppState>, Path(id): Path<String>)
     ))
 }
 
+async fn chat_report(Path(id): Path<String>) -> ApiResult {
+    blocking_api(move || {
+        let store = Store::open()?;
+        store
+            .get_chat_session(&id)?
+            .ok_or_else(|| not_found("chat session"))?;
+        Ok(Json(crate::engine::watch::report::report_json(
+            &store, &id,
+        )?))
+    })
+    .await
+}
+
+/// Retry: the error goes at once, and the report is due as at a milestone, updating once the gap
+/// since its last update has passed.
+async fn refresh_chat_report(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    blocking_api(move || {
+        let store = Store::open()?;
+        let chat = store
+            .get_chat_session(&id)?
+            .ok_or_else(|| not_found("chat session"))?;
+        crate::engine::watch::report::retry(&state.chat, &store, &chat)?
+            .map(Json)
+            .map_err(|why| ApiError(StatusCode::CONFLICT, why))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct ReportEnabledReq {
+    enabled: bool,
+}
+
+/// The user turns this chat's status report on or off.
+async fn set_chat_report_enabled(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ReportEnabledReq>,
+) -> ApiResult {
+    blocking_api(move || {
+        let store = Store::open()?;
+        let chat = store
+            .get_chat_session(&id)?
+            .ok_or_else(|| not_found("chat session"))?;
+        crate::engine::watch::report::set_enabled(&state.chat, &store, &chat, req.enabled)?
+            .map(Json)
+            .map_err(|why| ApiError(StatusCode::CONFLICT, why))
+    })
+    .await
+}
+
+/// The models this chat's report and run watching can be picked to run on, the most suitable first.
+async fn chat_report_models(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    let catalog = harnesses_payload(&state, &HarnessQuery::default()).await;
+    blocking_api(move || {
+        let store = Store::open()?;
+        store
+            .get_chat_session(&id)?
+            .ok_or_else(|| not_found("chat session"))?;
+        let models: Vec<Value> = report_routes(&store, &catalog)?
+            .iter()
+            .map(|route| json!({"harness": route.harness, "profile": route.profile, "model": route.model}))
+            .collect();
+        Ok(Json(json!({ "models": models })))
+    })
+    .await
+}
+
+/// The models a chat's report and run watching can run on, as `catalog` offers them.
+fn report_routes(
+    store: &Store,
+    catalog: &Value,
+) -> std::result::Result<Vec<crate::engine::watch::WatchRoute>, ApiError> {
+    crate::engine::watch::watch_routes(catalog, &store.ui_state()?)?.ok_or_else(|| {
+        ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "orx is still reading which models your agents offer. Try again in a moment.".into(),
+        )
+    })
+}
+
+#[derive(Deserialize)]
+struct ReportModelReq {
+    #[serde(default)]
+    same: bool,
+    harness: Option<String>,
+    profile: Option<String>,
+    model: Option<String>,
+}
+
+/// The user picks the model this chat's report and run watching run on: its own, or one of
+/// [`chat_report_models`].
+async fn set_chat_report_model(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ReportModelReq>,
+) -> ApiResult {
+    let pick = match (req.same, req.harness, req.model) {
+        (true, None, None) => None,
+        (false, Some(harness), Some(model)) => Some(crate::engine::watch::route_id(
+            &harness,
+            req.profile.as_deref(),
+            &model,
+        )),
+        _ => {
+            return Err(bad_request(
+                "Send either `same: true` or a `harness` and `model`.",
+            ))
+        }
+    };
+    let catalog = harnesses_payload(&state, &HarnessQuery::default()).await;
+    blocking_api(move || {
+        let store = Store::open()?;
+        let chat = store
+            .get_chat_session(&id)?
+            .ok_or_else(|| not_found("chat session"))?;
+        let routes = report_routes(&store, &catalog)?;
+        crate::engine::watch::check_pick(&chat, pick.as_deref(), &routes).map_err(bad_request)?;
+        store.set_chat_watch_route(&chat.id, pick.as_deref())?;
+        crate::engine::watch::remember_routes(&catalog);
+        Ok(Json(crate::engine::watch::report::picked_model(
+            &state.chat,
+            &store,
+            &chat.id,
+        )?))
+    })
+    .await
+}
+
 async fn chat_session_experiments(Path(id): Path<String>) -> ApiResult {
     let store = Store::open()?;
     store
@@ -13266,6 +13444,7 @@ mod tests {
             run_watching: true,
             seen_nudges: Vec::new(),
             created_at: None,
+            status_for_new_chats: true,
             preferred_agent: Some(StoredAgentSelection {
                 profile: None,
                 harness: "codex".into(),
@@ -13310,6 +13489,7 @@ mod tests {
             run_watching: true,
             seen_nudges: Vec::new(),
             created_at: None,
+            status_for_new_chats: true,
         };
         let catalog = json!({"harnesses": [{"id":"claude-code", "agentReady":true,"defaultModel":"opus",
             "models":[{"id":"opus"}], "options":{"defaultPermissionMode":"plan", "reasoningLevels":[{"id":"default"}]}}]});
@@ -13370,6 +13550,7 @@ mod tests {
             run_watching: true,
             seen_nudges: Vec::new(),
             created_at: None,
+            status_for_new_chats: true,
         };
         let catalog = json!({"harnesses":[
             {"id":"codex", "agentReady":true, "models":[], "options":{}},
@@ -13676,6 +13857,7 @@ mod tests {
                 model_sightings: None,
                 run_banner: None,
                 run_watching: None,
+                status_for_new_chats: None,
                 seen_nudges: None,
             }),
         )
@@ -14659,6 +14841,124 @@ mod tests {
             .unwrap();
         let batch = next_batch().await;
         assert_eq!(card(&batch, "open")["session"]["lastRun"]["id"], "run-1");
+    }
+
+    #[tokio::test]
+    async fn report_routes_answer_for_known_chats_and_say_why_they_refuse() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let state = test_state();
+        let store = Store::open().unwrap();
+        let unknown = chat_report(Path("missing".into())).await.unwrap_err();
+        assert_eq!(unknown.0, StatusCode::NOT_FOUND);
+        let unknown = refresh_chat_report(State(state.clone()), Path("missing".into()))
+            .await
+            .unwrap_err();
+        assert_eq!(unknown.0, StatusCode::NOT_FOUND);
+
+        store.put_chat_session("chat", "opencode", None);
+        assert_eq!(
+            chat_report(Path("chat".into())).await.unwrap().0,
+            Value::Null
+        );
+        let closed = refresh_chat_report(State(state.clone()), Path("chat".into()))
+            .await
+            .unwrap_err();
+        assert_eq!(closed.0, StatusCode::CONFLICT);
+        assert!(closed.1.contains("off for this chat"), "{}", closed.1);
+
+        store.put_chat_session("claude", "claude-code", None);
+        let closed = refresh_chat_report(State(state.clone()), Path("claude".into()))
+            .await
+            .unwrap_err();
+        assert_eq!(closed.0, StatusCode::CONFLICT);
+        let on = set_chat_report_enabled(
+            State(state.clone()),
+            Path("claude".into()),
+            Json(ReportEnabledReq { enabled: true }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(
+            on,
+            json!({"body": null, "updatedAt": null, "enabled": true, "writing": false, "error": null, "needsModel": null})
+        );
+        store
+            .chat_report_blocked("claude", "Sign in to Claude Code to update the report.", 2)
+            .unwrap();
+        let mut events = state.chat.subscribe();
+        let retried = refresh_chat_report(State(state.clone()), Path("claude".into()))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(retried, on, "Retry drops the error at once");
+        let (name, event) = events.try_recv().unwrap();
+        assert_eq!(
+            (name, &event["report"]),
+            ("chat.report", &on),
+            "and tells the page"
+        );
+        store
+            .set_chat_session_model("chat", "deepseek/deepseek-v4")
+            .unwrap();
+        let catalog = json!({"harnesses": [{"id": "opencode", "name": "OpenCode", "agentReady": true, "models": [
+            {"id": "opencode/big-pickle-free", "displayName": "Big Pickle"},
+            {"id": "deepseek/deepseek-v4", "displayName": "DeepSeek V4"},
+        ]}]});
+        crate::engine::watch::remember_routes(&catalog);
+        let unpicked = set_chat_report_enabled(
+            State(state.clone()),
+            Path("chat".into()),
+            Json(ReportEnabledReq { enabled: true }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(unpicked["needsModel"]["same"], true);
+
+        *state.harnesses.lock().await = Some((std::time::Instant::now(), catalog));
+        let models = chat_report_models(State(state.clone()), Path("chat".into()))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(
+            models["models"],
+            json!([
+                {"harness": "opencode", "profile": null, "model": "opencode/big-pickle-free"},
+                {"harness": "opencode", "profile": null, "model": "deepseek/deepseek-v4"},
+            ])
+        );
+        let pick = |body: Value| {
+            set_chat_report_model(
+                State(state.clone()),
+                Path("chat".into()),
+                Json(serde_json::from_value(body).unwrap()),
+            )
+        };
+        let neither = pick(json!({})).await.unwrap_err();
+        assert_eq!(neither.0, StatusCode::BAD_REQUEST);
+        let gone = pick(json!({"harness": "opencode", "model": "gone/model"}))
+            .await
+            .unwrap_err();
+        assert_eq!(gone.0, StatusCode::BAD_REQUEST);
+        assert!(gone.1.contains("no longer offered"), "{}", gone.1);
+        let picked = pick(models["models"][0].clone()).await.unwrap().0;
+        assert_eq!(picked["needsModel"], Value::Null);
+        assert!(store.chat_report("chat").unwrap().unwrap().due_at.is_some());
+        let same = pick(json!({"same": true})).await.unwrap().0;
+        assert_eq!(same["needsModel"], Value::Null);
+        assert_eq!(store.chat_watch_route("chat").unwrap(), Some(None));
+
+        let saved = set_ui_state(
+            State(state),
+            Json(serde_json::from_value(json!({"statusForNewChats": false})).unwrap()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.0["statusForNewChats"], false);
+        assert!(!store.ui_state().unwrap().status_for_new_chats);
     }
 
     #[tokio::test]

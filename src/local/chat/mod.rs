@@ -11065,6 +11065,9 @@ async fn process_run_notices(
         }
         match send_run_notice_batch(chat, &session_id, &notices, guard).await {
             Ok(submission @ (TurnSubmission::Started(_) | TurnSubmission::Existing(_))) => {
+                if let Err(error) = crate::engine::watch::report::after_turn(&store, &session_id) {
+                    eprintln!("orx up: report: marking chat {session_id}'s results: {error:#}");
+                }
                 if let Some(turn) =
                     store.get_chat_turn_by_client_id(&session_id, &notices[0].client_turn_id)?
                 {
@@ -15148,6 +15151,7 @@ mod run_wakeup_tests {
             let output = crate::process::command(std::env::current_exe().unwrap())
                 .args(["--exact", "local::chat::run_wakeup_tests::outbox_wakes_on_idle_and_bus_and_retires_or_retries_delivery_failures", "--nocapture"])
                 .env(CHILD, "1").env("ORX_DATA_DIR", &dir).env("ORX_NO_TELEMETRY", "1")
+                .env("ORX_WATCH_WITH", "claude-code")
                 .output().unwrap();
             assert!(
                 output.status.success(),
@@ -15242,6 +15246,7 @@ for line in sys.stdin:
         custom.id = format!("acp:{}", uuid::Uuid::new_v4());
         crate::local::acp::save(custom, true).unwrap();
 
+        store.set_chat_report_enabled("other", true, 1).unwrap();
         let tx = store.begin().unwrap();
         tx.execute(
             "UPDATE chat_sessions SET harness = ?1, model = 'fixture-model' WHERE id = 'other'",
@@ -15294,6 +15299,13 @@ for line in sys.stdin:
         .unwrap();
         assert_eq!(count_turns(), baseline + 1);
         assert!(store.run_notice_batch("other").unwrap().is_empty());
+        assert!(
+            store
+                .chat_report("other")
+                .unwrap()
+                .is_some_and(|report| report.turn_due_at.is_some()),
+            "delivered results make the chat's report due once its reaction ends"
+        );
         restarted.interrupt("other").await.unwrap();
         store
             .insert_run_notice("run_x", "other", "notify", "bus", "bus result", 1)

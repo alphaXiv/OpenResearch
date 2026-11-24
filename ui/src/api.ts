@@ -210,6 +210,8 @@ export interface UiState {
   opencodeFreeModels: boolean;
   /** Whether a cheap model looks at runs; absent from an older server, which has no watcher. */
   runWatching?: boolean;
+  /** Whether a chat without a status yet starts one by itself; absent from an older server, which has no status. */
+  statusForNewChats?: boolean;
   /** The `provider/model` that reviews OpenCode's Auto requests; null is the chat's own. */
   opencodeReviewModel: string | null;
   /** The model families the picker lists first. */
@@ -252,6 +254,31 @@ export interface ModelNudge {
 }
 
 export type RunBannerLevel = "line" | "strip";
+
+/** A chat's status: one Markdown document its cheap model rewrites at each milestone. */
+export interface ChatReport {
+  /** The first line is a one-sentence headline of what the agent is doing now; null until the first write. */
+  body: string | null;
+  updatedAt: number | null;
+  /** False once the user turned the status off for this chat; the body is kept. */
+  enabled: boolean;
+  /** Set once the status could open but no model can write it; `same` when the chat's own model can. */
+  needsModel: { same: boolean } | null;
+  /** An update is in flight. */
+  writing: boolean;
+  /** The last update that failed, cleared by the next success. */
+  error: { message: string; at: number } | null;
+}
+
+/** A model that can write a chat's status, as the agent lists it. */
+export interface ChatReportRoute {
+  harness: HarnessId;
+  profile: string | null;
+  model: string;
+}
+
+/** What writes a chat's status: the chat's own model, or one of its listed routes. */
+export type ChatReportChoice = { same: true } | ChatReportRoute;
 
 /** How much of the research the agent owns before checking in. */
 export type Autonomy = "copilot" | "agentic";
@@ -2364,6 +2391,7 @@ export function createApi(
     collapsedModelSections?: string[];
     runBanner?: RunBannerLevel;
     runWatching?: boolean;
+    statusForNewChats?: boolean;
     seenNudges?: string[];
   }) => post<UiState>("/api/settings/ui-state", body);
 
@@ -3436,6 +3464,28 @@ export function createApi(
     return Array.isArray(data) ? { runs: data } : data;
   };
 
+  /** Null until the chat reaches its first milestone or the user turns it on; false from an older server, which keeps no status. */
+  const getChatReport = async (sessionId: string, signal?: AbortSignal): Promise<ChatReport | null | false> => {
+    const response = await fetch(`/api/chat/sessions/${sessionId}/report`, { signal });
+    if (response.status === 404) return false;
+    return json<ChatReport | null>(response);
+  };
+
+  /** The models this user can run to write the chat's status. */
+  const listChatReportModels = (sessionId: string, signal?: AbortSignal) =>
+    get<{ models: ChatReportRoute[] }>(`/api/chat/sessions/${sessionId}/report/models`, signal).then((r) => r.models);
+
+  /** Picks the model that writes the chat's status, and watches its runs. */
+  const chooseChatReportModel = (sessionId: string, choice: ChatReportChoice) =>
+    post<ChatReport>(`/api/chat/sessions/${sessionId}/report/model`, choice);
+
+  /** Refused with a message the user can act on when this chat can't keep a status. */
+  const setChatReportEnabled = (sessionId: string, enabled: boolean) =>
+    post<ChatReport>(`/api/chat/sessions/${sessionId}/report/enabled`, { enabled });
+
+  const refreshChatReport = (sessionId: string) =>
+    post<ChatReport>(`/api/chat/sessions/${sessionId}/report/refresh`);
+
   const getRunMonitor = (runId: string, signal?: AbortSignal) =>
     get<RunMonitor>(`/api/runs/${encodeURIComponent(runId)}/monitor`, signal);
 
@@ -3708,6 +3758,11 @@ export function createApi(
     cancelOpenCodeSignIn,
     listChatActiveRuns,
     listChatShownRuns,
+    getChatReport,
+    setChatReportEnabled,
+    listChatReportModels,
+    chooseChatReportModel,
+    refreshChatReport,
     getRunMonitor,
     editRunChart,
     dismissShownRun,

@@ -7,6 +7,7 @@ import {
   useState,
   type ButtonHTMLAttributes,
   type CSSProperties,
+  type ReactElement,
   type ReactNode,
   type RefObject,
 } from "react";
@@ -317,6 +318,8 @@ export function ModelPicker({
   onSelectNativeOption,
   onStartHarness,
   canNudge = false,
+  only,
+  trigger,
 }: {
   value: ModelSelection | null;
   onSelect: (value: ModelSelection) => void;
@@ -339,6 +342,10 @@ export function ModelPicker({
   onStartHarness?: (harness: Harness, model: string) => void;
   /** Whether this composer shows the model feed's nudge: the open chat's does. */
   canNudge?: boolean;
+  /** Lists only the models this accepts, and no agent to sign in to. */
+  only?: (harness: Harness, model: string) => boolean;
+  /** Stands in for the pill that names the picked model. */
+  trigger?: ReactElement;
 }) {
   const { portalContainer } = useContext(WorkspaceDomContext);
 
@@ -354,14 +361,20 @@ export function ModelPicker({
   const pickedHarness = value?.harness;
   const pickedProfile = value?.profile;
   const pickedModel = value?.model;
-  const { harnesses, agents, selectedHarness, selectedModel, selectedAgent, lines, selectedLine } = useMemo(
-    () => pickerLines(
+  const { harnesses, agents, selectedHarness, selectedModel, selectedAgent, lines, selectedLine } = useMemo(() => {
+    const listed = pickerLines(
       { catalog, providers, endpoints, hiddenModels: uiState?.hiddenModels ?? EMPTY_IDS },
       pickedHarness ? { harness: pickedHarness, profile: pickedProfile, model: pickedModel ?? null } : null,
       sessionHarness,
-    ),
-    [catalog, providers, endpoints, uiState?.hiddenModels, pickedHarness, pickedProfile, pickedModel, sessionHarness],
-  );
+    );
+    if (!only) return listed;
+
+    const lines = listed.lines.flatMap((line) => {
+      const offers = line.offers.filter((offer) => only(offer.tile.harness, offer.model.id));
+      return offers.length ? [{ ...line, offers }] : [];
+    });
+    return { ...listed, lines, selectedLine: lines.find((line) => line.key === listed.selectedLine?.key) };
+  }, [catalog, providers, endpoints, uiState?.hiddenModels, pickedHarness, pickedProfile, pickedModel, sessionHarness, only]);
   const favorites = useMemo(() => new Set(uiState?.favoriteModels ?? []), [uiState]);
   const releases = feed?.releases ?? NO_RELEASES;
   // Not memoized: a model stops being new as time passes, with nothing else changing.
@@ -370,7 +383,7 @@ export function ModelPicker({
   const [filter, setFilter] = useState("");
   const signIn = useAgentSignIn();
   // An agent signed out of research it ran keeps a row here, so signing in again is one click away.
-  const signedOut = catalog.filter((h) => listedSignedOut(h) && !h.off).flatMap((h) => {
+  const signedOut = catalog.filter((h) => !only && listedSignedOut(h) && !h.off).flatMap((h) => {
     const name = h.profile?.name ?? harnessDisplayName(h);
     const open = signIn(h);
     return open && name.toLowerCase().includes(filter.trim().toLowerCase()) ? [{ h, name, open }] : [];
@@ -455,6 +468,12 @@ export function ModelPicker({
     setFilter("");
     setMenu("model");
     searchRef.current?.focus();
+  };
+  const openOnArrowDown = (event: React.KeyboardEvent) => {
+    if (event.key !== "ArrowDown") return;
+    event.preventDefault();
+    dismissCallout();
+    openModels();
   };
 
   // The picker opens on the model a callout pointed at, else on the newest release; typing still searches.
@@ -622,7 +641,7 @@ export function ModelPicker({
     <DirectionProvider direction={document.documentElement.dir === "rtl" ? "rtl" : "ltr"}>
       <div
         className="model-picker relative inline-flex min-w-0 items-center gap-0.5"
-        data-onboarding="model-picker"
+        data-onboarding={trigger ? undefined : "model-picker"}
       >
         <Popover.Root
           open={!disabled && menu === "model"}
@@ -633,7 +652,7 @@ export function ModelPicker({
             if (open) dismissCallout();
           }}
         >
-          <Tooltip interactive disabled={Boolean(callout)} content={hint} className="min-w-0 max-w-full rounded-md">
+          {trigger ? <Popover.Trigger ref={modelTriggerRef} disabled={disabled} render={trigger} onKeyDown={openOnArrowDown} /> : <Tooltip interactive disabled={Boolean(callout)} content={hint} className="min-w-0 max-w-full rounded-md">
             <Popover.Trigger
               ref={modelTriggerRef}
               type="button"
@@ -642,13 +661,7 @@ export function ModelPicker({
               aria-label={m.a11y_chat_model({ label: hint })}
               aria-description={callout ? `${lineName(callout.line)}, ${callout.text}` : undefined}
               {...(callout && calloutHover)}
-              onKeyDown={(event) => {
-                if (event.key === "ArrowDown") {
-                  event.preventDefault();
-                  dismissCallout();
-                  openModels();
-                }
-              }}
+              onKeyDown={openOnArrowDown}
             >
               {agentShown ? (
                 <AgentIconTile icon={agentShown.icon} brand={agentShown.brand} size="xs" />
@@ -661,7 +674,7 @@ export function ModelPicker({
               </span>
               <ChevronDown size={14} className="shrink-0 text-muted" />
             </Popover.Trigger>
-          </Tooltip>
+          </Tooltip>}
           <Popover.Portal container={portalContainer}>
             <Popover.Positioner
               className="z-50"
