@@ -8254,7 +8254,7 @@ export function ChatPanel({
     const scope = composerScopeRef.current;
     const visit = projectVisitRef.current;
     let session = sideParentSessionId
-      ? await mutOpenSideChat.runAsHeadlessPromise(workspace, sideParentSessionId, {})
+      ? await mutOpenSideChat.runAsHeadlessPromise(workspace, sideParentSessionId, selection, {})
       : await mutCreateChatSession.runAsHeadlessPromise(workspace, projectId, selection.harness, {
         profile: selection.profile,
         model: selection.model,
@@ -10298,7 +10298,7 @@ export function ChatPanel({
                   autonomy={openSession?.autonomy ?? draftAutonomy ?? preferredAutonomy}
                   onSelectAutonomy={setAutonomy}
                   disabled={switchingAgent}
-                  lockHarness={busy || switchingAgent || (!openSession && !!sideParentSessionId)}
+                  lockHarness={busy || switchingAgent}
                   openRequest={modelPickerRequest}
                   canNudge={!embedded && !contentInert}
                   nativeOptions={openSession?.harness.startsWith("acp:") ? acpOptions.filter((option) => option.category !== "model") : []}

@@ -3286,9 +3286,9 @@ export function createApi(
   /** The message an agent cited by ref: where it lives, the agent that wrote it if one did, and its first words. */
   const citedMessage = (cited: string) => get<CitedMessage>(`/api/chat/messages/${encodeURIComponent(cited)}`);
 
-  /** Branch a persistent side chat off a snapshot of `sessionId`'s transcript. */
-  const openSideChat = (sessionId: string) =>
-    post<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}/side`, {}).then(
+  /** Branch a persistent side chat off a snapshot of `sessionId`'s transcript, on `agent` or else the parent's agent. */
+  const openSideChat = (sessionId: string, agent?: AgentSelection) =>
+    post<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}/side`, { agent }).then(
       (r) => r.session,
     );
 

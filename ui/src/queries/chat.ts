@@ -1,5 +1,5 @@
 import type { WorkspaceEvents } from "../workspace";
-import type { Api, ChatSession, ChatSessionPatch, HarnessId, NativeChat, PromptAnswer, SidebarCard, SidebarChatPage, SidebarChatTotals, TurnOptions } from "../api";
+import type { AgentSelection, Api, ChatSession, ChatSessionPatch, HarnessId, NativeChat, PromptAnswer, SidebarCard, SidebarChatPage, SidebarChatTotals, TurnOptions } from "../api";
 import type { ChatEvent } from "../events";
 import type { WorkspaceClient } from "./client";
 
@@ -465,7 +465,7 @@ export const mutCreateChatSession = mutations.define({
 
 export const mutOpenSideChat = mutations.define({
   id: "chat/session/side",
-  mutate: (ws: Workspace, parentSessionId: string) => ws.api.openSideChat(parentSessionId),
+  mutate: (ws: Workspace, parentSessionId: string, agent: AgentSelection) => ws.api.openSideChat(parentSessionId, agent),
   optimistic: () => {},
   key: ({ args: [ws, parentSessionId] }) => [ws.identity, parentSessionId],
   describe: "open a side chat",

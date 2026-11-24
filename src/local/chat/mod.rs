@@ -8443,8 +8443,12 @@ impl ChatHost {
     }
 
     /// Branch a side chat off `parent`, seeded with a snapshot of the parent's
-    /// live branch as it is right now.
-    pub async fn open_side_chat(&self, parent: &StoredChatSession) -> Result<StoredChatSession> {
+    /// live branch as it is right now, on `agent` or else the parent's agent.
+    pub async fn open_side_chat(
+        &self,
+        parent: &StoredChatSession,
+        agent: Option<crate::store::StoredAgentSelection>,
+    ) -> Result<StoredChatSession> {
         let catalog = self.harnesses.lock().await.clone();
         let store = Store::open()?;
         let transaction = store.begin_immediate()?;
@@ -8453,6 +8457,14 @@ impl ChatHost {
             .ok_or_else(|| anyhow!("chat session is gone"))?;
         let messages = store.list_chat_messages(&parent.id)?;
         let mut session = side_chat_session(&parent, &messages);
+        if let Some(agent) = agent {
+            session.harness = agent.harness;
+            session.profile_id = agent.profile;
+            session.model = agent.model;
+            session.service_tier = agent.service_tier;
+            session.permission_mode = agent.permission_mode;
+            session.reasoning_level = agent.reasoning_level;
+        }
         if let Some((_, payload)) = catalog.as_ref() {
             session.model = crate::local::harness::selected_model(
                 payload,
