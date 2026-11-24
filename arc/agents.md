@@ -125,13 +125,13 @@ Through it an agent delegates (`src/local/chat/delegation.rs`). It names a versi
 
 **A delegate is a side chat of the chat that started it,** in the same worktree unless it asks for its own, and out of the sidebar. It starts with only its task, runs with a permission mode no broader than its delegator's, and records who delegated to it. Stopping a chat stops every delegate below it. A retry finds the chat the first attempt started, by an id derived from the request.
 
-**Any chat can subscribe to any other** (`src/local/chat/news.rs`), hearing each finished turn and each question of its target, once the subscriber is idle or inside a turn through `wait`; delivery claims prevent duplicates. A turn that only answered the subscriber's own news is no news to it, or two chats subscribed to each other would wake each other forever. A delegator subscribes to its delegates. Run results travel separately ([experiments](experiments.md#notices)).
+**Any chat can subscribe to any other** (`src/local/chat/news.rs`), hearing each finished turn of its target and each question a delegate asks, once the subscriber is idle or inside a turn through `wait`; delivery claims prevent duplicates. A turn that only answered the subscriber's own news is no news to it, or two chats subscribed to each other would wake each other forever. A delegator subscribes to its delegates. Run results travel separately ([experiments](experiments.md#notices)).
 
 **Agents write to each other in the open.** What orx or another chat's agent writes into a chat reaches its agent opening with `[orx]`, so the agent can tell it from the user, and the transcript keeps who sent it.
 
 **Messages travel by reference.** A user message reaches its agent tagged with a short ref, and a ref in a task or message expands to the cited message, its chat and its attachments, so a delegate reads the user's own words rather than a paraphrase.
 
-**Any agent can reach any chat.** It can read, message or answer any chat, and stop only its own delegates; what the receiving agent does with a message is left to that chat's permission mode. Agents answer questions; approvals stay with the user.
+**Any agent can reach any chat.** It can read, message or answer any chat, and stop only its own delegates; what the receiving agent does with a message is left to that chat's permission mode. Agents answer a delegate's questions; approvals, and questions from a chat that is no delegate, stay with the user.
 
 **Nesting is deliberate.** By default a delegate cannot delegate; a delegation or a setting can allow it, and every delegate is told how deep it is.
 
