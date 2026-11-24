@@ -288,7 +288,7 @@ Through it an agent delegates (`src/local/chat/delegation.rs`). It names a versi
 
 **A delegate is a side chat of the chat that started it,** in the same worktree, unless it asks for its own. Either way it stays out of the sidebar. It starts with only its task, runs with a permission mode no broader than its delegator's, and records who delegated to it, which counts its depth. A harness with no permission modes takes a delegate only from a chat that may do anything. Stopping a chat stops every delegate below it. A chat an agent starts without hearing from it is no delegate and stands as the user's; an agent does this only when the user asks for a top-level chat. A retry finds the chat the first attempt started, by an id derived from the request.
 
-**Any chat can subscribe to any other** (`src/local/chat/news.rs`), hearing each finished turn and each question of its target. Pending news arrives in one visible turn once the subscriber is idle, or inside a turn through `wait`, and delivery claims prevent duplicates. A turn that ends while its own delegates work is not an answer yet. A turn that only answered the subscriber's own news is no news to it, or two chats subscribed to each other would wake each other forever. Run results travel separately, in hidden turns ([experiments](experiments.md)).
+**Any chat can subscribe to any other** (`src/local/chat/news.rs`), hearing each finished turn of its target and each question a delegate asks. Pending news arrives in one visible turn once the subscriber is idle, or inside a turn through `wait`, and delivery claims prevent duplicates. A turn that ends while its own delegates work is not an answer yet. A turn that only answered the subscriber's own news is no news to it, or two chats subscribed to each other would wake each other forever. Run results travel separately, in hidden turns ([experiments](experiments.md)).
 
 A delegator subscribes to its delegates. A delegate the user keeps stops reporting and stands as a side chat, or alone with its own worktree, and the delegator's later `subscribe` or `wait` does not undo that. A side chat reports only when its agent `send`s.
 
@@ -296,7 +296,7 @@ A delegator subscribes to its delegates. A delegate the user keeps stops reporti
 
 **Messages travel by reference.** A user message reaches its agent tagged with a short ref, unless a slash command needs its leading `/`. A ref in a task or message expands to the cited message, its chat and its attachments, so a delegate reads the user's own words rather than a paraphrase.
 
-**Any agent can reach any chat.** It can read, message or answer any chat, and stop only its own delegates; what the receiving agent does with a message is left to that chat's permission mode. Agents answer questions; approvals stay with the user.
+**Any agent can reach any chat.** It can read, message or answer any chat, and stop only its own delegates; what the receiving agent does with a message is left to that chat's permission mode. Agents answer a delegate's questions; approvals, and questions from a chat that is no delegate, stay with the user.
 
 **Nesting is deliberate.** By default a delegate cannot delegate. A delegation can allow it, a setting changes the default, and every delegate is told how many levels down it is.
 
