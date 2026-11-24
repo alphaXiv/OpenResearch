@@ -3589,9 +3589,14 @@ impl TurnSettings {
                 overrides.permission_mode.as_deref(),
                 self.permission_mode.as_deref(),
             )
+            // A turn with no level runs on the agent's default, which a send names.
             && matches(
                 overrides.reasoning_level.as_deref(),
-                self.reasoning_level.as_deref(),
+                Some(
+                    self.reasoning_level
+                        .as_deref()
+                        .unwrap_or(crate::local::harness::REASONING_DEFAULT_ID),
+                ),
             )
             && overrides
                 .plan_mode
@@ -8214,7 +8219,26 @@ impl ChatHost {
                     if let Ok(Some(session)) = store.get_chat_session(&session_id) {
                         if session.harness == "opencode" {
                             if let Some(nid) = &session.native_session_id {
-                                let _ = host.opencode.interrupt(&session_id, nid).await;
+                                let steers: Vec<String> = host
+                                    .pending_steers
+                                    .lock()
+                                    .unwrap()
+                                    .get(&session_id)
+                                    .into_iter()
+                                    .flatten()
+                                    .map(|steer| steer.id.clone())
+                                    .collect();
+                                match host.opencode.interrupt(&session_id, nid, &steers).await {
+                                    // Read before the stop, so the queue must not run them again.
+                                    Ok(read) => {
+                                        for id in read {
+                                            host.forget_steer(&session_id, &id);
+                                        }
+                                    }
+                                    Err(error) => eprintln!(
+                                        "orx up: stopping OpenCode in chat {session_id}: {error:#}"
+                                    ),
+                                }
                             }
                         } else if session.harness == "codex" {
                             return host.codex.interrupt_session(&session_id).await;
@@ -18835,6 +18859,11 @@ pub(crate) mod steering_tests {
         // An empty string is "unset", not a different model.
         assert!(running_settings().accept(&TurnOverrides {
             model: Some(String::new()),
+            ..TurnOverrides::default()
+        }));
+        // A turn that pinned no level runs on the agent's default, which the composer names.
+        assert!(running_settings().accept(&TurnOverrides {
+            reasoning_level: Some(crate::local::harness::REASONING_DEFAULT_ID.into()),
             ..TurnOverrides::default()
         }));
     }

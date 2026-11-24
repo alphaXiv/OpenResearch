@@ -70,6 +70,11 @@ pub(crate) fn opencode_candidates() -> Vec<PathBuf> {
     )
 }
 
+/// The OpenCode inbox id a steer goes in as, so a stop or a reconnect can find it in the transcript.
+pub(crate) fn steer_inbox_id(steer_id: &str) -> String {
+    format!("msg_{}", steer_id.trim_start_matches("q_").replace('-', ""))
+}
+
 pub(crate) fn not_found() -> crate::error::Error {
     anyhow!(
         "opencode not found (checked PATH and ~/.opencode/bin/opencode). \
@@ -861,22 +866,104 @@ impl AgentHost {
             .cloned()
     }
 
-    pub(crate) async fn interrupt(&self, session_id: &str, native_id: &str) -> Result<()> {
+    /// Stops the session's execution and cancels what waits in its inbox, a steer the
+    /// execution never read included: orx's own queue holds what runs next. Returns the
+    /// `steers` OpenCode had already delivered.
+    pub(crate) async fn interrupt(
+        &self,
+        session_id: &str,
+        native_id: &str,
+        steers: &[String],
+    ) -> Result<Vec<String>> {
         let Some(endpoint) = self.endpoint_for(session_id).await else {
-            return Ok(());
+            return Ok(Vec::new());
         };
-        endpoint
+        let stop = async {
+            endpoint
+                .client
+                .post(format!(
+                    "{}/api/session/{native_id}/interrupt",
+                    endpoint.base_url
+                ))
+                .timeout(Duration::from_secs(2))
+                .json(&json!({}))
+                .send()
+                .await?
+                .error_for_status()?;
+            Ok::<_, crate::error::Error>(())
+        }
+        .await;
+        let inbox = format!("{}/api/session/{native_id}/inbox", endpoint.base_url);
+        let cancel = async {
+            let waiting: Value = endpoint
+                .client
+                .get(&inbox)
+                .timeout(Duration::from_secs(2))
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await
+                .with_context(|| {
+                    format!("Could not read OpenCode's inbox for chat {session_id}")
+                })?;
+            for id in waiting["data"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|item| item["id"].as_str())
+            {
+                endpoint
+                    .client
+                    .delete(format!("{inbox}/{id}"))
+                    .timeout(Duration::from_secs(2))
+                    .send()
+                    .await?
+                    .error_for_status()
+                    .with_context(|| {
+                        format!("Could not cancel OpenCode prompt {id} in chat {session_id}")
+                    })?;
+            }
+            Ok::<_, crate::error::Error>(())
+        }
+        .await;
+        // Which steers OpenCode read is still worth knowing when either step failed.
+        for error in [stop.err(), cancel.err()].into_iter().flatten() {
+            eprintln!("orx up: stopping OpenCode in chat {session_id}: {error:#}");
+        }
+        if steers.is_empty() {
+            return Ok(Vec::new());
+        }
+        let export: Value = endpoint
             .client
-            .post(format!(
-                "{}/api/session/{native_id}/interrupt",
-                endpoint.base_url
+            .get(format!(
+                "{}{}",
+                endpoint.base_url,
+                endpoint.v2_export_path(native_id)
             ))
             .timeout(Duration::from_secs(2))
-            .json(&json!({}))
             .send()
             .await?
-            .error_for_status()?;
-        Ok(())
+            .error_for_status()?
+            .json()
+            .await
+            .with_context(|| {
+                format!("Could not read OpenCode's transcript for chat {session_id}")
+            })?;
+        let exported = export["data"]["messages"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        Ok(steers
+            .iter()
+            .filter(|steer| {
+                let inbox_id = steer_inbox_id(steer);
+                exported
+                    .iter()
+                    .any(|message| message["id"].as_str() == Some(inbox_id.as_str()))
+            })
+            .cloned()
+            .collect())
     }
 
     pub(crate) async fn retire_idle_children(&self) -> Result<()> {
