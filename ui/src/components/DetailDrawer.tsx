@@ -38,6 +38,7 @@ export function DetailDrawer({
   onOpenView,
   onOpenCode,
   onOpenExperiment,
+  onOpenFile,
   logSeek = null,
   onLogSeekTaken,
 }: {
@@ -53,6 +54,7 @@ export function DetailDrawer({
   onOpenView: (view: ExperimentView, runId: string | undefined, intent: TabOpenIntent) => void;
   onOpenCode: (view: CodeView, intent: TabOpenIntent) => void;
   onOpenExperiment: (id: string, intent: TabOpenIntent) => void;
+  onOpenFile: (path: string, sessionId: string | null | undefined, line: number | undefined, exp: string | undefined, ref: string | undefined, intent: TabOpenIntent) => void;
   /** Where the user asked a run's log to open; the log of that run takes it. */
   logSeek?: (LogSeek & { runId: string }) | null;
   onLogSeekTaken?: (seek: LogSeek) => void;
@@ -67,6 +69,7 @@ export function DetailDrawer({
       <ExperimentOverview
         lineageNode={node ?? null}
         onOpenExperiment={onOpenExperiment}
+        onOpenFile={onOpenFile}
         experiment={experiment}
         parentExperiment={parentExperiment}
         project={project}
