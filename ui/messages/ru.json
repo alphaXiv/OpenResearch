@@ -1991,7 +1991,7 @@
   "run_notice_log_pending": "Сохранение журнала с {host}…",
   "run_notice_log_failed": "Не удалось сохранить журнал с {host}. OpenResearch продолжит попытки; журнал по-прежнему можно открыть с хоста.",
   "run_notice_post_failed": "Не удалось отправить результат запуска в чат: {error}",
-  "log_generation_unstable": "The log keeps changing. Reload to try again.",
+  "log_generation_unstable": "Лог постоянно меняется. Перезагрузите, чтобы попробовать снова.",
   "status_not_fully_stopped": "Остановлено не полностью",
   "run_stop_now": "Остановить сейчас",
   "hover_not_fully_stopped_count": "{count} остановлено не полностью",
