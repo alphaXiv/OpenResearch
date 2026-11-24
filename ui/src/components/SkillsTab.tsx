@@ -7,7 +7,7 @@ import { mutDeleteLatexTemplate, mutDeleteUserSkill, mutUpdateUserSkill, mutUplo
 import { fmtBytes, ltr } from "../i18n";
 import { Pencil, RefreshCw, Trash2, Upload, X } from "lucide-react";
 import { useCallback, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { fmtNumber, timeAgo, type LatexTemplate, type UserSkill, type SkillDiscovery } from "../api";
+import { FileChangedError, fmtNumber, timeAgo, type LatexTemplate, type UserSkill, type SkillDiscovery } from "../api";
 import { Badge, Button, DialogContent, DialogTitle, IconButton, Spinner, Textarea, showAlert } from "./ui";
 import { copyToClipboard } from "../clipboard";
 
@@ -539,9 +539,85 @@ function LatexTemplatesCard() {
   );
 }
 
+/** The instructions every agent follows in every project. A draft survives the file changing underneath it. */
+function InstructionsCard() {
+  const workspace = useWorkspace();
+  const query = useQuery(workspace.queries.getInstructionsQuery());
+  const saved = query.data;
+  const [draft, setDraft] = useState<{ content: string; base: string } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const headingId = useId();
+  const edited = draft && saved && draft.content !== saved.content ? draft : null;
+  const conflict = !!edited && edited.base !== saved?.version;
+
+  const save = async () => {
+    if (!edited || conflict || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const next = await workspace.api.saveInstructions(edited.content, edited.base);
+      workspace.setScopedQueryData(workspace.queries.getInstructionsQuery().queryKey, () => next);
+      setDraft(null);
+    } catch (e) {
+      if (e instanceof FileChangedError) await query.refetch();
+      else setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className={CARD_CLASS_NAME} aria-labelledby={headingId}>
+      <h3 id={headingId}>{m.instructions_title()}</h3>
+      <p className={CARD_SUB_CLASS_NAME}>{m.instructions_description()}</p>
+      {!saved ? (
+        query.error ? (
+          <div role="alert" className="text-base text-accent-red">{m.common_failed_to_load({ error: query.error.message })}</div>
+        ) : (
+          <div className="flex items-center gap-2 text-sm text-subtext"><Spinner /> {m.common_loading()}</div>
+        )
+      ) : (
+        <form onSubmit={(event) => { event.preventDefault(); void save(); }}>
+          <Textarea
+            aria-labelledby={headingId}
+            value={draft?.content ?? saved.content}
+            placeholder={m.instructions_placeholder()}
+            spellCheck={false}
+            disabled={saving}
+            onChange={(event) => {
+              const content = event.target.value;
+              setDraft((current) => ({ content, base: current?.base ?? saved.version }));
+            }}
+            className="min-h-40 resize-y font-mono text-sm leading-relaxed"
+          />
+          {conflict && (
+            <div role="alert" className="mt-3 rounded-md border border-border bg-surface p-3">
+              <p className="m-0 text-sm text-text">{m.instructions_changed()}</p>
+              <pre tabIndex={0} className="my-2 max-h-60 overflow-auto whitespace-pre-wrap break-words font-mono text-sm text-subtext">{saved.content}</pre>
+              <div className="flex justify-end gap-2">
+                <Button type="button" size="small" variant="ghost" onClick={() => setDraft(null)}>{m.instructions_use_saved()}</Button>
+                <Button type="button" size="small" onClick={() => setDraft({ content: edited.content, base: saved.version })}>{m.instructions_keep_mine()}</Button>
+              </div>
+            </div>
+          )}
+          {error && <div role="alert" className="mt-2.5 text-base text-accent-red whitespace-pre-wrap">{error}</div>}
+          <div className="mt-3 flex items-center gap-3">
+            <p dir="auto" className="m-0 me-auto min-w-0 break-all text-xs text-subtext">{m.instructions_saved_in({ path: ltr(saved.path) })}</p>
+            <Button type="submit" variant="primary" disabled={!edited || conflict || saving}>
+              {saving && <Spinner />}
+              {m.common_save()}
+            </Button>
+          </div>
+        </form>
+      )}
+    </section>
+  );
+}
+
 /** What the agent brings to every session: the skills it can invoke (uploaded
  * here or mirrored from the user's coding agents) and the LaTeX templates it
  * writes papers into. Everything applies to every project. */
 export function SkillsTab() {
-  return <><SkillsCard /><LatexTemplatesCard /></>;
+  return <><InstructionsCard /><SkillsCard /><LatexTemplatesCard /></>;
 }

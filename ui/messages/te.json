@@ -2583,5 +2583,19 @@
   "lit_sources_save_project": "ఈ ప్రాజెక్ట్ కోసం సేవ్ చేయండి",
   "lit_sources_save_all": "అన్ని ప్రాజెక్ట్‌ల కోసం సేవ్ చేయండి",
   "lit_sources_revert": "ప్రాజెక్ట్ మూలాలను ఉపయోగించండి",
-  "project_settings_autonomy_title": "కొత్త చాట్‌ల స్వయంప్రతిపత్తి"
+  "project_settings_autonomy_title": "కొత్త చాట్‌ల స్వయంప్రతిపత్తి",
+  "instructions_title": "OpenResearch సూచనలు",
+  "instructions_description": "ప్రతి OpenResearch ప్రాజెక్ట్‌లో ప్రతి ఏజెంట్ పాటించేవి, ఉదాహరణకు రన్‌లకు పేర్లు ఎలా పెట్టాలి లేదా ఫలితాలను ఎలా నివేదించాలి. ఏజెంట్లు మార్పులను ప్రతిపాదించవచ్చు, వాటిని మీరు ఆమోదిస్తారు.",
+  "instructions_placeholder": "రన్‌లకు అవి పరీక్షించే ఆలోచన పేరు పెట్టండి. ఫలితాలను పట్టికలో నివేదించండి.",
+  "instructions_saved_in": "{path}లో సేవ్ అయింది",
+  "instructions_changed": "ఈ సూచనలు ఈ పేజీ బయట మారాయి. సేవ్ చేసిన వెర్షన్ కింద ఉంది, మీ మార్పులు ఇంకా ఎడిటర్‌లోనే ఉన్నాయి.",
+  "instructions_keep_mine": "నా మార్పులు ఉంచు",
+  "instructions_use_saved": "సేవ్ చేసిన వెర్షన్ వాడు",
+  "chat_instructions_title": "మీ OpenResearch సూచనలను మార్చాలా?",
+  "chat_instructions_note": "ప్రతి OpenResearch ఏజెంట్ తన తదుపరి వంతు నుండి వీటిని పాటిస్తుంది.",
+  "chat_instructions_stale": "ఏజెంట్ దీన్ని ప్రతిపాదించిన తర్వాత మీ సూచనలు మారాయి. దీన్ని తిరస్కరించి, మళ్లీ ప్రతిపాదించమని ఏజెంట్‌ను అడగండి.",
+  "chat_instructions_approve": "ఆమోదించు",
+  "chat_instructions_decline": "తిరస్కరించు",
+  "chat_instructions_approved": "సూచనల మార్పును ఆమోదించారు",
+  "chat_instructions_declined": "సూచనల మార్పును తిరస్కరించారు"
 }

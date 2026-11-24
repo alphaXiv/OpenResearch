@@ -2584,5 +2584,19 @@
   "lit_sources_save_project": "Save for this project",
   "lit_sources_save_all": "Save for all projects",
   "lit_sources_revert": "Use the project's sources",
-  "project_settings_autonomy_title": "Autonomy for new chats"
+  "project_settings_autonomy_title": "Autonomy for new chats",
+  "instructions_title": "OpenResearch instructions",
+  "instructions_description": "What every agent follows in every OpenResearch project, like how to name runs or report results. Agents can propose changes for you to approve.",
+  "instructions_placeholder": "Name runs after the idea they test. Report results in a table.",
+  "instructions_saved_in": "Saved in {path}",
+  "instructions_changed": "These instructions changed outside this page. The saved version is below, and your edits are still in the editor.",
+  "instructions_keep_mine": "Keep my edits",
+  "instructions_use_saved": "Use saved version",
+  "chat_instructions_title": "Change your OpenResearch instructions?",
+  "chat_instructions_note": "Every OpenResearch agent follows them from its next turn.",
+  "chat_instructions_stale": "Your instructions changed after the agent proposed this. Decline it and ask the agent to propose again.",
+  "chat_instructions_approve": "Approve",
+  "chat_instructions_decline": "Decline",
+  "chat_instructions_approved": "Approved the change to your instructions",
+  "chat_instructions_declined": "Declined the change to your instructions"
 }

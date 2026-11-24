@@ -12,6 +12,7 @@ mod adoption;
 pub mod delegation;
 pub mod env_request;
 pub(crate) mod handoff;
+pub mod instructions;
 pub mod news;
 pub mod project_move;
 pub(crate) mod subagent;
@@ -808,7 +809,7 @@ pub struct WireQuestionOption {
 pub struct WirePrompt {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub native_choices: Vec<NativePermissionChoice>,
-    /// `plan` | `permission` | `question` | `env`.
+    /// `plan` | `permission` | `question` | `env` | `instructions`.
     pub kind: String,
     /// Whether this prompt has been answered (resolved permission cards
     /// vanish; resolved plan/question cards collapse to a one-line row).
@@ -868,6 +869,15 @@ pub struct WirePrompt {
     /// env: the variables the agent asks the user to set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub variables: Vec<env_request::EnvRequestVar>,
+    /// instructions: the whole file the agent proposes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    /// instructions: the version of the file the proposal replaces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions_version: Option<String>,
+    /// instructions: the proposal as a unified diff against that version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1583,6 +1593,7 @@ fn is_initial_chat_message(transcript_text: Option<&str>, has_messages: bool) ->
 
 fn with_turn_context(
     goal: Option<&str>,
+    instructions: Option<&str>,
     autonomy: Option<&str>,
     demo_evidence_context: Option<&str>,
     shell_context: Option<&str>,
@@ -1596,6 +1607,9 @@ fn with_turn_context(
     });
     if let Some(goal) = goal.as_deref() {
         contexts.push(goal);
+    }
+    if let Some(instructions) = instructions {
+        contexts.push(instructions);
     }
     if let Some(autonomy) = autonomy {
         contexts.push(autonomy);
@@ -2850,7 +2864,7 @@ mod shell_command_tests {
         assert!(context.contains("status=\"exit 1\">\ncat missing\n</command>"));
         assert!(context.contains("<stderr>\nboom\n</stderr>"));
         assert!(context.find("ls\n</command>").unwrap() < context.find("cat missing").unwrap());
-        let turn = with_turn_context(None, None, None, Some(&context), "why?".into());
+        let turn = with_turn_context(None, None, None, None, Some(&context), "why?".into());
         assert!(turn.starts_with("<user-shell-commands>"));
         assert!(turn.ends_with("<current-user-message>\nwhy?\n</current-user-message>"));
         assert!(shell_context(&[]).is_none());
@@ -2876,11 +2890,18 @@ mod initial_message_tests {
 
     #[test]
     fn the_goal_rides_every_turn() {
-        let seeded = with_turn_context(Some("ship the sweep"), None, None, None, "continue".into());
+        let seeded = with_turn_context(
+            Some("ship the sweep"),
+            None,
+            None,
+            None,
+            None,
+            "continue".into(),
+        );
         assert!(seeded.contains("ship the sweep"));
         assert!(seeded.contains("<current-user-message>\ncontinue"));
         assert_eq!(
-            with_turn_context(None, None, None, None, "continue".into()),
+            with_turn_context(None, None, None, None, None, "continue".into()),
             "continue"
         );
     }
@@ -2889,6 +2910,7 @@ mod initial_message_tests {
     fn autonomy_rides_every_turn_after_the_goal() {
         let turn = with_turn_context(
             Some("ship the sweep"),
+            None,
             Autonomy::Copilot.turn_context(),
             None,
             None,
@@ -2902,16 +2924,29 @@ mod initial_message_tests {
 
     #[test]
     fn demo_evidence_context_is_injected_without_rewrapping_the_user_message() {
-        let first = with_turn_context(None, None, Some("demo evidence"), None, "first".into());
-        let follow_up =
-            with_turn_context(None, None, Some("demo evidence"), None, "follow up".into());
+        let first = with_turn_context(
+            None,
+            None,
+            None,
+            Some("demo evidence"),
+            None,
+            "first".into(),
+        );
+        let follow_up = with_turn_context(
+            None,
+            None,
+            None,
+            Some("demo evidence"),
+            None,
+            "follow up".into(),
+        );
         assert!(first.contains("demo evidence"));
         assert!(first.contains("<current-user-message>\nfirst"));
         assert!(follow_up.contains("demo evidence"));
         assert!(follow_up.contains("<current-user-message>\nfollow up"));
         assert_eq!(first.matches("<current-user-message>").count(), 1);
         assert_eq!(
-            with_turn_context(None, None, None, None, "ordinary".into()),
+            with_turn_context(None, None, None, None, None, "ordinary".into()),
             "ordinary"
         );
     }
@@ -4541,13 +4576,23 @@ impl ChatHost {
         prompt_id: String,
         prompt: WirePrompt,
     ) -> Result<HeldPermission> {
+        self.post_card(session_id, &prompt_id, prompt).await?;
+        Ok(self.hold_card(session_id, prompt_id))
+    }
+
+    async fn post_card(
+        self: &Arc<Self>,
+        session_id: &str,
+        prompt_id: &str,
+        prompt: WirePrompt,
+    ) -> Result<()> {
         // The card rides its own assistant message: the running turn owns its
         // in-flight message's parts (a foreign part appended there would be
         // clobbered by the turn's next flush).
         let mut msg = WireMessage {
             id: format!("msg_{prompt_id}"),
             role: "assistant".into(),
-            parts: vec![WirePart::prompt(prompt_id.clone(), prompt)],
+            parts: vec![WirePart::prompt(prompt_id.to_string(), prompt)],
             created_at: now_ms(),
             completed_at: None,
             parent_id: None,
@@ -4565,11 +4610,10 @@ impl ChatHost {
             result_native_message_id: None,
             native_harness: None,
         })?;
-        let held = self.hold_card(session_id, prompt_id);
         self.emit("chat.message", message_json(&msg, session_id));
         self.emit_session(Store::open()?.get_chat_session(session_id)?)
             .await;
-        Ok(held)
+        Ok(())
     }
 
     /// A request posted again finds the card it showed before: still open, it waits on it
@@ -7342,6 +7386,11 @@ impl ChatHost {
                         .any(|m| m.text.trim_start().starts_with('/'))
             })
             .map(|message| delegation::message_ref(&message.id));
+        // Read afresh each turn; a replayed turn keeps the context it was first sent with.
+        let instructions = match prepared_input {
+            Some(_) => None,
+            None => instructions::turn_context(&instructions::path())?,
+        };
         let mut turn_text = prepared_input.unwrap_or_else(|| {
             let mut expanded = contextualize_messages(messages, |text| {
                 if orx.is_empty() {
@@ -7361,6 +7410,7 @@ impl ChatHost {
             }
             with_turn_context(
                 session.goal.as_deref(),
+                instructions.as_deref(),
                 Autonomy::from_stored(session.autonomy.as_deref()).turn_context(),
                 super::demo::turn_context(&project.id),
                 shell_context.as_deref(),
@@ -8209,6 +8259,9 @@ impl ChatHost {
         };
         if prompt.kind == "env" {
             return self.answer_env_request(session, prompt, req).await;
+        }
+        if prompt.kind == "instructions" {
+            return self.answer_instructions(session, prompt, req).await;
         }
         if prompt.kind == "permission"
             && first_unresolved_permission_id(&req.session_id)?.as_deref()

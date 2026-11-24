@@ -1,6 +1,6 @@
 ---
 name: orx-customize
-description: "Add skills, LaTeX templates, agents or model providers to OpenResearch. Use when the user asks to save one for every project, or to fix how an agent or model shows."
+description: "Add skills, LaTeX templates, agents or model providers, or change the user's OpenResearch instructions. Use to save one for every project, remember a preference, or fix how a model shows."
 ---
 
 # Customize OpenResearch
@@ -26,6 +26,23 @@ result and report the saved `name` and whether `replaced` is true.
 Discovered native skills stay managed by the user's harness. These commands
 create explicit OpenResearch uploads. Session copies refresh on subsequent
 turns; do not promise an immediate skill reload in the running harness.
+
+## OpenResearch instructions
+
+The user's OpenResearch instructions reach every turn of every OpenResearch
+chat, for every agent, inside `<orx-instructions>`. They hold preferences for
+all their OpenResearch projects, like run naming or how to report results.
+When the user asks to remember such a preference, change them with:
+
+| Command | Does |
+|---|---|
+| `orx instructions` | Prints the current instructions. |
+| `orx instructions propose ./draft.md` | Shows the user a card in this chat with the change against the current file. It writes nothing. |
+
+Write the whole new file, not only the addition, keeping what the user already
+has. Never write the instructions file yourself, even when you can reach it:
+only `propose` lets the user approve the change. Until a message tells you the
+user approved it, say it is waiting for them, not that it is saved.
 
 ## Agents and model providers
 

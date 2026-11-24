@@ -2584,5 +2584,19 @@
   "lit_sources_save_project": "Bu proje için kaydet",
   "lit_sources_save_all": "Tüm projeler için kaydet",
   "lit_sources_revert": "Projenin kaynaklarını kullan",
-  "project_settings_autonomy_title": "Yeni sohbetlerin özerkliği"
+  "project_settings_autonomy_title": "Yeni sohbetlerin özerkliği",
+  "instructions_title": "OpenResearch talimatları",
+  "instructions_description": "Her OpenResearch projesinde her ajanın uyduğu kurallar; örneğin çalıştırmaların nasıl adlandırılacağı veya sonuçların nasıl raporlanacağı. Ajanlar, onaylaman için değişiklik önerebilir.",
+  "instructions_placeholder": "Çalıştırmaları test ettikleri fikre göre adlandır. Sonuçları tabloyla raporla.",
+  "instructions_saved_in": "{path} konumuna kaydedildi",
+  "instructions_changed": "Bu talimatlar bu sayfanın dışında değişti. Kayıtlı sürüm aşağıda, düzenlemelerin hâlâ düzenleyicide.",
+  "instructions_keep_mine": "Düzenlemelerimi koru",
+  "instructions_use_saved": "Kayıtlı sürümü kullan",
+  "chat_instructions_title": "OpenResearch talimatların değiştirilsin mi?",
+  "chat_instructions_note": "Her OpenResearch ajanı bir sonraki turundan itibaren bunlara uyar.",
+  "chat_instructions_stale": "Ajan bunu önerdikten sonra talimatların değişti. Reddet ve ajandan yeniden önermesini iste.",
+  "chat_instructions_approve": "Onayla",
+  "chat_instructions_decline": "Reddet",
+  "chat_instructions_approved": "Talimat değişikliği onaylandı",
+  "chat_instructions_declined": "Talimat değişikliği reddedildi"
 }

@@ -2584,5 +2584,19 @@
   "lit_sources_save_project": "ذخیره برای این پروژه",
   "lit_sources_save_all": "ذخیره برای همه پروژه‌ها",
   "lit_sources_revert": "استفاده از منابع پروژه",
-  "project_settings_autonomy_title": "خودمختاری گفت‌وگوهای جدید"
+  "project_settings_autonomy_title": "خودمختاری گفت‌وگوهای جدید",
+  "instructions_title": "دستورالعمل‌های OpenResearch",
+  "instructions_description": "آنچه هر عامل در هر پروژهٔ OpenResearch دنبال می‌کند، مثل نام‌گذاری اجراها یا گزارش نتایج. عامل‌ها می‌توانند تغییراتی پیشنهاد دهند تا شما تأیید کنید.",
+  "instructions_placeholder": "اجراها را به نام ایده‌ای که می‌آزمایند نام‌گذاری کن. نتایج را در جدول گزارش کن.",
+  "instructions_saved_in": "ذخیره‌شده در {path}",
+  "instructions_changed": "این دستورالعمل‌ها بیرون از این صفحه تغییر کردند. نسخهٔ ذخیره‌شده در زیر است و ویرایش‌های شما هنوز در ویرایشگر است.",
+  "instructions_keep_mine": "نگه‌داشتن ویرایش‌هایم",
+  "instructions_use_saved": "استفاده از نسخهٔ ذخیره‌شده",
+  "chat_instructions_title": "دستورالعمل‌های OpenResearch را تغییر می‌دهید؟",
+  "chat_instructions_note": "همهٔ عامل‌های OpenResearch از نوبت بعدی خود آن‌ها را دنبال می‌کنند.",
+  "chat_instructions_stale": "دستورالعمل‌های شما پس از پیشنهاد عامل تغییر کردند. آن را رد کنید و از عامل بخواهید دوباره پیشنهاد دهد.",
+  "chat_instructions_approve": "تأیید",
+  "chat_instructions_decline": "رد",
+  "chat_instructions_approved": "تغییر دستورالعمل‌ها تأیید شد",
+  "chat_instructions_declined": "تغییر دستورالعمل‌ها رد شد"
 }

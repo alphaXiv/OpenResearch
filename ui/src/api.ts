@@ -1648,7 +1648,7 @@ export interface ChatQuestionOption {
 /** An interactive request the user acts on before the harness continues. */
 export interface ChatPrompt {
   nativeChoices?: { id: string; label: string; kind: string }[];
-  kind: "plan" | "permission" | "question" | "env";
+  kind: "plan" | "permission" | "question" | "env" | "instructions";
   resolved: boolean;
   plan?: string;
   /** plan: card synthesized from the turn's final text (no ExitPlanMode call). */
@@ -1674,6 +1674,16 @@ export interface ChatPrompt {
   nativeId?: string;
   /** env: the variables the agent asks the user to set. `question` holds its reason. */
   variables?: EnvRequestVar[];
+  /** instructions: the version of the file the proposal replaces, and the change as a unified diff. */
+  instructionsVersion?: string;
+  diff?: string;
+}
+
+/** The OpenResearch instructions every agent follows, as saved on disk. */
+export interface Instructions {
+  content: string;
+  version: string;
+  path: string;
 }
 
 export type EnvScope = "global" | "project";
@@ -3215,6 +3225,12 @@ export function createApi(
       `/api/user-skills/${encodeURIComponent(name)}`,
     ).then((r) => r.content);
 
+  const getInstructions = (signal?: AbortSignal) => get<Instructions>("/api/settings/instructions", signal);
+
+  /** Rejects with `FileChangedError` when the file is no longer at `baseVersion`. */
+  const saveInstructions = (content: string, baseVersion: string) =>
+    put<Instructions>("/api/settings/instructions", { content, baseVersion });
+
   const updateUserSkill = (name: string, content: string) =>
     put<{ skill: UserSkill }>(
       `/api/user-skills/${encodeURIComponent(name)}`,
@@ -3648,6 +3664,8 @@ export function createApi(
     deleteUserSkill,
     getUserSkillContent,
     updateUserSkill,
+    getInstructions,
+    saveInstructions,
     listChatSessions,
     listNativeChats,
     importNativeChat,

@@ -6,7 +6,7 @@ orx keeps a researcher's work on their own machine. Projects, experiments, runs,
 
 | Directory | Default location | Holds |
 | --- | --- | --- |
-| config | `~/.config/openresearch` | settings, credentials, the SSH hosts saved in orx, the telemetry outbox, the locks that cover the data directory as a whole |
+| config | `~/.config/openresearch` | settings, credentials, the SSH hosts saved in orx, the user's OpenResearch instructions (`AGENTS.md`), the telemetry outbox, the locks that cover the data directory as a whole |
 | data | `~/.local/share/openresearch` | the store, repositories, worktrees, agent homes, run logs, artifacts, attachments, per-run state, and the keepers of agents and terminals that outlive a server ([restarts](restarts.md)) |
 | cache | `~/.cache/openresearch` | what orx can download again: managed agent copies, price lists, the model feed; also the repositories older versions kept here, which [migrations](#migrations-follow-paths) move out |
 
@@ -14,7 +14,7 @@ Config and data honour their XDG variable; data and cache take an environment ov
 
 **The data directory is one relocatable unit.** Its location can come from the environment or from the settings file, and is resolved afresh each time, so a process opening the store after a move finds the new place. It is owner-only because the store holds scoped compute capabilities. The desktop app imports the overrides from the login shell, or it and a terminal `orx` would open different databases ([desktop](desktop.md)).
 
-**The config directory never moves**, because the setting that points at the data directory lives there and a lock inside the data directory could not guard a move of it. `settings.json` has one writer (`src/telemetry.rs`), a locked read-modify-write that keeps the fields a newer orx wrote; a second writer would clobber them.
+**The config directory never moves**, because the setting that points at the data directory lives there and a lock inside the data directory could not guard a move of it. `settings.json` has one writer (`src/telemetry.rs`), a locked read-modify-write that keeps the fields a newer orx wrote; a second writer would clobber them. The OpenResearch instructions in `AGENTS.md` are the user's own file: orx writes it only when they save it in Customize or approve an agent's proposal, and it leaves the machine only inside turns, to the chat's agent ([agents](agents.md#what-orx-gives-an-agent)).
 
 Saved SSH passwords and key passphrases sit in the system's credential store, never in a file ([remote](remote.md#saved-hosts)). `~/.openresearch/env` sits outside all three: the variables and compute credentials saved in compute settings, fanned out to agents and launched runs, in the one format shells and older versions read. Because it reaches runs on remote backends, a secret that must stay on this machine, like Overleaf's or an OpenCode provider's API key, belongs in the config directory instead. A project's own variables live in the store and override it for that project.
 
