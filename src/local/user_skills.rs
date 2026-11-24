@@ -480,6 +480,9 @@ pub struct SkillDiscovery {
     status: SkillRootStatus,
     accepted: usize,
     skipped: Vec<SkippedSkill>,
+    /// A skill in the root couldn't be read, so what was found is not the whole catalog.
+    #[serde(skip)]
+    partial: bool,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -559,6 +562,7 @@ fn collect_mirrored(
         status: SkillRootStatus::Scanned,
         accepted: 0,
         skipped: Vec::new(),
+        partial: false,
     };
     // A plugin can name one skill folder instead of a folder of skills.
     let only = (plugin && dir.join("SKILL.md").is_file()).then_some(dir);
@@ -577,6 +581,7 @@ fn collect_mirrored(
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
+                report.partial = true;
                 report.skip(dir, format!("unreadable entry ({:?})", error.kind()));
                 continue;
             }
@@ -589,6 +594,7 @@ fn collect_mirrored(
             Ok(metadata) if !metadata.is_dir() => continue,
             Ok(_) => {}
             Err(error) => {
+                report.partial |= error.kind() != std::io::ErrorKind::NotFound;
                 report.skip(&path, format!("unreadable entry ({:?})", error.kind()));
                 continue;
             }
@@ -604,6 +610,7 @@ fn collect_mirrored(
                 let reason = if error.kind() == std::io::ErrorKind::NotFound {
                     "no SKILL.md".to_string()
                 } else {
+                    report.partial = true;
                     format!("unreadable SKILL.md ({:?})", error.kind())
                 };
                 report.skip(&path, reason);
@@ -693,7 +700,7 @@ pub fn list_for_harness(harness: Option<&str>) -> Vec<UserSkill> {
 }
 
 /// The catalog a harness loads at startup: uploads plus its own native skills dirs, by
-/// name and description. `None` when either can't be read, which is not a change.
+/// name and description. `None` when any of it can't be read, which is not a change.
 pub fn fingerprint(harness: &str) -> Option<u64> {
     let roots = super::harness::chat_harness(harness)
         .map(|agent| agent.native_skill_roots())
@@ -706,7 +713,7 @@ fn fingerprint_in(root: &Path, harness: &str, native_roots: &[PathBuf]) -> Optio
     let mut native = Vec::new();
     for dir in native_roots {
         let report = collect_mirrored(dir, harness, harness, false, 0, &mut native);
-        if report.status == SkillRootStatus::Unreadable {
+        if report.status == SkillRootStatus::Unreadable || report.partial {
             return None;
         }
     }
@@ -1567,6 +1574,19 @@ mod tests {
         )
         .unwrap();
         assert_ne!(fingerprint_in(&root, "codex", &roots), initial);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let md = alpha.join("SKILL.md");
+            let permissions = fs::metadata(&md).unwrap().permissions();
+            fs::set_permissions(&md, fs::Permissions::from_mode(0o000)).unwrap();
+            let denied = fs::read_to_string(&md).unwrap_err();
+            let unknown = fingerprint_in(&root, "codex", &roots);
+            fs::set_permissions(&md, permissions).unwrap();
+            assert_eq!(denied.kind(), std::io::ErrorKind::PermissionDenied);
+            assert_eq!(unknown, None);
+        }
 
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(agent).unwrap();
