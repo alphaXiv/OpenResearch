@@ -308,14 +308,12 @@ export function ModelPicker({
   onSelectReasoning,
   autonomy,
   onSelectAutonomy,
-  lockHarness = false,
   disabled = false,
   openRequest = 0,
   className,
   sessionHarness,
   nativeOptions = [],
   onSelectNativeOption,
-  onStartHarness,
   canNudge = false,
 }: {
   value: ModelSelection | null;
@@ -329,14 +327,12 @@ export function ModelPicker({
   onSelectReasoning?: (id: string) => void;
   autonomy?: Autonomy;
   onSelectAutonomy?: (autonomy: Autonomy) => void;
-  lockHarness?: boolean;
   disabled?: boolean;
   openRequest?: number;
   className?: string;
   sessionHarness?: Harness;
   nativeOptions?: NativeOption[];
   onSelectNativeOption?: (optionId: string, value: string) => void;
-  onStartHarness?: (harness: Harness, model: string) => void;
   /** Whether this composer shows the model feed's nudge: the open chat's does. */
   canNudge?: boolean;
 }) {
@@ -474,7 +470,6 @@ export function ModelPicker({
   }, [openRequest, disabled]);
 
   const selectedOffer = offerOn(selectedLine, selectedAgent, selectedModel);
-  const lockedHarness = lockHarness && value ? value.profile ?? value.harness : undefined;
 
   const pick = (harness: Harness, model: string) => {
     if (disabled) return;
@@ -496,14 +491,6 @@ export function ModelPicker({
     close();
   };
 
-  /** While the chat can't change agents, a model on another agent opens a new chat with it. */
-  const run = (agent: PickerAgent, model: string) => {
-    if (lockedHarness && harnessKey(agent.harness) !== lockedHarness) {
-      close();
-      onStartHarness?.(agent.harness, model);
-    } else pick(agent.harness, model);
-  };
-
   const pickLine = (line: PickerLine, agent: PickerAgent, from: PickedFrom) => {
     const offer = (line === selectedLine && agent === selectedAgent && selectedOffer) || defaultOffer(line.offers.filter((offer) => offer.tile === agent));
     if (!offer) return;
@@ -515,7 +502,7 @@ export function ModelPicker({
       new: released.includes(line),
       free: Boolean(offer.model.free),
     });
-    run(agent, offer.model.id);
+    pick(agent.harness, offer.model.id);
   };
 
   const toggleFavorite = (family: string) =>
@@ -723,7 +710,6 @@ export function ModelPicker({
                   onCollapse={(collapsedModelSections) => mutUpdateUiState.run(workspace, { collapsedModelSections })}
                   selectedLine={selectedLine}
                   selectedAgent={selectedAgent}
-                  lockedHarness={lockedHarness}
                   onPick={pickLine}
                   onToggleFavorite={toggleFavorite}
                 >

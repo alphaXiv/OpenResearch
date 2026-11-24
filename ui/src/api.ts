@@ -1982,6 +1982,8 @@ export interface SidebarChatPage { sessions: ChatSession[]; next: SidebarChatCur
 
 /** Per-session (and per-turn) composer selections beyond the harness itself. */
 export interface TurnOptions {
+  /** Another agent takes the chat over: the running turn stops and this message runs next on it. */
+  agent?: AgentSelection;
   model?: string | null;
   serviceTier?: string | null;
   permissionMode?: string | null;
@@ -3350,9 +3352,10 @@ export function createApi(
     mode?: "steer",
   ) =>
     post<{ ok: boolean; turn?: ChatTurnResult; steered?: boolean }>(
-      `/api/chat/sessions/${sessionId}/message`, {
+      `/api/chat/sessions/${sessionId}/${opts.agent ? "takeover" : "message"}`, {
       text,
       clientTurnId,
+      agent: opts.agent,
       model: opts.model,
       serviceTier: opts.serviceTier,
       permissionMode: opts.permissionMode,

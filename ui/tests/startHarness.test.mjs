@@ -4,6 +4,9 @@ import { act } from "react";
 import { m } from "../src/paraglide/messages.js";
 import { codex, composer, renderChat, session } from "./chat.mjs";
 import { settle } from "./render.mjs";
+
+/** The open dialog's button labelled `label`. */
+const dialogButton = (label) => [...document.querySelectorAll('[role="dialog"] button, [role="alertdialog"] button')].find((button) => button.textContent.trim() === label);
 import { model } from "./models.mjs";
 
 const claude = {
@@ -23,7 +26,6 @@ test("picking another agent's model in a started chat hands the chat over, with 
   await act(async () => document.querySelector('[data-onboarding="model-picker"] button').click());
   const sections = [...document.querySelectorAll("[data-section]")].map((section) => section.dataset.section);
   assert.deepEqual(sections, ["claude", "openai"]);
-  assert.ok(!document.body.textContent.includes(m.model_picker_new_chat_with({ agent: "Claude Code" })));
 
   await act(async () => document.querySelector(`button[aria-label="${m.model_picker_model_on({ model: "Opus 5.5", agent: "Claude Code" })}"]`).click());
   await settle();
@@ -54,22 +56,30 @@ test("a handoff the server refuses says why and keeps the chat on its agent", as
   assert.ok(document.body.textContent.includes(error));
 });
 
-test("picking another agent's model on a busy chat opens an uncreated draft with it", async () => {
-  const chat = await renderChat("/projects/p/tasks/s", { sessions: [session("s", { busy: true })], harnesses: [codex, claude] });
-  await act(async () => document.querySelector('[data-onboarding="model-picker"] button').click());
-  const label = m.model_picker_model_on({ model: "Opus 5.5", agent: "Claude Code" });
-  const other = [...document.querySelectorAll(`button[aria-label="${label}"]`)];
-  assert.ok(other.length > 0 && other.every((button) => button.getAttribute("aria-description") === m.model_picker_new_chat_with({ agent: "Claude Code" })));
-  const own = document.querySelector(`button[aria-label="${m.model_picker_model_on({ model: "GPT-6 Astra", agent: "Codex" })}"]`);
-  assert.equal(own.getAttribute("aria-description"), null);
-
-  await act(async () => other[0].click());
-  await settle();
-  assert.equal(location.pathname, "/projects/p/tasks/new");
+test("another agent picked during a turn takes the chat over with the next message", async () => {
+  const chat = await renderChat("/projects/p/tasks/s", {
+    sessions: [session("s", { busy: true })],
+    harnesses: [{ ...codex, supportsSteering: true }, claude],
+    routes: { "POST /api/chat/sessions/s/takeover": () => ({ ok: true, turn: { turnId: "ct", queued: true, existing: false } }) },
+  });
+  await composer().pick("Opus 5.5", "Claude Code");
+  assert.equal(location.pathname, "/projects/p/tasks/s");
   assert.deepEqual(agentSwitches(chat), []);
-  const preference = chat.requests.filter(({ request, body }) => request === "POST /api/settings/ui-state" && body.preferredAgent).at(-1).body.preferredAgent;
-  assert.deepEqual(preference, { harness: "claude-code", profile: null, model: "opus", serviceTier: null, permissionMode: "auto", reasoningLevel: "default" });
   assert.match(document.querySelector('[data-onboarding="model-picker"] button').getAttribute("aria-label"), /Opus 5\.5/);
+
+  await composer().type("take it from here");
+  await composer().send();
+  const posts = () => chat.requests.filter(({ request }) => request === "POST /api/chat/sessions/s/takeover").map(({ body }) => body);
+  assert.deepEqual(posts(), [], "nothing is sent until the user agrees to stop the turn");
+  const dialog = document.querySelector('[role="dialog"], [role="alertdialog"]');
+  assert.match(dialog.textContent, /Codex/, "the dialog names the agent whose turn stops");
+  assert.match(dialog.textContent, /Claude Code/, "and the agent that takes over");
+  await act(async () => dialogButton(m.chat_takeover_confirm()).click());
+  await settle();
+  const sent = posts();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].mode, undefined, "a takeover never steers the running turn");
+  assert.deepEqual(sent[0].agent, { harness: "claude-code", profile: null, model: "opus", serviceTier: null, permissionMode: "auto", reasoningLevel: "default" });
 });
 
 test("a side composer restores its draft and attachments after unmount", async () => {
@@ -102,27 +112,70 @@ test("a new workspace starts with empty composers, and late panel cleanups canno
   assert.deepEqual([composer(0).draft, composer(1).draft], ["main", "side"]);
 });
 
-const pinnedCodex = { "GET /api/projects/p/settings": () => ({ agent: { harness: "codex", model: "gpt-6-astra", permissionMode: null, reasoningLevel: null } }) };
-const opus = m.model_picker_model_on({ model: "Opus 5.5", agent: "Claude Code" });
-const mainModel = () => document.querySelectorAll('[data-onboarding="composer"]')[0].querySelector('[data-onboarding="model-picker"] button').getAttribute("aria-label");
-
-test("a new chat opened with another agent keeps it over the project's agent", async () => {
-  await renderChat("/projects/p/tasks/s", { sessions: [session("s", { busy: true })], harnesses: [codex, claude], routes: pinnedCodex });
-  await act(async () => document.querySelector('[data-onboarding="model-picker"] button').click());
-  await act(async () => document.querySelector(`button[aria-label="${opus}"]`).click());
+test("a refused takeover keeps the picked agent for the next try", async () => {
+  const error = "This chat already uses another ACP agent. Start a new chat for this agent.";
+  await renderChat("/projects/p/tasks/s", {
+    sessions: [session("s", { busy: true })],
+    harnesses: [codex, claude],
+    routes: { "POST /api/chat/sessions/s/takeover": () => Response.json({ error }, { status: 400 }) },
+  });
+  await composer().pick("Opus 5.5", "Claude Code");
+  await composer().type("take it from here");
+  await composer().send();
+  await act(async () => dialogButton(m.chat_takeover_confirm()).click());
   await settle();
-  assert.equal(location.pathname, "/projects/p/tasks/new");
-  assert.match(mainModel(), /Opus 5\.5/);
+  assert.ok(document.body.textContent.includes(error));
+  assert.match(document.querySelector('[data-onboarding="model-picker"] button').getAttribute("aria-label"), /Opus 5\.5/);
 });
 
-test("a new chat opened with another agent from a busy side chat keeps it over the project's agent", async () => {
+test("permissions picked for the pending agent wait for the takeover", async () => {
+  const asking = { ...claude, options: { ...claude.options, permissionModes: [{ id: "auto", label: "Auto" }, { id: "ask", label: "Ask" }] } };
+  const chat = await renderChat("/projects/p/tasks/s", {
+    sessions: [session("s", { busy: true })],
+    harnesses: [codex, asking],
+    routes: { "POST /api/chat/sessions/s/takeover": () => ({ ok: true, turn: { turnId: "ct", queued: true, existing: false } }) },
+  });
+  await composer().pick("Opus 5.5", "Claude Code");
+  const settings = [...document.querySelectorAll('[data-onboarding="model-picker"] button')].find((button) => button.getAttribute("aria-label")?.startsWith(m.model_picker_permissions()));
+  for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+    await act(async () => settings.dispatchEvent(new (type.startsWith("pointer") ? PointerEvent : MouseEvent)(type, { bubbles: true, button: 0, pointerType: "mouse" })));
+  }
+  await settle();
+  await act(async () => [...document.querySelectorAll('[role="menuitemradio"]')].find((item) => item.textContent.includes("Ask")).click());
+  await settle();
+  assert.deepEqual(chat.requests.filter(({ request }) => request.startsWith("PATCH")), [], "the running Codex turn keeps its own permissions");
+
+  await composer().type("take it from here");
+  await composer().send();
+  await act(async () => dialogButton(m.chat_takeover_confirm()).click());
+  await settle();
+  const sent = chat.requests.find(({ request }) => request === "POST /api/chat/sessions/s/takeover");
+  assert.equal(sent.body.agent.permissionMode, "ask");
+});
+
+test("a remote too old to take over says to stop the turn instead", async () => {
+  const chat = await renderChat("/projects/p/tasks/s", { sessions: [session("s", { busy: true })], harnesses: [codex, claude], remote: true });
+  await composer().pick("Opus 5.5", "Claude Code");
+  assert.ok(document.body.textContent.includes(m.chat_takeover_needs_update()));
+  assert.match(document.querySelector('[data-onboarding="model-picker"] button').getAttribute("aria-label"), /GPT/);
+  assert.deepEqual(chat.requests.filter(({ request }) => request.startsWith("PATCH") || request.endsWith("/takeover")), []);
+});
+
+test("another agent picked in a busy side chat stays in the side chat", async () => {
   const chat = await renderChat(`/projects/p/tasks/s${sideTab("side")}`, {
     sessions: [session("s"), session("side", { sideParentSessionId: "s", busy: true })],
     harnesses: [codex, claude],
-    routes: pinnedCodex,
+    routes: { "POST /api/chat/sessions/side/takeover": () => ({ ok: true, turn: { turnId: "ct", queued: true, existing: false } }) },
   });
   await composer(1).pick("Opus 5.5", "Claude Code");
+  assert.equal(location.pathname, "/projects/p/tasks/s");
   assert.deepEqual(chat.requests.filter(({ request }) => request.startsWith("PATCH")), []);
-  assert.equal(location.pathname, "/projects/p/tasks/new");
-  assert.match(mainModel(), /Opus 5\.5/);
+
+  await composer(1).type("side takeover");
+  await composer(1).send();
+  await act(async () => dialogButton(m.chat_takeover_confirm()).click());
+  await settle();
+  const sent = chat.requests.find(({ request }) => request === "POST /api/chat/sessions/side/takeover");
+  assert.equal(sent.body.agent.harness, "claude-code");
+  assert.equal(location.pathname, "/projects/p/tasks/s");
 });
