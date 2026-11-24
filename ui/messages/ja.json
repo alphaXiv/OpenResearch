@@ -1789,6 +1789,7 @@
   "settings_found_opencode": "OpenCode にあります",
   "settings_found_config_file": "設定ファイル",
   "settings_found_env_note": "環境変数 {name} がこのプロバイダのキーを提供しています。削除するには、{name} を設定した場所から消すか、ここでプロバイダをオフにしてください。",
+  "settings_found_env_saved_note": "環境タブの {name} がこのプロバイダのキーを提供しています。削除するには、そこで消すか、ここでプロバイダをオフにしてください。",
   "settings_found_config_note": "このプロバイダを削除するには {path} から取り除くか、ここでオフにしてください。",
   "settings_remove_found_description": "このコンピュータの OpenCode からも削除されます。サインインと OpenCode 設定の項目が消えます。",
   "add_agent_hide_free_models": "OpenCode の無料モデルを隠す",

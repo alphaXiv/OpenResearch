@@ -1820,6 +1820,7 @@
   "settings_found_opencode": "OpenCode'da",
   "settings_found_config_file": "Yapılandırma dosyası",
   "settings_found_env_note": "Ortamınızdaki {name} bu sağlayıcının anahtarını sağlıyor. Kaldırmak için {name} değişkenini tanımladığınız yerden silin veya sağlayıcıyı burada kapatın.",
+  "settings_found_env_saved_note": "Ortam sekmesindeki {name} bu sağlayıcının anahtarını sağlıyor. Kaldırmak için orada silin veya sağlayıcıyı burada kapatın.",
   "settings_found_config_note": "Bu sağlayıcıyı silmek için {path} dosyasından kaldırın veya burada kapatın.",
   "settings_remove_found_description": "Bu, onu bu bilgisayardaki OpenCode'dan da kaldırır: oturumunu ve OpenCode yapılandırmanızdaki girdisini.",
   "add_agent_hide_free_models": "Ücretsiz OpenCode modellerini gizle",
