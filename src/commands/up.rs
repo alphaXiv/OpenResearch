@@ -241,6 +241,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     }
     // Plan-mode turns hand this port to the `orx mcp` permission bridge.
     state.chat.set_up_port(actual_port);
+    end_terminals_with_their_chats(&state);
     {
         let lifecycle = state.project_lifecycle.clone();
         let moving = state.data_dir_move_in_progress.clone();
@@ -625,6 +626,20 @@ impl Lineage {
         crate::local::git::atomic_write_with_mode(&path, &serde_json::to_vec(self)?, Some(0o600))
             .map_err(|error| anyhow!("Could not write {}: {error:#}", path.display()))
     }
+}
+
+/// A chat deleted from anywhere (its page, its parent's deletion, an agent) takes its terminals.
+fn end_terminals_with_their_chats(state: &AppState) {
+    let terminals = state.terminals.clone();
+    state.chat.set_session_teardown(Box::new(move |session_id| {
+        let terminals = terminals.clone();
+        let session_id = session_id.to_string();
+        Box::pin(async move {
+            terminals
+                .close_where(|_, session| session == Some(session_id.as_str()))
+                .await;
+        })
+    }));
 }
 
 /// The port kept agents call, for the desktop app to serve on while any survives.
@@ -10891,10 +10906,6 @@ async fn open_side_chat(State(state): State<AppState>, Path(id): Path<String>) -
 
 async fn delete_chat_session(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     reject_if_moving(&state)?;
-    state
-        .terminals
-        .close_where(|_, session| session == Some(id.as_str()))
-        .await;
     // Detached so a canceled request cannot stop between the native purge and the row delete.
     let chat = state.chat.clone();
     let store = Store::open()?;

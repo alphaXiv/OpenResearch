@@ -498,3 +498,46 @@ fn a_cursor_query_split_across_outputs_is_asked_once_and_kept_out_of_the_scrollb
     assert!(scan_queries(&mut held, 0, b"x\x1b", 0).live == b"x");
     assert_eq!(scan_queries(&mut held, 2, b"[0m", 0).live, b"\x1b[0m");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deleting_a_chat_or_project_ends_its_terminals_and_refuses_new_ones() {
+    if !crate::config::in_test_child(&["SHELL"]) {
+        return;
+    }
+    let project = add_project("deleted");
+    let store = Store::open().unwrap();
+    for chat in ["kept", "deleted"] {
+        let mut session = crate::store::tests::chat_session_fixture(chat);
+        session.project_id = project.clone();
+        store.create_chat_session(&session).unwrap();
+    }
+    let state = crate::commands::up::tests::test_state();
+    crate::commands::up::end_terminals_with_their_chats(&state);
+    let address = serve(state.clone()).await;
+    let chat_terminal =
+        |chat: &str, id: &str| format!("{project}/terminal?terminalId={id}&sessionId={chat}");
+
+    for (chat, id) in [("kept", "kept-tab"), ("deleted", "deleted-tab")] {
+        let mut page = connect(address, &chat_terminal(chat, id)).await;
+        let (command, printed) = print(id);
+        type_in(&mut page, &command).await;
+        see(&mut page, &printed).await;
+    }
+    // Deleted the way an agent deletes the chat it delegated to, not through the chat's page.
+    state.chat.delete_session("deleted").await.unwrap();
+    assert!(terminal_keepers("deleted-tab").is_empty());
+    assert_eq!(terminal_keepers("kept-tab").len(), 1);
+
+    let deleting = state.chat.begin_session_delete("kept").unwrap();
+    let mut refused = connect(address, &chat_terminal("kept", "late-tab")).await;
+    assert_eq!(message(&mut refused).await["type"], "error");
+    drop(deleting);
+
+    let deleting = state.project_lifecycle.begin_delete(&project).unwrap();
+    let mut refused = open(address, &project, "project-tab").await;
+    assert_eq!(message(&mut refused).await["type"], "error");
+    drop(deleting);
+    assert!(terminal_keepers("late-tab").is_empty());
+    assert!(terminal_keepers("project-tab").is_empty());
+    state.terminals.close_where(|_, _| true).await;
+}

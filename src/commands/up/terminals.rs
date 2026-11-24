@@ -128,17 +128,35 @@ impl Terminals {
         moving(state)?;
         let _data = state.data_dir_gate.lock().await;
         moving(state)?;
-        self.open(project_id, session_id, id, shell).await
+        let admit = || {
+            let admission = state
+                .project_lifecycle
+                .admit(project_id)
+                .ok_or_else(|| anyhow!("This project is being deleted."))?;
+            if session_id
+                .as_deref()
+                .is_some_and(|id| state.chat.is_deleting(id))
+            {
+                return Err(anyhow!("This chat is being deleted."));
+            }
+            Ok(admission)
+        };
+        self.open(project_id, session_id.clone(), id, shell, admit)
+            .await
     }
 
-    async fn open(
+    /// Opens terminal `id` once `admit` lets it. Deletion closes a project's or chat's
+    /// terminals under the same lock, so a shell admitted before it began is closed with them.
+    async fn open<A>(
         &self,
         project_id: &str,
         session_id: Option<String>,
         id: &str,
         shell: (String, Vec<String>),
+        admit: impl FnOnce() -> Result<A>,
     ) -> Result<Opened> {
         let _opening = self.opening.lock().await;
+        let _admitted = admit()?;
         if let Some(message) = self.ended.lock().unwrap().get(id) {
             return Ok(Opened::Ended(message.clone()));
         }

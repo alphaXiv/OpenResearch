@@ -300,9 +300,11 @@ fn windowless() -> bool {
     *WINDOWLESS.borrow()
 }
 
+/// Whether a native quit goes through the window, which asks about pending work and has the
+/// server stop its kept children. The system's own quit (logout, restart) cannot wait for it.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn native_quit_needs_confirmation(pending: bool, system_reason: Option<u32>) -> bool {
-    pending && system_reason.is_none()
+fn native_quit_goes_through_window(system_reason: Option<u32>) -> bool {
+    system_reason.is_none()
 }
 
 #[cfg(desktop_app)]
@@ -2278,8 +2280,7 @@ mod imp {
                 reason
             })
             .map(|reason| reason.enumCodeValue());
-        let pending = reason.is_none() && pending_work().is_some();
-        if !super::native_quit_needs_confirmation(pending, reason) {
+        if !super::native_quit_goes_through_window(reason) {
             return NSApplicationTerminateReply::TerminateNow;
         }
         // The answer may come from the page, which cannot run while AppKit waits on a deferred reply.
@@ -3214,15 +3215,12 @@ mod tests {
     }
 
     #[test]
-    fn native_quit_never_defers_system_termination_or_idle_quit() {
-        for busy in [false, true] {
-            assert_eq!(super::native_quit_needs_confirmation(busy, None), busy);
-            for reason in [*b"quia", *b"shut", *b"rest", *b"rlgo"] {
-                assert!(!super::native_quit_needs_confirmation(
-                    busy,
-                    Some(u32::from_be_bytes(reason))
-                ));
-            }
+    fn a_users_native_quit_goes_through_the_window_and_the_systems_does_not() {
+        assert!(super::native_quit_goes_through_window(None));
+        for reason in [*b"quia", *b"shut", *b"rest", *b"rlgo"] {
+            assert!(!super::native_quit_goes_through_window(Some(
+                u32::from_be_bytes(reason)
+            )));
         }
     }
 

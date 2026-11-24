@@ -3159,6 +3159,9 @@ impl HeldPermission {
 // --- host --------------------------------------------------------------------
 
 /// Owns turn tasks and the chat event stream. One per `orx up` process.
+pub type SessionTeardown =
+    Box<dyn Fn(&str) -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
+
 pub struct ChatHost {
     pub(crate) harnesses: Arc<Mutex<Option<(std::time::Instant, Value)>>>,
     /// Lazy opencode serve manager (only the opencode adapter spawns it).
@@ -3245,6 +3248,8 @@ pub struct ChatHost {
     /// Holds a project against every other change to it, and against a
     /// data-directory move, until dropped; refuses while either is under way.
     project_change: std::sync::OnceLock<project_move::ProjectChangeGuard>,
+    /// What `orx up` ends with a chat that is being deleted, besides its agent: its terminals.
+    session_teardown: std::sync::OnceLock<SessionTeardown>,
     queue_dispatch_cancelled: std::sync::Mutex<HashSet<String>>,
     /// Sink for mid-turn steering text, present only while a capable harness is running.
     steering: std::sync::Mutex<HashMap<String, SteerSink>>,
@@ -4241,6 +4246,7 @@ impl ChatHost {
             // Until the first pass reads the store, a move from before a restart may wait.
             project_moves_waiting: std::sync::atomic::AtomicBool::new(true),
             project_change: std::sync::OnceLock::new(),
+            session_teardown: std::sync::OnceLock::new(),
             queue_dispatch_cancelled: std::sync::Mutex::new(HashSet::new()),
             steering: std::sync::Mutex::new(HashMap::new()),
             pending_steers: std::sync::Mutex::new(HashMap::new()),
@@ -4262,6 +4268,14 @@ impl ChatHost {
     /// Record how `orx up` holds a project while a chat becomes a project of its own.
     pub fn set_project_change_guard(&self, guard: project_move::ProjectChangeGuard) {
         let _ = self.project_change.set(guard);
+    }
+
+    pub fn set_session_teardown(&self, teardown: SessionTeardown) {
+        let _ = self.session_teardown.set(teardown);
+    }
+
+    pub fn is_deleting(&self, session_id: &str) -> bool {
+        self.deleting_sessions.lock().unwrap().contains(session_id)
     }
 
     /// The bound `orx up` port, if this host runs under a server (None in
@@ -8610,6 +8624,9 @@ impl ChatHost {
             .ok_or_else(|| anyhow!("session deletion is already in progress"))?;
         for side_chat in Store::open()?.side_chats_of(session_id)? {
             Box::pin(self.delete_session(&side_chat)).await?;
+        }
+        if let Some(teardown) = self.session_teardown.get() {
+            teardown(session_id).await;
         }
         self.clear_queue(session_id)?;
         let _ = self.interrupt(session_id).await;
