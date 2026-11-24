@@ -7244,6 +7244,8 @@ struct UiEventReq {
     new: Option<bool>,
     #[serde(default)]
     free: Option<bool>,
+    #[serde(default)]
+    pane: Option<String>,
 }
 
 async fn record_ui_event(Json(req): Json<UiEventReq>) -> ApiResult {
@@ -7286,6 +7288,11 @@ async fn record_ui_event(Json(req): Json<UiEventReq>) -> ApiResult {
                 (&req.section, &req.model, &req.harness, req.new, req.free)
             {
                 crate::telemetry::capture_model_picked(section, model, harness, new, free);
+            }
+        }
+        "pane_opened" => {
+            if let Some(pane) = req.pane.as_deref() {
+                crate::telemetry::capture_pane_opened(pane);
             }
         }
         _ => return Ok(Json(json!({ "ok": false }))),
