@@ -65,8 +65,9 @@ pub(crate) use selection::{
 /// rather than held busy forever. Known false positive: a command that is
 /// legitimately silent this long (a quiet build, a training step with
 /// buffered output) is indistinguishable from a hang — hence the generous
-/// bound; the interruption is a clear, recoverable error either way. Shared
-/// by the codex and claude adapters (each applies it to its own event wait).
+/// bound; the interruption is a clear, recoverable error either way. Every
+/// adapter that reads a child's output applies it to its own event wait;
+/// OpenCode's have none.
 pub(crate) const TURN_WATCHDOG: Duration = Duration::from_secs(30 * 60);
 
 pub(crate) const ORX_MAX_RETRIES: u32 = 3;

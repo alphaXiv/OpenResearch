@@ -10295,6 +10295,7 @@ fn chat_active_runs_json(store: &Store) -> Result<Value> {
     Ok(json!(rows))
 }
 
+/// Active runs only, as older pages read it; `chat_shown_runs` is the projection that keeps ended ones.
 async fn chat_active_runs() -> ApiResult {
     Ok(Json(chat_active_runs_json(&Store::open()?)?))
 }
@@ -14231,6 +14232,80 @@ mod tests {
             opencode_signins: Arc::default(),
             terminals: Arc::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn an_agent_answers_only_a_delegates_question() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let state = test_state();
+        let _store = Store::open().unwrap();
+        let connection =
+            rusqlite::Connection::open(crate::store::data_dir().join("orx.db")).unwrap();
+        let question = json!([{
+            "id": "q1", "type": "prompt", "text": "",
+            "prompt": {"kind": "question", "question": "Which backend?",
+                       "options": [{"label": "Modal"}]}
+        }])
+        .to_string();
+        for id in ["chat_agent", "chat_user", "chat_delegate"] {
+            connection
+                .execute(
+                    "INSERT INTO chat_sessions (id, project_id, harness, permission_mode, created_at, updated_at)
+                     VALUES (?1, 'proj', 'opencode', 'manual', 1, 1)",
+                    [id],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO chat_messages (id, session_id, role, parts_json, created_at)
+                     VALUES (?1 || '_msg', ?1, 'assistant', ?2, 1)",
+                    [id, question.as_str()],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO chat_turns (id, session_id, assistant_message_id, client_turn_id,
+                         request_hash, prepared_input, settings_json, state, delivery_state,
+                         created_at, updated_at)
+                     VALUES (?1 || '_turn', ?1, ?1 || '_msg', 'ct', 'h', '', '{}', 'completed',
+                         'sent', 1, 1)",
+                    [id],
+                )
+                .unwrap();
+        }
+        Store::open()
+            .unwrap()
+            .record_chat_delegate("chat_delegate", "chat_agent", false)
+            .unwrap();
+        let answer = |target: &str| {
+            let request = serde_json::from_value(json!({
+                "sessionId": "chat_agent",
+                "token": local::chat::delegation::agent_token("chat_agent"),
+                "method": "tools/call",
+                "params": {"name": "answer", "arguments": {
+                    "chatId": target, "promptId": "q1", "choices": ["Modal"]
+                }},
+            }))
+            .unwrap();
+            let state = state.clone();
+            async move {
+                let Json(reply) = agent_tools::agent_tools(State(state), Json(request))
+                    .await
+                    .unwrap();
+                reply
+            }
+        };
+
+        let refused = answer("chat_user").await;
+        assert_eq!(refused["isError"], true, "{refused}");
+        // No agent holds either turn, so a delegate's answer fails only in delivery.
+        let delegated = answer("chat_delegate").await;
+        assert_ne!(
+            refused["content"], delegated["content"],
+            "the user's chat refuses before delivery"
+        );
     }
 
     #[tokio::test]

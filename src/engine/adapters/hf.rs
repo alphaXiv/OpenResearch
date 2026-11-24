@@ -105,7 +105,16 @@ impl Api for HfAccount {
             .and_then(|message| message.strip_prefix("Job failed with exit code: "))
             .and_then(|message| message.split_once(". Reason:"))
             .and_then(|(code, _)| code.parse().ok());
-        Ok(api::stage(&job.status.stage, job.status.message, exit_code, None, None))
+        let time = |stamp: Option<String>| {
+            stamp.as_deref().and_then(crate::local::native_chats::parse_iso_ms)
+        };
+        Ok(api::stage(
+            &job.status.stage,
+            job.status.message,
+            exit_code,
+            time(job.started_at),
+            time(job.finished_at),
+        ))
     }
     async fn cancel(&self, run: &WatchedRun) -> Result<()> {
         let token = hf::resolve_token()?;

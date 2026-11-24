@@ -817,6 +817,8 @@ pub fn prepare_codex(store: NativeStore) -> Result<PathBuf> {
     Ok(crate::paths::canonicalize(&root).unwrap_or(root))
 }
 
+/// Links every entry of the user's Codex home but its private state, where Claude's home takes an
+/// allowlist, so paths Codex's configuration gives relative to its home still resolve.
 pub(crate) fn prepare_codex_links(root: &Path, legacy: &Path, share_auth: bool) -> Result<()> {
     std::fs::create_dir_all(root)?;
     let isolated = crate::paths::canonicalize(root)?;

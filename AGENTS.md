@@ -48,7 +48,7 @@ A message reaches `orx up`, which starts or reuses the chat's agent in the chat'
 
 ## Architecture
 
-These documents describe how the pieces of OpenResearch work. We try to keep them timeless so they don't churn, letting code comments describe the exact implementation details. Read these before planning your changes to these components, and keep architecture changes in sync when changing how the app works.
+These documents introduce how the pieces of OpenResearch fit together: the reasons, invariants and boundaries a reader can't recover from the code. Exact behavior, numbers, flags, UI states and per-agent quirks live in the code and its comments. Read these before planning a change to a component. A change edits one only when it makes something the document says untrue, which is a deliberate architecture change the PR names; when an ordinary fix seems to need a doc edit, the detail belongs in a comment beside the code.
 
 - [Where state lives](arc/storage.md): directories, the store, locks, egress.
 - [Chats and agents](arc/agents.md): harnesses, isolation, permissions, recovery.

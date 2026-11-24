@@ -1,12 +1,11 @@
 //! Local run store — orx's own truth for externally-executed runs.
 //!
 //! Mirrors the opencode model: state lives in a SQLite db beside the work
-//! (`orx.db` under the data dir), and `orx serve` exposes it over loopback
+//! (`orx.db` under the data dir), and `orx up` exposes it over loopback
 //! HTTP/SSE. Run logs are plain append-only files under `run-logs/<runId>.log`
-//! so tailing (serve) and appending (supervise) never contend on the db.
+//! so reading and appending them never contend on the db.
 //!
-//! Data dir: `$ORX_DATA_DIR`, else `$XDG_DATA_HOME/openresearch`, else
-//! `~/.local/share/openresearch`.
+//! Data dir: resolved by [`data_dir`].
 
 mod acp;
 mod costs;
@@ -71,6 +70,8 @@ pub(crate) fn open_lifecycle_lock() -> Result<fd_lock::RwLock<std::fs::File>> {
     open_lifecycle_lock_in(&crate::config::config_dir())
 }
 
+/// The legacy `orx.lifecycle.lock` stays a hard link to this lock, so binaries that know only
+/// that path contend on the same file.
 pub(crate) fn open_lifecycle_lock_in(config_dir: &Path) -> Result<fd_lock::RwLock<std::fs::File>> {
     // The config dir stays put while the user can move the live data directory.
     let path = lifecycle_lock_path_in(config_dir);
@@ -483,6 +484,8 @@ impl RunNotice {
     }
 }
 
+/// Flag wakes have a table of their own because older servers drain `run_notices` and would
+/// deliver a wake they cannot read.
 #[derive(Clone, Copy)]
 enum NoticeOutbox {
     Run,
@@ -1783,6 +1786,7 @@ impl Store {
             "ALTER TABLE ui_state ADD COLUMN model_sightings TEXT",
             "ALTER TABLE runs ADD COLUMN waiting_reason TEXT",
             "ALTER TABLE runs ADD COLUMN price_json TEXT",
+            "ALTER TABLE runs ADD COLUMN billed_json TEXT",
             "ALTER TABLE runs ADD COLUMN monitor_config_json TEXT",
             "ALTER TABLE runs ADD COLUMN stop_context_json TEXT",
             "ALTER TABLE chat_usage_samples ADD COLUMN cost_micros INTEGER",
@@ -1854,7 +1858,8 @@ impl Store {
         if !cleanup_guard_installed {
             let enqueue_settled = remote_collections_settled("NEW.run_id");
             let queued_settled = remote_collections_settled("remote_cleanups.run_id");
-            // Released writers queue the log before publishing the terminal phase.
+            // Released writers queue the log before publishing the terminal phase. Triggers, so a
+            // writer that knows only `log_collections` still owes signals and cannot clean up first.
             schema.execute_batch(&format!(
                 "CREATE TRIGGER IF NOT EXISTS queue_remote_signal_collection
                  AFTER INSERT ON log_collections WHEN NEW.done = 0 BEGIN
@@ -6540,6 +6545,8 @@ pub struct StoredChatSession {
     /// overwrite). NULL on legacy rows, which the conditional setter treats as
     /// "unknown, don't overwrite".
     pub title_source: Option<String>,
+    /// Native model id the chat is pinned to. `None`, on legacy rows or after an explicit clear,
+    /// inherits the agent's own configuration; a read never fills it in.
     pub model: Option<String>,
     /// Codex processing tier (`"default"` or `"priority"`); None uses CLI configuration.
     pub service_tier: Option<String>,
@@ -6722,6 +6729,8 @@ pub struct StoredUiState {
     pub favorite_models: Vec<String>,
     /// Models turned off in the picker and for delegates: a canonical id, plus `:free` for its free tier.
     pub hidden_models: Vec<String>,
+    /// Agents, accounts and OpenCode providers turned off in Settings, by the keys
+    /// [`crate::local::model_routes::turned_off`] and [`crate::local::model_routes::off_providers`] read.
     pub hidden_agents: Vec<String>,
     /// The picker's section ids in the user's order.
     pub model_section_order: Vec<String>,

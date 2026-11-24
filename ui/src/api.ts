@@ -216,7 +216,7 @@ export interface UiState {
   favoriteModels: string[];
   /** Models turned off in Settings, by {@link ModelName.key}: the picker hides them and agents can't delegate to them. */
   hiddenModels: string[];
-  /** Agents found on this computer that are turned off, by harness id; `opencode` stands for the sign-ins made in OpenCode itself. */
+  /** Settings → Agents rows turned off: an agent's or account's id, or `opencode:` and a provider's id. A bare `opencode`, from older dashboards, turns off every provider found in OpenCode. */
   hiddenAgents: string[];
   /** The picker's lab sections in the user's order; labs it doesn't name follow in the picker's own. */
   modelSectionOrder: string[];
