@@ -23,7 +23,7 @@ function setup() {
   const sidebar = queries.listSidebarChatSessionsQuery("active");
   const messages = queries.getChatMessagesQuery("s");
   queryClient.setQueryData(sessions.queryKey, [row("s"), row("t")]);
-  queryClient.setQueryData(sidebar.queryKey, { pages: [{ sessions: [row("s"), row("t")], next: null }], pageParams: [null] });
+  queryClient.setQueryData(sidebar.queryKey, { pages: [{ sessions: [row("s", { updatedAt: 2 }), row("t")], next: null }], pageParams: [null] });
   queryClient.setQueryData(messages.queryKey, {
     messages: [{ id: "m1", role: "assistant", parts: [] }, { id: "m2", role: "assistant", parts: [] }],
     queued: [blocked],
