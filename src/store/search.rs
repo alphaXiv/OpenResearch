@@ -107,7 +107,7 @@ impl SearchRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SearchPage {
     pub(crate) hits: Vec<SearchHit>,
-    cursor: Option<String>,
+    pub(crate) cursor: Option<String>,
     pub(crate) indexing: bool,
     pub(crate) requires_longer_query: bool,
 }

@@ -813,25 +813,36 @@ async fn chats(state: &AppState, caller: &StoredChatSession, args: &Value) -> Re
         }
         (Some(other), _, _) => bail!("`view` is `inbox` or `working`, not `{other}`."),
         (_, Some(query), _) => {
-            let request: SearchRequest =
-                serde_json::from_value(json!({ "q": query, "scope": "all", "limit": 100 }))?;
-            let page = store.search_chat_messages(&request.prepare()?)?;
-            if page.requires_longer_query {
-                bail!("Search with at least one word of 3 or more characters.");
-            }
             let mut seen = HashSet::new();
-            for hit in page.hits {
-                if !seen.insert(hit.session_id.clone()) {
-                    continue;
+            let mut cursor = None;
+            let mut indexing = false;
+            // One chat can match many messages, so page until enough distinct chats.
+            while lines.len() <= limit {
+                let request: SearchRequest = serde_json::from_value(
+                    json!({ "q": query, "scope": "all", "limit": 100, "cursor": cursor }),
+                )?;
+                let page = store.search_chat_messages(&request.prepare()?)?;
+                if page.requires_longer_query {
+                    bail!("Search with at least one word of 3 or more characters.");
                 }
-                let Some(session) = store.get_chat_session(&hit.session_id)? else {
-                    continue;
-                };
-                let snippet = hit.snippet.split_whitespace().collect::<Vec<_>>().join(" ");
-                let (line, _) = listing.line(&session, None)?;
-                lines.push(format!("{line}\n  > {snippet}"));
+                indexing |= page.indexing;
+                for hit in page.hits {
+                    if !seen.insert(hit.session_id.clone()) {
+                        continue;
+                    }
+                    let Some(session) = store.get_chat_session(&hit.session_id)? else {
+                        continue;
+                    };
+                    let snippet = hit.snippet.split_whitespace().collect::<Vec<_>>().join(" ");
+                    let (line, _) = listing.line(&session, None)?;
+                    lines.push(format!("{line}\n  > {snippet}"));
+                }
+                cursor = page.cursor;
+                if cursor.is_none() {
+                    break;
+                }
             }
-            if page.indexing {
+            if indexing {
                 "Chats matching, newest first. Older chats are still being indexed, so some may be missing:".to_string()
             } else {
                 "Chats matching, newest first:".to_string()
@@ -953,17 +964,20 @@ impl Activity {
     /// What `session` is doing, and whether that puts it in the sidebar's
     /// Working section: a chat waiting on the user stays in the inbox.
     fn state(&self, store: &Store, session: &StoredChatSession) -> Result<(String, bool)> {
-        if let Some(pending) = delegation::pending_prompt(store, &session.id)? {
-            let text = if pending.kind() == "question" {
-                format!("asks a question, prompt `{}`", pending.id)
-            } else {
-                format!("waits for the user to {}", pending.awaits())
+        let busy = self.busy.contains(&session.id);
+        if store.chat_session_awaiting_input(&session.id, busy)? {
+            let text = match delegation::pending_prompt(store, &session.id)? {
+                Some(pending) if pending.kind() == "question" => {
+                    format!("asks a question, prompt `{}`", pending.id)
+                }
+                Some(pending) => format!("waits for the user to {}", pending.awaits()),
+                None => "waits for the user".to_string(),
             };
             return Ok((text, false));
         }
         let at_work = if self.runs.contains(&session.id) {
             Some("running an experiment")
-        } else if self.busy.contains(&session.id) {
+        } else if busy {
             Some("working")
         } else if self.background.contains(&session.id) {
             Some("waiting on background work or its delegates")
@@ -1242,6 +1256,25 @@ mod tests {
                 result_native_message_id: None,
             })
             .unwrap();
+        // More newer matches than one search page holds, all in one chat.
+        for i in 0..120 {
+            store
+                .upsert_chat_message(&StoredChatMessage {
+                    id: format!("msg_busy_{i}"),
+                    session_id: "busy".into(),
+                    role: "user".into(),
+                    parts_json: json!([{ "id": "p", "type": "text", "text": "feed the flamingo" }])
+                        .to_string(),
+                    created_at: 10 + i,
+                    completed_at: Some(10 + i),
+                    parent_id: None,
+                    base_native_session_id: None,
+                    result_native_session_id: None,
+                    native_harness: None,
+                    result_native_message_id: None,
+                })
+                .unwrap();
+        }
 
         let inbox = list(&state, "root", json!({ "view": "inbox" }))
             .await
@@ -1267,7 +1300,7 @@ mod tests {
         let found = list(&state, "root", json!({ "query": "flamingo" }))
             .await
             .unwrap();
-        assert_eq!(ids(&found), ["done"]);
+        assert_eq!(ids(&found), ["busy", "done"]);
         assert!(
             found.contains(": done") && found.contains("flamingo scheduler"),
             "{found}"
@@ -1307,13 +1340,16 @@ mod tests {
             text: "stop".into(),
             client_turn_id: None,
             orx: None,
-            sent_at: crate::store::now_ms() + 1,
+            // Stamped before the wait began: what counts is when the steer was queued.
+            sent_at: 0,
         };
         state.chat.queue_steer("root", &steer, &store).unwrap();
+        // Codex reads a steer as soon as it accepts it, before `wait` looks again.
+        assert!(state.chat.forget_steer("root", &steer.id));
 
         let text = tokio::time::timeout(std::time::Duration::from_secs(10), waiting)
             .await
-            .expect("wait should return once the steer is pending")
+            .expect("wait should return once a steer arrives")
             .unwrap()
             .unwrap();
         assert!(text.contains("A message for this chat arrived"), "{text}");

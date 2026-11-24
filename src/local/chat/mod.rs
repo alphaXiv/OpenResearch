@@ -3230,6 +3230,8 @@ pub struct ChatHost {
     /// Steers handed toward the agent that it has not read yet, oldest first;
     /// each also has a queued row, held out of `queued` until released.
     pending_steers: std::sync::Mutex<HashMap<String, Vec<SteerMessage>>>,
+    /// When each chat last got a steer, read or not: an agent can read one before `wait` looks.
+    last_steered_at: std::sync::Mutex<HashMap<String, i64>>,
     queue_dispatch_in_flight: std::sync::Mutex<HashMap<String, String>>,
     /// Chats a stop left idle. Run notices and chat news wait until the chat's next turn
     /// starts, so they don't restart work the user just stopped.
@@ -4202,6 +4204,7 @@ impl ChatHost {
             queue_dispatch_cancelled: std::sync::Mutex::new(HashSet::new()),
             steering: std::sync::Mutex::new(HashMap::new()),
             pending_steers: std::sync::Mutex::new(HashMap::new()),
+            last_steered_at: std::sync::Mutex::new(HashMap::new()),
             queue_dispatch_in_flight: std::sync::Mutex::new(HashMap::new()),
             stopped: std::sync::Mutex::new(HashSet::new()),
         }
@@ -5191,6 +5194,10 @@ impl ChatHost {
             .entry(session_id.to_string())
             .or_default()
             .push(message.clone());
+        self.last_steered_at
+            .lock()
+            .unwrap()
+            .insert(session_id.to_string(), crate::store::now_ms());
         // The row is saved; a failed reload only delays its bubble until the next one.
         if let Err(error) = self.refresh_persisted_queue_locked(session_id, store) {
             eprintln!("orx up: could not reload the queue of chat {session_id}: {error}");
@@ -5215,13 +5222,13 @@ impl ChatHost {
             .is_some_and(|pending| pending.iter().any(|steer| steer.id == steer_id))
     }
 
-    /// Whether a steer sent at or after `since` (ms) still waits for the agent to read it.
+    /// Whether the chat got a steer sent at or after `since` (ms).
     pub fn steered_since(&self, session_id: &str, since: i64) -> bool {
-        self.pending_steers
+        self.last_steered_at
             .lock()
             .unwrap()
             .get(session_id)
-            .is_some_and(|pending| pending.iter().any(|steer| steer.sent_at >= since))
+            .is_some_and(|at| *at >= since)
     }
 
     /// The oldest pending steer the agent was sent as `text`.
@@ -5325,6 +5332,7 @@ impl ChatHost {
             }
             return Err(error);
         }
+        self.last_steered_at.lock().unwrap().remove(session_id);
         let had_steers = self
             .pending_steers
             .lock()

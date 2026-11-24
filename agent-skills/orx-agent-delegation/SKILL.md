@@ -42,6 +42,7 @@ ref (`msg_3fa9c1d2`) in the task instead of retyping it.
   something your parent's brief might settle, `send` your parent.
 - **Steering.** `send` joins a chat's running turn when its agent takes
   messages mid-turn and queues for its next turn otherwise; it never
-  interrupts. A message sent to you ends your `wait` so you can read it.
+  interrupts. A message that joins your running turn ends your `wait` so you
+  can read it.
 - **Retries.** Give `delegate` and `send` a `clientRequestId` when you may
   retry, so a retry does not start the work twice.
