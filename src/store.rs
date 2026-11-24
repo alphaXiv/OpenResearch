@@ -1810,6 +1810,11 @@ impl Store {
             "CREATE INDEX IF NOT EXISTS idx_chat_messages_native_ids
              ON chat_messages(base_native_session_id, result_native_session_id, session_id);",
         )?;
+        // Lets the sidebar's awaiting-input check skip transcripts that never held a prompt card.
+        schema.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_chat_messages_prompts
+             ON chat_messages(session_id) WHERE instr(parts_json, '\"prompt\"') > 0;",
+        )?;
         // Keep the shown-runs projection proportional to what is live and unanswered, never to history.
         schema.execute_batch(&format!(
             "CREATE INDEX IF NOT EXISTS idx_runs_unsettled ON runs(chat_session_id, id) WHERE {UNSETTLED_RUN};
@@ -4585,28 +4590,21 @@ impl Store {
         Ok(rows.next().transpose()?)
     }
 
+    /// The chat if the sidebar lists it: neither a side chat nor a delegate.
+    pub fn get_sidebar_chat_session(&self, id: &str) -> Result<Option<StoredChatSession>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CHAT_SESSION_COLS} FROM chat_sessions WHERE id = ?1 AND {TOP_LEVEL_CHATS}"
+        ))?;
+        let mut rows = stmt.query_map(params![id], row_to_chat_session)?;
+        Ok(rows.next().transpose()?)
+    }
+
     pub fn chat_session_awaiting_input(&self, session_id: &str, busy: bool) -> Result<bool> {
-        Ok(self.conn.query_row(
-            "WITH RECURSIVE active(id, parent_id, parts_json) AS (
-                SELECT m.id, m.parent_id, m.parts_json FROM chat_messages m
-                JOIN chat_sessions s ON s.active_leaf_id = m.id AND s.id = m.session_id
-                WHERE s.id = ?1
-                UNION ALL
-                SELECT m.id, m.parent_id, m.parts_json FROM chat_messages m
-                JOIN active a ON a.parent_id = m.id WHERE m.session_id = ?1
-             )
-             SELECT EXISTS (
-                SELECT 1 FROM active a, json_each(a.parts_json) p
-                WHERE json_extract(p.value, '$.type') = 'prompt'
-                  AND COALESCE(json_extract(p.value, '$.prompt.resolved'), 0) = 0
-                  AND CASE WHEN json_extract(p.value, '$.prompt.nativeId') IS NOT NULL
-                    THEN ?2
-                    ELSE json_extract(p.value, '$.prompt.kind') = 'question'
-                  END
-             )",
-            params![session_id, busy],
-            |row| row.get(0),
-        )?)
+        Ok(self
+            .conn
+            .query_row(AWAITING_INPUT_SQL, params![session_id, busy], |row| {
+                row.get(0)
+            })?)
     }
 
     pub fn list_chat_sessions_by_project(
@@ -8165,6 +8163,28 @@ const OPEN_FLAG: &str = "(f.kind = 'flag' AND r.cancel_requested = 0
      AND NOT EXISTS (SELECT 1 FROM run_monitor_events c WHERE c.run_id = r.id AND c.kind = 'choice'
                      AND json_extract(c.body_json, '$.flagId') = json_extract(f.body_json, '$.id')
                      AND json_extract(c.body_json, '$.c') IN ('keep', 'stop')))";
+
+/// Finds open cards through `idx_chat_messages_prompts` first, so the branch walk runs only for a
+/// chat that has one; the `instr` must match the index's condition for the index to apply.
+const AWAITING_INPUT_SQL: &str = "WITH RECURSIVE open_cards(id) AS (
+        SELECT m.id FROM chat_messages m, json_each(m.parts_json) p
+        WHERE m.session_id = ?1 AND instr(m.parts_json, '\"prompt\"') > 0
+          AND json_extract(p.value, '$.type') = 'prompt'
+          AND COALESCE(json_extract(p.value, '$.prompt.resolved'), 0) = 0
+          AND CASE WHEN json_extract(p.value, '$.prompt.nativeId') IS NOT NULL
+            THEN ?2
+            ELSE json_extract(p.value, '$.prompt.kind') = 'question'
+          END
+     ),
+     active(id, parent_id) AS (
+        SELECT m.id, m.parent_id FROM chat_messages m
+        JOIN chat_sessions s ON s.active_leaf_id = m.id AND s.id = m.session_id
+        WHERE s.id = ?1 AND EXISTS (SELECT 1 FROM open_cards)
+        UNION ALL
+        SELECT m.id, m.parent_id FROM chat_messages m
+        JOIN active a ON a.parent_id = m.id WHERE m.session_id = ?1
+     )
+     SELECT EXISTS (SELECT 1 FROM active WHERE id IN open_cards)";
 
 fn shown_runs_sql() -> String {
     format!(
@@ -15346,6 +15366,21 @@ pub(crate) mod tests {
         assert!(!store
             .chat_session_awaiting_input("chat_pending", true)
             .unwrap());
+        let plan: Vec<String> = store
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {AWAITING_INPUT_SQL}"))
+            .unwrap()
+            .query_map(params!["chat_pending", false], |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("idx_chat_messages_prompts")),
+            "reads every transcript: {plan:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
