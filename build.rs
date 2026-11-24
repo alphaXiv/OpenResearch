@@ -119,7 +119,9 @@ fn embed_agent_skills() {
 fn collect_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     for entry in std::fs::read_dir(dir).expect("read skill directory") {
         let path = entry.unwrap().path();
-        if path.file_name().unwrap().to_string_lossy().starts_with('.') {
+        // Hidden files and Python's bytecode cache are left on disk, never shipped.
+        let name = path.file_name().unwrap().to_string_lossy();
+        if name.starts_with('.') || name == "__pycache__" {
             continue;
         }
         if path.is_dir() {
