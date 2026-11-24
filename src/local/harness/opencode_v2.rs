@@ -106,8 +106,11 @@ pub(super) async fn run_turn(
         get(&endpoint, &format!("/api/session/{id}")).await?;
         id.clone()
     } else {
-        let directory =
-            crate::local::git::existing_session_worktree_path(&ctx.project, &ctx.session_id);
+        let directory = crate::local::git::existing_session_worktree_path(
+            &crate::store::Store::open()?,
+            &ctx.project,
+            &ctx.session_id,
+        )?;
         let mut body =
             json!({"agent":opencode_agent(ctx.plan_mode),"location":{"directory":directory}});
         if let Some(model) = &model {
@@ -1285,7 +1288,7 @@ pub(super) async fn detect(
         result
     })
     .await;
-    match catalog {
+    match &catalog {
         Ok(Ok((models, integrations))) => {
             let connected: HashSet<&str> = integrations["data"]
                 .as_array()
@@ -1349,6 +1352,16 @@ pub(super) async fn detect(
         Ok(Err(error)) => info.agent_note = Some(error.to_string()),
         Err(error) => info.agent_note = Some(format!("OpenCode discovery failed: {error}")),
     }
+
+    let integrations = match &catalog {
+        Ok(Ok((_, integrations))) => integrations,
+        _ => &Value::Null,
+    };
+    let catalog = info
+        .models
+        .iter()
+        .map(|model| super::model_provider(&model.id));
+    info.found_providers = super::found_providers(catalog, integrations);
     if let Err(error) = refreshed {
         info.agent_note = Some(format!("Could not refresh provider models: {error}"));
     }

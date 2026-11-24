@@ -1807,6 +1807,7 @@
   "settings_found_opencode": "W OpenCode",
   "settings_found_config_file": "Plik konfiguracji",
   "settings_found_env_note": "{name} w Twoim środowisku dostarcza klucz tego dostawcy. Aby go usunąć, skasuj {name} tam, gdzie go ustawiono, albo wyłącz tu dostawcę.",
+  "settings_found_env_saved_note": "{name} z karty Środowisko dostarcza klucz tego dostawcy. Aby go usunąć, skasuj go tam albo wyłącz tu dostawcę.",
   "settings_found_config_note": "Aby usunąć tego dostawcę, usuń go z {path} albo wyłącz go tutaj.",
   "settings_remove_found_description": "To usuwa go też z OpenCode na tym komputerze: jego logowanie i wpis w Twojej konfiguracji OpenCode.",
   "add_agent_hide_free_models": "Ukryj darmowe modele OpenCode",

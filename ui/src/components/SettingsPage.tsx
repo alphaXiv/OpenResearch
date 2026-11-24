@@ -419,10 +419,10 @@ export function harnessSetupPath(h: Harness, setup: HarnessSetupCommands | undef
   return `/api/harnesses/setup?${new URLSearchParams({ harness: h.id, action, shell: "true" })}`;
 }
 
-function AgentsTab({ remote }: { remote: boolean }) {
+function AgentsTab({ remote, onOpenEnvVar }: { remote: boolean; onOpenEnvVar: (name: string) => void }) {
   return (
     <>
-      <AgentList remote={remote} />
+      <AgentList remote={remote} onOpenEnvVar={onOpenEnvVar} />
       <NestedDelegationRow />
       <RunWatchingRow />
       <AutoReviewerRow />
@@ -436,8 +436,10 @@ function AgentsTab({ remote }: { remote: boolean }) {
  * runs, whether OpenResearch keeps them or the user set them up in OpenCode. Each has a switch, and Remove where it can
  * go. The onboarding also offers the recommended agents not set up yet.
  */
-export function AgentList({ remote, onboarding }: {
+export function AgentList({ remote, onboarding, onOpenEnvVar }: {
   remote: boolean;
+  /** Opens the Environment tab on a variable; none where that tab isn't reachable. */
+  onOpenEnvVar?: (name: string) => void;
   onboarding?: {
     /** The remote machine being set up, which warns before a Claude sign-in there. */
     host?: string;
@@ -460,6 +462,7 @@ export function AgentList({ remote, onboarding }: {
   const providers = useQuery(providersOptions);
   const endpointsOptions = getLocalModelsQuery();
   const endpoints = useQuery(endpointsOptions);
+  const envVars = useQuery({ ...workspace.queries.getEnvVarsQuery(), enabled: Boolean(onOpenEnvVar) });
   const [active, setActive] = useState<string | null>(null);
   /** The row an open Add agent dialog set up, which lists once the dialog finishes. */
   const [adding, setAdding] = useState<string | null>(null);
@@ -630,6 +633,7 @@ export function AgentList({ remote, onboarding }: {
     const commands = setupCommands.data?.[h.id];
     const status = harnessStatus(h);
     const signedOut = !h.catalogPending && (!h.agentReady || Boolean(h.authCheckFailed));
+    const available = modelsAvailable(agentModelLines(h.id, h.models).length);
     const openSignIn = h.authState === "needsLogin" ? signIn(h) : undefined;
     const signInButton = openSignIn && (
       <Button size="small" onClick={openSignIn} aria-haspopup="dialog">{m.harness_setup_login()}</Button>
@@ -637,13 +641,14 @@ export function AgentList({ remote, onboarding }: {
     if (h.profile) {
       const profile = h.profile;
       const remove = () => confirmRemove(profile.name, () => api.removeAgentProfile(profile.id));
+      const account = [h.accountName ?? h.account, h.plan].filter(Boolean).join(" · ") || status.label;
       return (
         <RecordRow
           key={profile.id}
           {...rowProps(profile.id)}
           {...harnessMark(h)}
           name={profile.name}
-          detail={signedOut ? status.label : [h.accountName ?? h.account, h.plan].filter(Boolean).join(" · ") || status.label}
+          detail={signedOut ? status.label : h.agentReady && h.models.length > 0 ? `${account} · ${available}` : account}
           warn={signedOut}
           off={turnedOff.has(profile.id)}
           action={<>{signInButton}{agentSwitch(profile.id, profile.name)}</>}
@@ -668,14 +673,15 @@ export function AgentList({ remote, onboarding }: {
     const acp = definitions.data?.find((definition) => definition.id === h.id);
     const action = !openSignIn && !h.agentReady && !h.catalogPending && !h.id.startsWith("acp:") && Boolean(canConfigureHarness(h, remote, commands));
     const noModels = h.agentReady && !h.models.length;
+    const account = [h.accountName, h.plan].filter(Boolean).join(" · ") ||
+      (h.accountLoading
+        ? m.onboarding_loading_account()
+        : claudeProviderLabel(h) ||
+          (h.authMethod === "apiKey" ? m.onboarding_api_key() : h.authMethod === "local" ? m.projects_local() : status.label));
     const detail = h.authCheckFailed || !h.agentReady
         ? status.label
         : noModels ? m.settings_no_models()
-        : [h.accountName, h.plan].filter(Boolean).join(" · ") ||
-          (h.accountLoading
-            ? m.onboarding_loading_account()
-            : claudeProviderLabel(h) ||
-              (h.authMethod === "apiKey" ? m.onboarding_api_key() : h.authMethod === "local" ? m.projects_local() : status.label));
+        : `${account} · ${available}`;
     const ownName = presets.data?.find((preset) => preset.setupUrl === h.setupUrl)?.name ?? h.name;
     const name = h.label?.name ?? ownName;
     // OpenCode's own row stands for a fault its providers hit; their rows carry the switches.
@@ -840,6 +846,7 @@ export function AgentList({ remote, onboarding }: {
     const lineCount = agentModelLines("opencode", models).length;
     const has = (source: FoundProvider["sources"][number]) => provider.sources.includes(source);
     const envVar = provider.env?.[0];
+    const savedHere = has("env") && envVar && onOpenEnvVar && envVars.data?.vars.some((v) => v.key === envVar && !v.inProcessEnv);
     const where = has("config") ? m.settings_found_config()
       : has("auth") ? m.settings_found_signed_in()
         : has("env") && envVar ? m.settings_found_env({ name: ltr(envVar) })
@@ -847,7 +854,7 @@ export function AgentList({ remote, onboarding }: {
     const count = opencode?.catalogPending || harnessesFetching ? m.common_checking()
       : lineCount > 0 ? modelsAvailable(lineCount) : m.settings_no_models();
     const file = provider.configPath && <code className="wrap-anywhere">{provider.configPath}</code>;
-    const remove = provider.removable && !remote
+    const remove = provider.removable && !remote && !opencode?.catalogPending
       ? () => confirmRemove(look.name, () => api.removeFoundProvider(provider.id), m.settings_remove_found_description())
       : undefined;
     return (
@@ -867,12 +874,24 @@ export function AgentList({ remote, onboarding }: {
       >
         <div className={cn(KV_CLASS_NAME, "[&_.v]:text-sm")}>
           {provider.baseUrl && <><span className="k">{m.local_models_address()}</span><span className="v wrap-anywhere">{provider.baseUrl}</span></>}
-          {provider.env?.length ? <><span className="k">{m.onboarding_api_key()}</span><span className="v">{provider.env.join(", ")}</span></> : null}
+          {provider.env?.length ? (
+            <>
+              <span className="k">{m.onboarding_api_key()}</span>
+              <span className="v">
+                {savedHere ? (
+                  <>
+                    <button type="button" className="text-accent-blue-strong underline-offset-2 hover:underline" onClick={() => onOpenEnvVar(envVar)}>{envVar}</button>
+                    {provider.env.slice(1).map((name) => `, ${name}`)}
+                  </>
+                ) : provider.env.join(", ")}
+              </span>
+            </>
+          ) : null}
           {file && <><span className="k">{m.settings_found_config_file()}</span><span className="v">{file}</span></>}
           {models.length > 0 && <><span className="k">{m.settings_page_agent_models()}</span><span className="v"><ModelCount harness="opencode" models={models} /></span></>}
         </div>
         {!provider.removable && (has("env") && envVar
-          ? <p className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}>{m.settings_found_env_note({ name: ltr(envVar) })}</p>
+          ? <p className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}>{(savedHere ? m.settings_found_env_saved_note : m.settings_found_env_note)({ name: ltr(envVar) })}</p>
           : provider.configPath && <p className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}>{m.settings_found_config_note({ path: ltr(provider.configPath) })}</p>)}
         {remove && (
           <div className="mt-3 flex items-center gap-2">
@@ -3628,6 +3647,7 @@ function EnvRow({
   setInProject?: boolean;
 }) {
   const workspace = useWorkspace();
+  const { id: elementId } = useContext(WorkspaceDomContext);
 
   const plain = entry?.value != null;
   const stored = entry?.value ?? "";
@@ -3664,7 +3684,7 @@ function EnvRow({
 
   return (
     <>
-      <tr>
+      <tr id={projectId ? undefined : elementId(`env-${name}`)} tabIndex={-1} className="outline-none focus:bg-highlight">
         <td>
           <div className="font-mono text-sm">{name}</div>
           {entry && <EnvDescription name={name} description={entry.description ?? ""} projectId={projectId} />}
@@ -3813,10 +3833,23 @@ function AddVarRow({ projectId, onDone }: { projectId?: string; onDone: () => vo
 
 const ENV_TABLE_CLASS_NAME = "env-table w-full table-fixed border-collapse text-base [&_td:first-child]:w-[32%] [&_td:first-child]:wrap-anywhere [&_.badge]:ms-2 [&_td]:h-12 [&_td]:pt-0 [&_td]:pe-2.5 [&_td]:pb-0 [&_td]:ps-0 [&_td]:align-middle [&_td]:border-b [&_td]:border-b-border-variant [&_tr:last-child_td]:border-b-0 [&_td:last-child]:w-29 [&_td:last-child]:whitespace-nowrap [&_td:last-child]:text-end [&_td[colspan]]:whitespace-normal [&_td[colspan]]:text-start [&_.icon-btn]:ms-2 [&_.icon-btn]:align-middle";
 
+/** The variable an agent row opened Environment for, until its row takes focus. Each tab mounts its own view. */
+let pendingEnvFocus: string | null = null;
+
 function EnvVarsSection({ project }: { project: Project | null }) {
+  const { id: elementId } = useContext(WorkspaceDomContext);
   const varsQuery = useQuery(useWorkspace().queries.getEnvVarsQuery(project?.id));
   const settings = varsQuery.data ?? null;
   const vars = settings?.vars ?? null;
+  const loaded = vars !== null;
+
+  useEffect(() => {
+    if (!pendingEnvFocus || !loaded) return;
+    const row = document.getElementById(elementId(`env-${pendingEnvFocus}`));
+    pendingEnvFocus = null;
+    row?.focus({ preventScroll: true });
+    row?.scrollIntoView({ block: "center" });
+  }, [loaded]);
   const projectVars = settings?.projectVars ?? [];
   const loadError = settings ? null : varsQuery.error?.message ?? null;
   const [adding, setAdding] = useState(false);
@@ -5524,7 +5557,7 @@ export function SettingsView({
           <p className="mt-0 mx-0 mb-5 text-base leading-relaxed text-text">{m.settings_agents_intro()}</p>
           <div className="settings-stack mt-4.5">
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <AgentsTab remote={remote} />
+              <AgentsTab remote={remote} onOpenEnvVar={(name) => { pendingEnvFocus = name; onSelectTab("environment"); }} />
             </section>
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <h2>{m.skills_tab_customize()}</h2>

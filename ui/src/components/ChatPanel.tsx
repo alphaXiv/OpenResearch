@@ -6407,11 +6407,13 @@ export function ChatPanel({
     document.addEventListener("pointerdown", away, true);
     return () => document.removeEventListener("pointerdown", away, true);
   }, [doneExpanded, closeDone]);
+  const sidebarTotals = flatSessions.data?.pages[0]?.totals;
   const doneSessions = useInfiniteQuery({
     ...listSidebarChatSessionsQuery("archived"),
-    // Read while Done is folded too: hovering its header shows the count.
-    enabled: !embedded && sidebarGrouping === "inbox",
+    // Folded, Done loads only for its count, which a server sending `totals` already gives.
+    enabled: !embedded && sidebarGrouping === "inbox" && (doneExpanded || flatSessions.isSuccess && !sidebarTotals),
   });
+  const prefetchDone = () => void queryClient.prefetchInfiniteQuery(listSidebarChatSessionsQuery("archived"));
   const sessionsOptions = useMemo(() => listChatSessionsQuery(projectId), [projectId]);
   const { data: sessions = EMPTY_SESSIONS, isSuccess: sessionsLoaded } = useQuery(sessionsOptions);
   const setSessions = useCallback((value: React.SetStateAction<ChatSession[]>) => {
@@ -8825,7 +8827,7 @@ export function ChatPanel({
     inboxEnd = sidebarRows.length;
     if (workingPlace === "bottom") pushWorking();
     const archived = doneSessions.data?.pages;
-    const doneCount = archived?.[0]?.total ?? archived?.flatMap((page) => page.sessions).length ?? 0;
+    const doneCount = sidebarTotals?.archived ?? archived?.[0]?.total ?? archived?.flatMap((page) => page.sessions).length ?? 0;
     sidebarRows.push({ kind: "section", section: "done", collapsed: !doneExpanded, count: doneCount });
     const doneStart = sidebarRows.length;
     if (doneExpanded) {
@@ -9189,6 +9191,7 @@ export function ChatPanel({
         <div key={sidebarRowKey(row)} data-index={index} className="relative" style={{ height: sidebarRowHeight(row) }}
           onFocusCapture={() => setFocusedSidebarRow(sidebarRowKey(row))}>
           <button data-sidebar-keyboard-row aria-expanded={!row.collapsed} onClick={toggle}
+            onPointerEnter={row.section === "done" ? prefetchDone : undefined} onFocus={row.section === "done" ? prefetchDone : undefined}
             className="group/section flex h-full w-full items-end gap-1 rounded-md px-2.25 pb-1.5 text-start text-sm font-medium text-subtext hover:text-text">
             <span>{row.section === "inbox" ? m.sidebar_inbox() : row.section === "working" ? m.chat_inbox_working() : m.chat_inbox_done()}</span>
             {row.section === "done"

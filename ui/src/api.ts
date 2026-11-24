@@ -1952,8 +1952,14 @@ export interface ChatSearchPage {
   requiresLongerQuery: boolean;
 }
 export interface SidebarChatCursor { updatedAt: number; id: string }
-/** `total` counts every chat the filter holds, past the loaded pages; a server too old to send it omits it. */
-export interface SidebarChatPage { sessions: ChatSession[]; next: SidebarChatCursor | null; total?: number }
+export interface SidebarChatTotals { active: number; archived: number }
+/** A chat's sidebar row as the server now reads it; null once the sidebar no longer lists it. `atWork` lists it first however old it is. */
+export interface SidebarCard { sessionId: string; session: ChatSession | null; atWork: boolean }
+/**
+ * `total` counts every chat the filter holds, past the loaded pages; a server too old to send it omits it.
+ * `totals` counts both sections; a server that sends it also streams each changed card as `chat.sidebar`.
+ */
+export interface SidebarChatPage { sessions: ChatSession[]; next: SidebarChatCursor | null; total?: number; totals?: SidebarChatTotals }
 
 /** Per-session (and per-turn) composer selections beyond the harness itself. */
 export interface TurnOptions {

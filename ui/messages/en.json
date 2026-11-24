@@ -1807,6 +1807,7 @@
   "settings_found_opencode": "In OpenCode",
   "settings_found_config_file": "Config file",
   "settings_found_env_note": "{name} in your environment provides this provider's key. To remove it, delete {name} where you set it, or turn the provider off here.",
+  "settings_found_env_saved_note": "{name} in the Environment tab provides this provider's key. To remove it, delete it there, or turn the provider off here.",
   "settings_found_config_note": "To delete this provider, remove it from {path}, or turn it off here.",
   "settings_remove_found_description": "This also removes it from OpenCode on this computer: its sign-in and its entry in your OpenCode config.",
   "add_agent_hide_free_models": "Hide Free OpenCode Models",

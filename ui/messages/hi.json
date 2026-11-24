@@ -1807,6 +1807,7 @@
   "settings_found_opencode": "OpenCode में",
   "settings_found_config_file": "कॉन्फ़िग फ़ाइल",
   "settings_found_env_note": "आपके एनवायरनमेंट का {name} इस प्रदाता की कुंजी देता है। इसे हटाने के लिए {name} को वहाँ से हटाएँ जहाँ आपने उसे सेट किया था, या यहाँ प्रदाता बंद करें।",
+  "settings_found_env_saved_note": "एनवायरनमेंट टैब का {name} इस प्रदाता की कुंजी देता है। इसे हटाने के लिए उसे वहीं से हटाएँ, या यहाँ प्रदाता बंद करें।",
   "settings_found_config_note": "इस प्रदाता को हटाने के लिए इसे {path} से हटाएँ, या यहाँ बंद करें।",
   "settings_remove_found_description": "यह इसे इस कंप्यूटर के OpenCode से भी हटा देता है: इसका साइन-इन और आपके OpenCode कॉन्फ़िग में इसकी एंट्री।",
   "add_agent_hide_free_models": "OpenCode के मुफ़्त मॉडल छिपाएँ",

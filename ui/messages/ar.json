@@ -1807,6 +1807,7 @@
   "settings_found_opencode": "في OpenCode",
   "settings_found_config_file": "ملف الإعدادات",
   "settings_found_env_note": "يوفّر {name} في بيئتك مفتاح هذا المزوّد. لإزالته، احذف {name} من حيث عيّنته، أو أوقف المزوّد هنا.",
+  "settings_found_env_saved_note": "يوفّر {name} في تبويب البيئة مفتاح هذا المزوّد. لإزالته، احذفه من هناك، أو أوقف المزوّد هنا.",
   "settings_found_config_note": "لحذف هذا المزوّد، أزله من {path}، أو أوقفه هنا.",
   "settings_remove_found_description": "يزيله هذا أيضًا من OpenCode على هذا الحاسوب: تسجيل دخوله ومدخله في إعدادات OpenCode لديك.",
   "add_agent_hide_free_models": "إخفاء نماذج OpenCode المجانية",

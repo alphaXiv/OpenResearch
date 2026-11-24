@@ -1807,6 +1807,7 @@
   "settings_found_opencode": "В OpenCode",
   "settings_found_config_file": "Файл конфигурации",
   "settings_found_env_note": "Ключ этого провайдера задаёт {name} в вашем окружении. Чтобы убрать провайдера, удалите {name} там, где задали, или выключите провайдера здесь.",
+  "settings_found_env_saved_note": "Ключ этого провайдера задаёт {name} на вкладке «Окружение». Чтобы убрать провайдера, удалите его там или выключите провайдера здесь.",
   "settings_found_config_note": "Чтобы удалить провайдера, уберите его из {path} или выключите здесь.",
   "settings_remove_found_description": "Провайдер удалится и из OpenCode на этом компьютере: его вход и запись в вашей конфигурации OpenCode.",
   "add_agent_hide_free_models": "Скрыть бесплатные модели OpenCode",

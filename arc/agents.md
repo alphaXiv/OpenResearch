@@ -131,7 +131,7 @@ Through it an agent delegates (`src/local/chat/delegation.rs`). It names a versi
 
 **Messages travel by reference.** A user message reaches its agent tagged with a short ref, and a ref in a task or message expands to the cited message, its chat and its attachments, so a delegate reads the user's own words rather than a paraphrase.
 
-**Any agent can reach any chat.** It can read, message or answer any chat, and stop only its own delegates; what the receiving agent does with a message is left to that chat's permission mode. Agents answer a delegate's questions; approvals, and questions from a chat that is no delegate, stay with the user.
+**Any agent can reach any chat.** It can list chats: the top of the user's inbox or Working, a search that also reaches Done, or the chats linked to one by who started whom (parent, children, siblings, the whole tree). It can read, message or answer any chat, and stop only its own delegates; what the receiving agent does with a message is left to that chat's permission mode. Agents answer a delegate's questions; approvals, and questions from a chat that is no delegate, stay with the user.
 
 **Nesting is deliberate.** By default a delegate cannot delegate; a delegation or a setting can allow it, and every delegate is told how deep it is.
 

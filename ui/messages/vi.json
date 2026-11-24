@@ -1807,6 +1807,7 @@
   "settings_found_opencode": "Trong OpenCode",
   "settings_found_config_file": "Tệp cấu hình",
   "settings_found_env_note": "{name} trong môi trường của bạn cung cấp khóa của nhà cung cấp này. Để xóa nó, hãy xóa {name} nơi bạn đặt hoặc tắt nhà cung cấp tại đây.",
+  "settings_found_env_saved_note": "{name} trong tab Môi trường cung cấp khóa của nhà cung cấp này. Để xóa nó, hãy xóa ở đó hoặc tắt nhà cung cấp tại đây.",
   "settings_found_config_note": "Để xóa nhà cung cấp này, hãy xóa nó khỏi {path} hoặc tắt nó tại đây.",
   "settings_remove_found_description": "Thao tác này cũng xóa nó khỏi OpenCode trên máy tính này: thông tin đăng nhập và mục nhập của nó trong cấu hình OpenCode của bạn.",
   "add_agent_hide_free_models": "Ẩn các mô hình OpenCode miễn phí",

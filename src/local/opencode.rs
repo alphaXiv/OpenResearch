@@ -356,7 +356,7 @@ pub fn ensure_playbook(
     session_id: &str,
     session_skills_dir: Option<&str>,
 ) -> Result<(PathBuf, PathBuf)> {
-    let workdir = git::ensure_session_worktree(project, session_id)?;
+    let workdir = git::ensure_session_worktree(&crate::store::Store::open()?, project, session_id)?;
     let playbook = workdir.join(PLAYBOOK_REL);
     if let Some(parent) = playbook.parent() {
         std::fs::create_dir_all(parent)

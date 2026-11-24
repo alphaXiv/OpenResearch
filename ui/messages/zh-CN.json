@@ -1807,6 +1807,7 @@
   "settings_found_opencode": "在 OpenCode 中",
   "settings_found_config_file": "配置文件",
   "settings_found_env_note": "你环境中的 {name} 提供了此提供方的密钥。要移除它，请在设置 {name} 的地方删除它，或在此关闭该提供方。",
+  "settings_found_env_saved_note": "环境标签页中的 {name} 提供了此提供方的密钥。要移除它，请在那里删除，或在此关闭该提供方。",
   "settings_found_config_note": "要删除此提供方，请从 {path} 中移除它，或在此关闭它。",
   "settings_remove_found_description": "这也会把它从这台电脑的 OpenCode 中移除：包括它的登录和你 OpenCode 配置中的条目。",
   "add_agent_hide_free_models": "隐藏 OpenCode 免费模型",

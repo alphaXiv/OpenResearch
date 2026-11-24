@@ -3256,6 +3256,8 @@ pub struct ChatHost {
     /// Steers handed toward the agent that it has not read yet, oldest first;
     /// each also has a queued row, held out of `queued` until released.
     pending_steers: std::sync::Mutex<HashMap<String, Vec<SteerMessage>>>,
+    /// When each chat last got a steer, read or not: an agent can read one before `wait` looks.
+    last_steered_at: std::sync::Mutex<HashMap<String, i64>>,
     queue_dispatch_in_flight: std::sync::Mutex<HashMap<String, String>>,
     /// Running turns a previous server left whose kept agent was taken back to resume them,
     /// by session; each resumes once its predecessor's lease is gone.
@@ -3775,7 +3777,12 @@ fn slash_skill_name(token: &str) -> Option<String> {
     Some(name.to_ascii_lowercase())
 }
 
-async fn prepare_project_slash_worktree(project: &LocalProject, text: &str, session_id: &str) {
+async fn prepare_project_slash_worktree(
+    project: &LocalProject,
+    text: &str,
+    session_id: &str,
+    worktree: &std::path::Path,
+) {
     let has_project_skill = text
         .split_whitespace()
         .filter_map(slash_skill_name)
@@ -3785,15 +3792,13 @@ async fn prepare_project_slash_worktree(project: &LocalProject, text: &str, sess
                 Some((_, crate::local::user_skills::SkillSelection::Project))
             )
         });
-    if !has_project_skill
-        || crate::local::git::existing_session_worktree_path(project, session_id).exists()
-    {
+    if !has_project_skill || worktree.exists() {
         return;
     }
     let project = project.clone();
     let session_id = session_id.to_string();
     let _ = tokio::task::spawn_blocking(move || {
-        crate::local::git::ensure_session_worktree(&project, &session_id)
+        crate::local::git::ensure_session_worktree(&Store::open()?, &project, &session_id)
     })
     .await;
 }
@@ -3802,7 +3807,7 @@ fn selected_slash_skills(
     project: &LocalProject,
     text: &str,
     harness: Option<&str>,
-    session_id: Option<&str>,
+    worktree: Option<&std::path::Path>,
 ) -> (Vec<SelectedSlashSkill>, bool) {
     let has_request = text
         .split_whitespace()
@@ -3835,9 +3840,7 @@ fn selected_slash_skills(
         } else if let Some(instructions) = crate::local::user_skills::instructions(
             &name,
             harness,
-            session_id
-                .map(|id| crate::local::git::existing_session_worktree_path(project, id))
-                .as_deref(),
+            worktree,
             Some(std::path::Path::new(&project.repo_path)),
         ) {
             seen.insert(name);
@@ -3865,9 +3868,9 @@ fn expand_slash_skills(
     project: &LocalProject,
     text: &str,
     harness: Option<&str>,
-    session_id: Option<&str>,
+    worktree: Option<&std::path::Path>,
 ) -> String {
-    let (selected, has_request) = selected_slash_skills(project, text, harness, session_id);
+    let (selected, has_request) = selected_slash_skills(project, text, harness, worktree);
     if selected.is_empty() {
         return text.to_string();
     }
@@ -4250,6 +4253,7 @@ impl ChatHost {
             queue_dispatch_cancelled: std::sync::Mutex::new(HashSet::new()),
             steering: std::sync::Mutex::new(HashMap::new()),
             pending_steers: std::sync::Mutex::new(HashMap::new()),
+            last_steered_at: std::sync::Mutex::new(HashMap::new()),
             queue_dispatch_in_flight: std::sync::Mutex::new(HashMap::new()),
             resumable: std::sync::Mutex::new(HashMap::new()),
             stopped: std::sync::Mutex::new(HashSet::new()),
@@ -4916,6 +4920,19 @@ impl ChatHost {
         self.turns.lock().await.contains_key(session_id)
     }
 
+    /// Holds `session_id` busy with a turn that never ends.
+    #[cfg(test)]
+    pub(crate) async fn hold_turn(&self, session_id: &str) {
+        self.turns.lock().await.insert(
+            session_id.into(),
+            TurnState::Active(ActiveTurn {
+                handle: tokio::spawn(std::future::pending()),
+                message_id: format!("{session_id}_answer"),
+                turn_id: format!("{session_id}_turn"),
+            }),
+        );
+    }
+
     /// Run `f` only if none of `session_ids` has a turn, holding the turn map so none can start
     /// until it returns.
     pub async fn while_idle<T>(
@@ -5403,6 +5420,10 @@ impl ChatHost {
             .entry(session_id.to_string())
             .or_default()
             .push(message.clone());
+        self.last_steered_at
+            .lock()
+            .unwrap()
+            .insert(session_id.to_string(), crate::store::now_ms());
         // The row is saved; a failed reload only delays its bubble until the next one.
         if let Err(error) = self.refresh_persisted_queue_locked(session_id, store) {
             eprintln!("orx up: could not reload the queue of chat {session_id}: {error}");
@@ -5456,6 +5477,15 @@ impl ChatHost {
             .extend(held.iter().cloned());
         self.refresh_persisted_queue_locked(session_id, &store)?;
         Ok(held)
+    }
+
+    /// Whether the chat got a steer sent at or after `since` (ms).
+    pub fn steered_since(&self, session_id: &str, since: i64) -> bool {
+        self.last_steered_at
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .is_some_and(|at| *at >= since)
     }
 
     /// The oldest pending steer the agent was sent as `text`.
@@ -5559,6 +5589,7 @@ impl ChatHost {
             }
             return Err(error);
         }
+        self.last_steered_at.lock().unwrap().remove(session_id);
         let had_steers = self
             .pending_steers
             .lock()
@@ -6030,8 +6061,16 @@ impl ChatHost {
                     .get_chat_session(session_id)?
                     .ok_or_else(|| anyhow!("chat session not found"))?;
                 let project = store.get_local_project(&session.project_id)?;
-                if let Some(project) = &project {
-                    prepare_project_slash_worktree(project, &text, session_id).await;
+                let worktree = project
+                    .as_ref()
+                    .map(|project| {
+                        crate::local::git::existing_session_worktree_path(
+                            &store, project, session_id,
+                        )
+                    })
+                    .transpose()?;
+                if let (Some(project), Some(worktree)) = (&project, &worktree) {
+                    prepare_project_slash_worktree(project, &text, session_id, worktree).await;
                 }
                 let message = SteerMessage {
                     id: new_queued_id(),
@@ -6042,7 +6081,7 @@ impl ChatHost {
                                 &project,
                                 &text,
                                 Some(&session.harness),
-                                Some(session_id),
+                                worktree.as_deref(),
                             );
                             delegation::expand_refs(&store, &text).unwrap_or(text)
                         })
@@ -7284,9 +7323,12 @@ impl ChatHost {
         )?);
         // Slash-skills: the transcript keeps the `/name` the user typed; the
         // harness gets the expanded prompt. What orx writes is never a command.
+        let worktree =
+            crate::local::git::existing_session_worktree_path(&store, &project, &session.id)?;
         if prepared_input.is_none() && orx.is_empty() {
             for message in &messages {
-                prepare_project_slash_worktree(&project, &message.text, &session.id).await;
+                prepare_project_slash_worktree(&project, &message.text, &session.id, &worktree)
+                    .await;
             }
         }
         // A command keeps its leading `/`, and what orx writes keeps its
@@ -7307,7 +7349,7 @@ impl ChatHost {
                         &project,
                         text,
                         Some(&session.harness),
-                        Some(&session.id),
+                        Some(&worktree),
                     );
                     delegation::expand_refs(&store, &text).unwrap_or(text)
                 } else {

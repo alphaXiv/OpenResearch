@@ -32,7 +32,7 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::commands::remote_host::{DashboardLock, HostDescriptor, RemoteAuth};
 use crate::commands::up_remote::{self, RemoteSessionStatus};
@@ -307,6 +307,11 @@ pub async fn run(args: UpArgs) -> Result<()> {
         let gate = state.data_dir_gate.clone();
         tokio::task::spawn_blocking(move || local::demo::prewarm(move_in_progress, gate));
     }
+    tokio::spawn(publish_sidebar_rows(
+        state.clone(),
+        state.chat.subscribe(),
+        engine.bus.subscribe(),
+    ));
     tokio::spawn(local::chat::keep_turn_leases(
         state.chat.clone(),
         state.data_dir_move_in_progress.clone(),
@@ -2738,15 +2743,13 @@ async fn create_independent_project_repository(
     organization: Option<&str>,
 ) -> Result<local::model::LocalProject> {
     let store = Store::open()?;
-    let legacy = store
-        .list_chat_sessions_by_project(&project.id)?
-        .into_iter()
-        .map(|session| session.id)
-        .filter(|id| {
-            local::git::existing_session_worktree_path(&project, id)
-                != local::git::session_worktree_path(&project.id, id)
-        })
-        .collect::<Vec<_>>();
+    let mut legacy = Vec::new();
+    for session in store.list_chat_sessions_by_project(&project.id)? {
+        let worktree = local::git::existing_session_worktree_path(&store, &project, &session.id)?;
+        if worktree != local::git::session_worktree_path(&project.id, &session.id) {
+            legacy.push(session.id);
+        }
+    }
     // `git worktree move` would pull a running turn's checkout out from under it.
     chat.while_idle(&legacy, || {
         local::git::migrate_legacy_project_worktrees(&project, &legacy)
@@ -3644,22 +3647,43 @@ async fn set_experiment_archive(
 
 async fn delete_experiment(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     reject_if_moving(&state)?;
+    let chat = state.chat.clone();
     // Deletion can wait up to RUN_ARTIFACTS_WAIT for the run-artifacts lock.
-    blocking_api(move || {
-        let store = Store::open()?;
-        let experiment = store
-            .get_local_experiment(&id)?
-            .ok_or_else(|| not_found("experiment"))?;
-        let _admission = state
-            .project_lifecycle
-            .admit(&experiment.project_id)
-            .ok_or_else(|| bad_request("project deletion is in progress"))?;
-        let deleted = local::experiments::delete_experiment(&store, &id).map_err(bad_request)?;
-        Ok(Json(
-            json!({ "ok": true, "branchCommit": deleted.branch_commit }),
-        ))
-    })
-    .await
+    let (response, chats) =
+        tokio::task::spawn_blocking(move || -> std::result::Result<_, ApiError> {
+            let store = Store::open()?;
+            let experiment = store
+                .get_local_experiment(&id)?
+                .ok_or_else(|| not_found("experiment"))?;
+            let _admission = state
+                .project_lifecycle
+                .admit(&experiment.project_id)
+                .ok_or_else(|| bad_request("project deletion is in progress"))?;
+            let mut chats = HashSet::new();
+            for run in store.list_runs_by_experiment(&id)? {
+                chats.extend(store.run_subscribers(&run.id)?);
+            }
+            let deleted =
+                local::experiments::delete_experiment(&store, &id).map_err(bad_request)?;
+            Ok((
+                Json(json!({ "ok": true, "branchCommit": deleted.branch_commit })),
+                chats,
+            ))
+        })
+        .await
+        .map_err(|e| ApiError::from(anyhow!("Request worker failed: {e}")))??;
+    // Their sidebar cards showed the deleted runs; the deletion stands either way.
+    for id in chats {
+        match Store::open().and_then(|store| store.get_chat_session(&id)) {
+            Ok(session) => {
+                chat.emit_session(session).await;
+            }
+            Err(error) => eprintln!(
+                "orx up: could not refresh chat {id}'s sidebar card after deleting its runs: {error:#}"
+            ),
+        }
+    }
+    Ok(response)
 }
 
 async fn list_project_runs(Path(id): Path<String>) -> ApiResult {
@@ -4335,7 +4359,7 @@ fn resolve_checkout_root(
                 .get_chat_session(s)?
                 .filter(|sess| sess.project_id == project.id)
                 .ok_or_else(|| not_found("chat session"))?;
-            let dir = local::git::existing_session_worktree_path(project, &session.id);
+            let dir = local::git::existing_session_worktree_path(store, project, &session.id)?;
             match crate::paths::canonicalize(&dir) {
                 Ok(p) => Some(p),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -6578,7 +6602,7 @@ pub(super) fn env_key_error(key: &str) -> Option<String> {
     })
 }
 
-async fn set_env_var(Json(req): Json<SetEnvVarReq>) -> ApiResult {
+async fn set_env_var(State(state): State<AppState>, Json(req): Json<SetEnvVarReq>) -> ApiResult {
     let key = req.key.trim().to_string();
     if let Some(error) = env_key_error(&key) {
         return Err(bad_request(error));
@@ -6590,7 +6614,9 @@ async fn set_env_var(Json(req): Json<SetEnvVarReq>) -> ApiResult {
     if value.is_none() && req.description.is_none() {
         return Err(bad_request("give a value, a description, or both"));
     }
-    tokio::task::spawn_blocking(move || {
+
+    let rechecks = req.project_id.is_none() && value.is_some();
+    let response = tokio::task::spawn_blocking(move || -> ApiResult {
         let store = Store::open()?;
         let project = req.project_id.as_deref();
         if let Some(project) = project {
@@ -6617,14 +6643,25 @@ async fn set_env_var(Json(req): Json<SetEnvVarReq>) -> ApiResult {
         Ok(Json(env_settings_json(project)?))
     })
     .await
-    .map_err(|e| ApiError::from(anyhow!("env task failed: {e}")))?
+    .map_err(|e| ApiError::from(anyhow!("env task failed: {e}")))??;
+    // OpenCode turns providers on from keys in its environment.
+    if rechecks {
+        recheck_opencode(&state).await;
+    }
+    Ok(response)
 }
 
-async fn delete_env_var(Path(key): Path<String>, Query(scope): Query<EnvQuery>) -> ApiResult {
+async fn delete_env_var(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+    Query(scope): Query<EnvQuery>,
+) -> ApiResult {
     if !valid_env_key(&key) {
         return Err(bad_request("invalid key"));
     }
-    tokio::task::spawn_blocking(move || {
+
+    let rechecks = scope.project_id.is_none();
+    let response = tokio::task::spawn_blocking(move || -> ApiResult {
         let store = Store::open()?;
         let project = scope.project_id.as_deref();
         match project {
@@ -6637,7 +6674,11 @@ async fn delete_env_var(Path(key): Path<String>, Query(scope): Query<EnvQuery>) 
         Ok(Json(env_settings_json(project)?))
     })
     .await
-    .map_err(|e| ApiError::from(anyhow!("env task failed: {e}")))?
+    .map_err(|e| ApiError::from(anyhow!("env task failed: {e}")))??;
+    if rechecks {
+        recheck_opencode(&state).await;
+    }
+    Ok(response)
 }
 
 // --- data directory ---------------------------------------------------------
@@ -8538,7 +8579,7 @@ fn session_checkout_root(
     project: &local::model::LocalProject,
     session_id: &str,
 ) -> std::result::Result<std::path::PathBuf, ApiError> {
-    match local::git::ensure_session_worktree(project, session_id) {
+    match local::git::ensure_session_worktree(store, project, session_id) {
         Ok(dir) => Ok(crate::paths::canonicalize(&dir).unwrap_or(dir)),
         Err(error) => {
             eprintln!("orx up: session worktree unavailable, using the clone: {error}");
@@ -9151,6 +9192,33 @@ async fn remove_found_provider(State(state): State<AppState>, Path(id): Path<Str
             "OpenResearch added this provider. Remove it from its own row in Settings → Agents.",
         ));
     }
+
+    let env_key = state
+        .harnesses
+        .lock()
+        .await
+        .as_ref()
+        .and_then(|(_, payload)| {
+            let opencode = payload["harnesses"]
+                .as_array()?
+                .iter()
+                .find(|h| h["id"] == "opencode")?;
+            let found = opencode["foundProviders"]
+                .as_array()?
+                .iter()
+                .find(|found| found["id"] == id.as_str())?;
+            let from_env = found["sources"]
+                .as_array()?
+                .iter()
+                .any(|source| source == "env");
+            from_env.then(|| found["env"][0].as_str().map(str::to_owned))?
+        });
+    if let Some(var) = env_key {
+        return Err(bad_request(format!(
+            "`{var}` in your environment provides {id}. Remove it there, or turn this provider off."
+        )));
+    }
+
     let key = format!("opencode:{id}");
     tokio::task::spawn_blocking(move || {
         local::harness::opencode::delete_found_provider(&id)?;
@@ -10278,6 +10346,199 @@ fn sidebar_session_json(
     Ok(value)
 }
 
+/// A chat's sidebar card: the session, what it is doing, and its newest run.
+fn sidebar_row_json(
+    store: &Store,
+    session: &StoredChatSession,
+    busy: bool,
+    background: Option<&Value>,
+    catalog: &Value,
+) -> Result<Value> {
+    let mut value = sidebar_session_json(store, session, busy, background, catalog)?;
+    value["lastRun"] = last_run_json(store, &session.id)?;
+    Ok(value)
+}
+
+fn sidebar_totals(store: &Store) -> Result<Value> {
+    Ok(json!({
+        "active": store.count_sidebar_chat_sessions(Some(false))?,
+        "archived": store.count_sidebar_chat_sessions(Some(true))?,
+    }))
+}
+
+/// The chat whose sidebar card a chat event may change.
+fn sidebar_change(name: &str, data: &Value) -> Option<String> {
+    let id = match name {
+        "chat.session" => &data["session"]["id"],
+        "chat.session.deleted" | "chat.busy" | "chat.background" | "chat.branch" => {
+            &data["sessionId"]
+        }
+        // A prompt card opening or being answered can change whether the chat waits on the user.
+        "chat.message"
+            if data["message"]["parts"]
+                .as_array()
+                .is_some_and(|parts| parts.iter().any(|part| part["type"] == "prompt")) =>
+        {
+            &data["sessionId"]
+        }
+        _ => return None,
+    };
+    id.as_str().map(str::to_owned)
+}
+
+/// What a burst of events changed: chats by id, and runs whose chat is looked up with the rest.
+#[derive(Default)]
+struct SidebarChanges {
+    chats: HashSet<String>,
+    runs: HashSet<String>,
+    lagged: bool,
+}
+
+impl SidebarChanges {
+    fn is_empty(&self) -> bool {
+        self.chats.is_empty() && self.runs.is_empty() && !self.lagged
+    }
+
+    fn chat_event(
+        &mut self,
+        event: std::result::Result<(&'static str, Value), broadcast::error::RecvError>,
+    ) -> bool {
+        match event {
+            Ok((name, data)) => self.chats.extend(sidebar_change(name, &data)),
+            Err(broadcast::error::RecvError::Lagged(_)) => self.lagged = true,
+            Err(broadcast::error::RecvError::Closed) => return false,
+        }
+        true
+    }
+
+    fn run_event(
+        &mut self,
+        event: std::result::Result<crate::engine::bus::RunEvent, broadcast::error::RecvError>,
+    ) {
+        match event {
+            Ok(crate::engine::bus::RunEvent::Changed { run_id, .. }) => {
+                self.runs.insert(run_id);
+            }
+            Err(broadcast::error::RecvError::Lagged(_)) => self.lagged = true,
+            _ => {}
+        }
+    }
+}
+
+/// Sends the sidebar cards of the chats a burst of events changed, with the sidebar's counts, so a
+/// dashboard updates those rows instead of re-reading its lists. A missed or unreadable change asks dashboards to resync.
+async fn publish_sidebar_rows(
+    state: AppState,
+    mut events: broadcast::Receiver<(&'static str, Value)>,
+    mut runs: broadcast::Receiver<crate::engine::bus::RunEvent>,
+) {
+    loop {
+        let mut changes = SidebarChanges::default();
+        while changes.is_empty() {
+            tokio::select! {
+                event = events.recv() => if !changes.chat_event(event) { return },
+                event = runs.recv() => changes.run_event(event),
+            }
+        }
+        // Coalesces a burst, such as a turn's busy, session and message events, into one read.
+        let window = tokio::time::sleep(crate::config::paced(Duration::from_millis(50)));
+        tokio::pin!(window);
+        loop {
+            tokio::select! {
+                _ = &mut window => break,
+                event = events.recv() => if !changes.chat_event(event) { return },
+                event = runs.recv() => changes.run_event(event),
+            }
+        }
+        // A data-directory move holds the gate until it ends, so cards and resyncs wait for it.
+        let _data_dir_guard = state.data_dir_gate.lock().await;
+        if changes.lagged {
+            state.chat.emit_event("resync.required", json!({}));
+            continue;
+        }
+        let busy = state.chat.busy_sessions().await;
+        let background = match state.chat.waiting_on().await {
+            Ok(background) => background,
+            Err(error) => {
+                eprintln!(
+                    "orx up: could not read chats' background work for the sidebar: {error:#}"
+                );
+                state.chat.emit_event("resync.required", json!({}));
+                continue;
+            }
+        };
+        let catalog = state
+            .harnesses
+            .lock()
+            .await
+            .as_ref()
+            .map(|(_, catalog)| catalog.clone())
+            .unwrap_or(Value::Null);
+        let batch = tokio::task::spawn_blocking(move || -> Result<Value> {
+            let store = Store::open()?;
+            let mut chats = changes.chats;
+            for run_id in &changes.runs {
+                chats.extend(store.run_subscribers(run_id)?);
+            }
+            // A delegate's work shows on the cards of the chats above it.
+            let mut climbing: Vec<String> = chats.iter().cloned().collect();
+            while let Some(id) = climbing.pop() {
+                if let Some(parent) = store.delegation(&id)?.parent {
+                    if chats.insert(parent.clone()) {
+                        climbing.push(parent);
+                    }
+                }
+            }
+            let totals = sidebar_totals(&store)?;
+            // The chats a page lists first however old they are, so a card can say where it goes.
+            let live: Vec<&str> = busy
+                .iter()
+                .chain(background.keys())
+                .map(String::as_str)
+                .collect();
+            let at_work: HashSet<String> = store
+                .sidebar_chat_sessions_at_work(None, &live)?
+                .into_iter()
+                .map(|session| session.id)
+                .collect();
+            let cards = chats
+                .into_iter()
+                .map(|id| {
+                    let row = store
+                        .get_sidebar_chat_session(&id)?
+                        .map(|session| {
+                            sidebar_row_json(
+                                &store,
+                                &session,
+                                busy.contains(&session.id),
+                                background.get(&session.id),
+                                &catalog,
+                            )
+                        })
+                        .transpose()?;
+                    Ok(json!({
+                        "sessionId": id,
+                        "session": row,
+                        "atWork": at_work.contains(&id),
+                    }))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            // One event per read, so the counts arrive with every card they include.
+            Ok(json!({ "cards": cards, "totals": totals }))
+        })
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|batch| batch);
+        match batch {
+            Ok(batch) => state.chat.emit_event("chat.sidebar", batch),
+            Err(error) => {
+                eprintln!("orx up: could not read changed sidebar rows: {error:#}");
+                state.chat.emit_event("resync.required", json!({}));
+            }
+        }
+    }
+}
+
 /// The newest run a chat launched, for its sidebar card; a run that cannot be shown costs the card a line, not the page.
 fn last_run_json(store: &Store, session_id: &str) -> Result<Value> {
     let Some(run) = store.latest_chat_run(session_id)? else {
@@ -10443,15 +10704,13 @@ async fn list_chat_sessions(
         let sessions: Vec<Value> = sessions
             .iter()
             .map(|session| {
-                let mut value = sidebar_session_json(
+                sidebar_row_json(
                     &store,
                     session,
                     busy.contains(&session.id),
                     background.get(&session.id),
                     &catalog,
-                )?;
-                value["lastRun"] = last_run_json(&store, &session.id)?;
-                Ok(value)
+                )
             })
             .collect::<Result<_>>()?;
         // A folded section still says how many chats it holds, however many pages they run to.
@@ -10459,6 +10718,7 @@ async fn list_chat_sessions(
             "sessions": sessions,
             "next": next,
             "total": store.count_sidebar_chat_sessions(q.archived)?,
+            "totals": sidebar_totals(&store)?,
         })));
     }
     let sessions = match (q.project_id.as_deref(), q.scope.as_deref()) {
@@ -11221,9 +11481,17 @@ async fn update_chat_session(
             .await?
             .ok_or_else(|| not_found("chat session"))?
     } else if req.notify_parent == Some(false) {
-        let session = local::chat::delegation::release_delegate(&Store::open()?, &id)?
+        let store = Store::open()?;
+        let parent = store.delegation(&id)?.parent;
+        let session = local::chat::delegation::release_delegate(&store, &id)?
             .ok_or_else(|| not_found("chat session"))?;
         state.chat.emit_session(Some(session.clone())).await;
+        // The chat it worked for no longer waits on it.
+        if let Some(parent) = parent {
+            state
+                .chat
+                .emit_event("chat.background", json!({ "sessionId": parent }));
+        }
         session
     } else {
         return Err(bad_request("nothing to update"));
@@ -12443,13 +12711,17 @@ mod tests {
             .unwrap()
             .create_local_project(&crate::store::tests::local_project_fixture(&project))
             .unwrap();
+        let state = test_state();
         let set = |value: Option<&str>, description: Option<&str>, project_id: Option<&str>| {
-            set_env_var(Json(SetEnvVarReq {
-                key: key.clone(),
-                value: value.map(str::to_string),
-                description: description.map(str::to_string),
-                project_id: project_id.map(str::to_string),
-            }))
+            set_env_var(
+                State(state.clone()),
+                Json(SetEnvVarReq {
+                    key: key.clone(),
+                    value: value.map(str::to_string),
+                    description: description.map(str::to_string),
+                    project_id: project_id.map(str::to_string),
+                }),
+            )
         };
         let row = |body: &Value, list: &str| {
             body[list]
@@ -12496,6 +12768,7 @@ mod tests {
         assert!(row(&body, "vars").is_some() && row(&body, "projectVars").is_some());
 
         let Json(body) = delete_env_var(
+            State(state.clone()),
             Path(key.clone()),
             Query(EnvQuery {
                 project_id: Some(project.clone()),
@@ -12508,9 +12781,13 @@ mod tests {
             row(&body, "vars").is_some(),
             "deleting the project's copy keeps every project's"
         );
-        let Json(body) = delete_env_var(Path(key.clone()), Query(EnvQuery { project_id: None }))
-            .await
-            .unwrap();
+        let Json(body) = delete_env_var(
+            State(state),
+            Path(key.clone()),
+            Query(EnvQuery { project_id: None }),
+        )
+        .await
+        .unwrap();
         assert!(row(&body, "vars").is_none());
         assert!(!Store::open()
             .unwrap()
@@ -14246,6 +14523,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sidebar_cards_follow_a_chat_marked_done_and_its_runs() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let state = test_state();
+        let _store = Store::open().unwrap();
+        rusqlite::Connection::open(crate::store::data_dir().join("orx.db"))
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO local_projects (id, name, slug, github_owner, github_repo, repo_path, created_at, updated_at)
+                 VALUES ('p', 'Project', 'p', '', '', '/unused', 1, 1);
+                 INSERT INTO chat_sessions (id, project_id, harness, created_at, updated_at)
+                 VALUES ('finished', 'p', 'codex', 1, 1), ('open', 'p', 'codex', 1, 2), ('helper', 'p', 'codex', 1, 3);
+                 INSERT INTO chat_delegates (session_id, parent_session_id, may_delegate, created_at)
+                 VALUES ('helper', 'open', 0, 1);
+                 INSERT INTO local_experiments (id, project_id, slug, branch_name, run_command, created_at, updated_at)
+                 VALUES ('exp-1', 'p', 'exp-1', 'main', '', 5, 5), ('exp-2', 'p', 'exp-2', 'main', '', 4, 4);
+                 INSERT INTO runs (id, experiment_id, project_id, status, backend_json, created_at, updated_at, chat_session_id)
+                 VALUES ('run-1', 'exp-1', 'p', 'running', '{}', 5, 5, 'open'),
+                        ('run-2', 'exp-2', 'p', 'done', '{}', 6, 6, 'open');",
+            )
+            .unwrap();
+        let (runs, runs_rx) = broadcast::channel(16);
+        let mut events = state.chat.subscribe();
+        tokio::spawn(publish_sidebar_rows(
+            state.clone(),
+            state.chat.subscribe(),
+            runs_rx,
+        ));
+        let mut next_batch = async || loop {
+            let (name, data) = events.recv().await.unwrap();
+            if name == "chat.sidebar" {
+                return data;
+            }
+        };
+        let card = |batch: &Value, id: &str| {
+            batch["cards"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|card| card["sessionId"] == id)
+                .cloned()
+                .unwrap()
+        };
+
+        let page = list_chat_sessions(
+            State(state.clone()),
+            Query(serde_json::from_value(json!({"scope": "sidebar", "archived": false})).unwrap()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(page["totals"], json!({"active": 2, "archived": 0}));
+
+        let _ = update_chat_session(
+            State(state.clone()),
+            Path("finished".into()),
+            Json(serde_json::from_value(json!({"archived": true})).unwrap()),
+        )
+        .await
+        .unwrap();
+        let batch = next_batch().await;
+        assert_eq!(card(&batch, "finished")["session"]["archived"], true);
+        assert_eq!(batch["totals"], json!({"active": 1, "archived": 1}));
+
+        // A delegate has no card of its own; its work shows on the card of the chat it works for.
+        state
+            .chat
+            .emit_event("chat.busy", json!({"sessionId": "helper", "busy": false}));
+        let batch = next_batch().await;
+        assert!(card(&batch, "helper")["session"].is_null());
+        assert_eq!(card(&batch, "open")["session"]["id"], "open");
+
+        runs.send(crate::engine::bus::RunEvent::Changed {
+            run_id: "run-1".into(),
+            phase: crate::engine::Phase::Running,
+            contact: crate::store::Contact::Live,
+            cancelling: false,
+        })
+        .unwrap();
+        let batch = next_batch().await;
+        assert_eq!(card(&batch, "open")["session"]["lastRun"]["id"], "run-2");
+        assert_eq!(card(&batch, "open")["atWork"], true);
+
+        // Deleting an experiment takes its finished run off the card.
+        let _ = delete_experiment(State(state.clone()), Path("exp-2".into()))
+            .await
+            .unwrap();
+        let batch = next_batch().await;
+        assert_eq!(card(&batch, "open")["session"]["lastRun"]["id"], "run-1");
+    }
+
+    #[tokio::test]
     async fn an_agent_answers_only_a_delegates_question() {
         if !crate::config::in_test_child(&[]) {
             return;
@@ -14868,7 +15238,6 @@ mod tests {
                 r#"{"openai":{"kind":"key","key":"sk-test","name":"Work OpenAI"}}"#,
             )
             .unwrap();
-            std::env::set_var("XAI_API_KEY", "fixture-only");
             let store = Store::open().unwrap();
             store
                 .set_ui_json("hidden_agents", &["opencode:tinker", "opencode:openai", "cursor"])
@@ -14930,6 +15299,16 @@ mod tests {
                        "logo":"thinkingmachines","baseUrl":"https://tinker.example/v1","npm":"@ai-sdk/openai-compatible","sources":["config"]})
             );
             assert_eq!(rows[1]["removable"], true);
+            let refused = http
+                .delete(format!("http://{address}/api/opencode/found-providers/xai"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(refused.status().as_u16(), 400);
+            assert_eq!(
+                refused.json::<Value>().await.unwrap()["error"],
+                "`XAI_API_KEY` in your environment provides xai. Remove it there, or turn this provider off."
+            );
 
             let named = agents::label(&dashboard, "opencode:tinker", json!({"name":"Tinker Prod"}))
                 .await
@@ -14981,7 +15360,6 @@ mod tests {
                     .send()
             };
             for (id, status, error) in [
-                ("xai", 400, "`XAI_API_KEY` in your environment provides xai. Remove it there, or turn this provider off."),
                 ("openai", 400, "OpenResearch added this provider. Remove it from its own row in Settings → Agents."),
                 ("opencode", 400, "Choose a provider your OpenCode has."),
                 ("mistral", 404, "OpenResearch can't find where your OpenCode sets up mistral. Remove it in OpenCode, or turn this provider off."),

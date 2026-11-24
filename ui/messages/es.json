@@ -1807,6 +1807,7 @@
   "settings_found_opencode": "En OpenCode",
   "settings_found_config_file": "Archivo de configuración",
   "settings_found_env_note": "{name} en tu entorno aporta la clave de este proveedor. Para quitarlo, borra {name} donde lo definiste o desactiva el proveedor aquí.",
+  "settings_found_env_saved_note": "{name} en la pestaña Entorno aporta la clave de este proveedor. Para quitarlo, bórralo allí o desactiva el proveedor aquí.",
   "settings_found_config_note": "Para eliminar este proveedor, quítalo de {path} o desactívalo aquí.",
   "settings_remove_found_description": "También lo quita de OpenCode en este equipo: su inicio de sesión y su entrada en tu configuración de OpenCode.",
   "add_agent_hide_free_models": "Ocultar los modelos gratuitos de OpenCode",
