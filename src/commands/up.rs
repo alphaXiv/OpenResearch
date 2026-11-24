@@ -1302,6 +1302,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             post(reconnect_remote_session),
         )
         .route(
+            "/api/remote/sessions/{id}/update",
+            post(update_remote_session),
+        )
+        .route(
             "/api/remote/sessions/{id}/disconnect",
             post(disconnect_remote_session),
         )
@@ -6317,13 +6321,12 @@ async fn begin_restart(
         Some("the data directory is moving.")
     } else if state.opencode_signins.in_progress() {
         Some("an OpenCode sign-in is still open.")
-    } else if state
-        .remote_sessions
-        .list()
-        .await
-        .iter()
-        .any(|session| session.status == RemoteSessionStatus::Applying)
-    {
+    } else if state.remote_sessions.list().await.iter().any(|session| {
+        matches!(
+            session.status,
+            RemoteSessionStatus::Applying | RemoteSessionStatus::Updating
+        )
+    }) {
         Some("OpenResearch is installing on a remote machine.")
     } else if !stop_agents && !state.chat.stop_admitting_unless_restart_stops().await {
         Some("an agent is working that a restart would stop.")
@@ -9015,6 +9018,15 @@ async fn reconnect_remote_session(
     Path(id): Path<String>,
 ) -> ApiResult {
     Ok(Json(json!(state.remote_sessions.reconnect(&id).await?)))
+}
+
+async fn update_remote_session(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    let session = state
+        .remote_sessions
+        .update(&id)
+        .await
+        .map_err(bad_request)?;
+    Ok(Json(json!(session)))
 }
 
 async fn disconnect_remote_session(

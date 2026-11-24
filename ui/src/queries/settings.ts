@@ -1057,6 +1057,15 @@ export const mutInstallRemote = mutations.define({
   describeResult: null,
 });
 
+export const mutUpdateRemote = mutations.define({
+  id: "remote/update",
+  /** From this computer's workspace `id` names the machine; a remote's own workspace, as `orx up --remote` serves it, passes null. */
+  mutate: (ws: Workspace, id: string | null) => id === null ? ws.api.updateCurrentRemote() : ws.api.updateRemoteSession(id),
+  optimistic: () => {},
+  describe: "update OpenResearch on the machine",
+  describeResult: null,
+});
+
 export const mutReconnectRemote = mutations.define({
   id: "remote/reconnect",
   mutate: (ws: Workspace) => ws.api.reconnectCurrentRemote(),
