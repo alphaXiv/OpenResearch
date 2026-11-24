@@ -116,18 +116,36 @@ test("pane history keeps task readiness and saved tabs; task switches restore th
   const document = { ...workspace.emptyProjectWorkspace(), tasks: { one: savedTask(), two: savedTask([{ kind: "home", view: "artifacts" }, { kind: "home", view: "terminal" }]) } };
   const app = await host({ load: () => document, save: async (...args) => { writes.push(args); } });
   assert.equal(app.state.panelOpen, false);
-  assert.equal(app.projects.getCachedProjectWorkspace("p").tasks.one.active.kind, "file");
+  assert.equal(app.projects.getCachedProjectWorkspace("p").tasks.one.active, null, "a chat shown without a pane is remembered as closed");
   app.readiness.length = 0;
   await app.navigate("p", "one", { ...file, line: 23 });
   assert(app.readiness.every(Boolean));
   assert.equal(app.state.fileTabs[0].line, 23);
   await app.navigate("p", "two", undefined);
   assert.equal(app.state.fileTabs.length, 0); assert.equal(app.state.artifactsTabOpen, true); assert.equal(app.state.terminalTabOpen, true);
+  assert.equal(app.projects.getCachedProjectWorkspace("p").tasks.one.active.line, 23, "an open panel is remembered when switching chats");
   await app.navigate("p", "one", undefined);
   assert.equal(app.state.fileTabs[0].line, 23);
   assert.equal(app.state.panelOpen, false);
-  assert.equal(app.projects.getCachedProjectWorkspace("p").tasks.one.active.line, 23);
+  assert.equal(app.projects.getCachedProjectWorkspace("p").tasks.one.active, null, "returning to a chat without a pane saves it closed");
   assert(writes.length > 0);
+  await app.unmount();
+});
+
+test("a panel closed in a chat stays closed after switching away and back", async () => {
+  const document = { ...workspace.emptyProjectWorkspace(), tasks: { one: savedTask(), two: savedTask([{ kind: "home", view: "artifacts" }]) } };
+  const app = await host({ load: () => document });
+  const remembered = (task) => app.projects.getCachedProjectWorkspace("p").tasks[task].active ?? undefined;
+  await app.navigate("p", "one", file);
+  await app.navigate("p", "two", remembered("two"));
+  await app.navigate("p", "one", remembered("one"));
+  assert.equal(app.state.panelOpen, true);
+  await app.navigate("p", "one", undefined);
+  await app.navigate("p", "two", remembered("two"));
+  assert.equal(app.projects.getCachedProjectWorkspace("p").tasks.one.active, null);
+  await app.navigate("p", "one", remembered("one"));
+  assert.equal(app.state.panelOpen, false);
+  assert.equal(app.state.fileTabs[0].path, "paper.tex");
   await app.unmount();
 });
 
@@ -262,29 +280,32 @@ async function projectPage({ experiments = [], runs = () => [] } = {}) {
 
 const logs = (runId, text = "log") => ({ runId, dataBase64: btoa(text), offset: 0 });
 const runningRun = (id, projectId = "p") => ({ id, projectId, experimentId: "exp", status: "running", createdAt: 1, updatedAt: 2 });
-const runLogsPane = (runId) => ({ kind: "experiment", experimentId: "exp", view: "terminal", runId });
 
-test("a newly running experiment opens its logs only on its first output", async () => {
+test("a newly running experiment leaves the chat pane unchanged", async () => {
   const app = await projectPage({ runs: () => [runningRun("historical")] });
   await app.emit("run.updated", { run: runningRun("new") });
   assert.equal(app.pane(), null);
   await app.emit("run.log", logs("new", ""));
   assert.equal(app.pane(), null);
   await app.emit("run.log", logs("new"));
-  assert.deepEqual(app.pane(), runLogsPane("new"));
+  assert.equal(app.pane(), null);
 
-  await app.closePanel();
+  const files = { kind: "home", view: "files" };
+  await navigate(workspace.taskLocation("p", null, files));
+  await app.emit("run.updated", { run: runningRun("files-run") });
+  await app.emit("run.log", logs("files-run"));
   await app.emit("run.log", logs("new", "more"));
   await app.emit("run.updated", { run: runningRun("historical") });
   await app.emit("run.log", logs("historical"));
   await app.emit("run.log", logs("unknown"));
   await app.emit("run.updated", { run: runningRun("other-project", "other") });
   await app.emit("run.log", logs("other-project"));
-  assert.equal(app.pane(), null);
+  assert.deepEqual(app.pane(), files);
 
+  await app.closePanel();
   await app.emit("run.log", logs("early-log"));
   await app.emit("run.updated", { run: runningRun("early-log") });
-  assert.deepEqual(app.pane(), runLogsPane("early-log"));
+  assert.equal(app.pane(), null);
 });
 
 test("a run baseline resolving after the project page unmounts cannot navigate", async () => {

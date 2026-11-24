@@ -1,7 +1,8 @@
 use super::*;
 
-/// What a run's backend charges per unit of running time, read when the run launched. A later
-/// price change never rewrites it.
+/// What a run's backend charges per unit of running time, read when the run launched, or at
+/// today's price for a run that finished before orx read prices. A later price change never
+/// rewrites it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Quote {
@@ -40,11 +41,27 @@ pub(crate) struct BilledRun {
     pub ended_at: Option<i64>,
     /// None when the price couldn't be read, or was stored in a form this version can't read.
     pub quote: Option<Quote>,
+    /// What the provider billed for the whole run, which replaces the quote's estimate.
+    pub billed: Option<Cost>,
+}
+
+/// A finished run whose provider bill hasn't been read.
+pub(crate) struct UnbilledRun {
+    pub id: String,
+    /// The launch's `options.app`, the Modal app it ran in.
+    pub app: Option<String>,
+    /// Unix millis.
+    pub created_at: i64,
+    /// Unix millis; its end or its last update.
+    pub ended_at: i64,
 }
 
 /// One usage sample as spend reads it.
 pub(crate) struct SpentSample {
     pub harness: String,
+    /// The chat's agent profile when it still runs this agent; None for the user's own sign-in,
+    /// an agent the chat switched away from, or a chat that is gone.
+    pub profile: Option<String>,
     /// `YYYY-MM-DD` in local time.
     pub day: String,
     pub usage: TokenUsage,
@@ -58,6 +75,64 @@ impl Store {
             "UPDATE runs SET price_json = ?2 WHERE id = ?1 AND price_json IS NULL",
             params![run_id, serde_json::to_string(quote)?],
         )? > 0)
+    }
+
+    /// Records what the run's provider billed unless that is already recorded.
+    pub(crate) fn record_run_bill(&self, run_id: &str, billed: &Cost) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE runs SET billed_json = ?2 WHERE id = ?1 AND billed_json IS NULL",
+            params![run_id, serde_json::to_string(billed)?],
+        )? > 0)
+    }
+
+    /// Finished runs of `kind` that ended at or after `since` and have no bill yet.
+    pub(crate) fn unbilled_runs(&self, kind: &str, since: i64) -> Result<Vec<UnbilledRun>> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, status, json_extract(launch_spec, '$.options.app'), created_at,
+                    COALESCE(ended_at, updated_at)
+             FROM runs
+             WHERE json_extract(launch_spec, '$.kind') = ?1 AND billed_json IS NULL
+               AND COALESCE(ended_at, updated_at) >= ?2",
+        )?;
+        let rows = statement.query_map(params![kind, since], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                UnbilledRun {
+                    id: row.get(0)?,
+                    app: row.get(2)?,
+                    created_at: row.get(3)?,
+                    ended_at: row.get(4)?,
+                },
+            ))
+        })?;
+        let mut runs = Vec::new();
+        for row in rows {
+            let (status, run) = row?;
+            if crate::local::is_terminal(&status) {
+                runs.push(run);
+            }
+        }
+        Ok(runs)
+    }
+
+    /// Finished runs of `kinds` that ran and have no price.
+    pub(crate) fn unpriced_finished(&self, kinds: &[&str]) -> Result<Vec<String>> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, status FROM runs
+             WHERE price_json IS NULL AND started_at IS NOT NULL
+               AND json_extract(launch_spec, '$.kind') IN (SELECT value FROM json_each(?1))",
+        )?;
+        let rows = statement.query_map([serde_json::to_string(kinds)?], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut runs = Vec::new();
+        for row in rows {
+            let (id, status) = row?;
+            if crate::local::is_terminal(&status) {
+                runs.push(id);
+            }
+        }
+        Ok(runs)
     }
 
     /// The launch intent of a run that has no price yet.
@@ -82,11 +157,12 @@ impl Store {
         chat: Option<&str>,
     ) -> Result<Vec<BilledRun>> {
         let mut statement = self.conn.prepare(
-            "SELECT kind, status, started_at, COALESCE(ended_at, updated_at), price_json FROM (
+            "SELECT kind, status, started_at, COALESCE(ended_at, updated_at), price_json, billed_json FROM (
                  SELECT COALESCE(json_extract(launch_spec, '$.kind'),
                                  json_extract(backend_json, '$.handle.descriptor.kind'),
                                  json_extract(backend_json, '$.kind')) AS kind,
-                        status, started_at, ended_at, updated_at, price_json, chat_session_id
+                        status, started_at, ended_at, updated_at, price_json, billed_json,
+                        chat_session_id
                  FROM runs
                  WHERE (?3 IS NULL OR chat_session_id = ?3)
                    AND (ended_at IS NULL OR ended_at >= ?2)
@@ -101,12 +177,13 @@ impl Store {
                     row.get::<_, Option<i64>>(2)?,
                     row.get::<_, Option<i64>>(3)?,
                     row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
                 ))
             },
         )?;
         let mut runs = Vec::new();
         for row in rows {
-            let (backend, status, started_at, ended_at, price) = row?;
+            let (backend, status, started_at, ended_at, price, billed) = row?;
             let finished = crate::local::is_terminal(&status);
             runs.push(BilledRun {
                 backend,
@@ -114,6 +191,7 @@ impl Store {
                 started_at,
                 ended_at: ended_at.filter(|_| finished),
                 quote: price.and_then(|json| serde_json::from_str(&json).ok()),
+                billed: billed.and_then(|json| serde_json::from_str(&json).ok()),
             });
         }
         Ok(runs)
@@ -123,15 +201,25 @@ impl Store {
     /// turn's.
     pub(crate) fn spent_samples(&self, from: i64, to: i64) -> Result<Vec<SpentSample>> {
         let mut statement = self.conn.prepare(
-            "SELECT harness, date(recorded_at / 1000, 'unixepoch', 'localtime'),
-                    usage_json, cost_micros, cost_currency
-             FROM chat_usage_samples WHERE recorded_at >= ?1 AND recorded_at < ?2
+            "SELECT s.harness, date(s.recorded_at / 1000, 'unixepoch', 'localtime'),
+                    s.usage_json, s.cost_micros, s.cost_currency,
+                    CASE WHEN c.harness = s.harness THEN c.profile_id END
+             FROM chat_usage_samples s
+             LEFT JOIN chat_usage_executions u ON u.execution_id = s.execution_id
+             LEFT JOIN chat_turns t ON t.id = u.turn_id
+             -- A late Codex turn, `codex-late:<chat>:<thread>:<turn>`, has no chat_turns row.
+             LEFT JOIN chat_sessions c ON c.id = COALESCE(t.session_id, CASE
+                 WHEN u.turn_id LIKE 'codex-late:%'
+                 THEN substr(u.turn_id, 12, instr(substr(u.turn_id, 12), ':') - 1) END)
+             WHERE s.recorded_at >= ?1 AND s.recorded_at < ?2
              UNION ALL
              SELECT s.harness, date(t.created_at / 1000, 'unixepoch', 'localtime'),
-                    s.usage_json, s.cost_micros, s.cost_currency
+                    s.usage_json, s.cost_micros, s.cost_currency,
+                    CASE WHEN c.harness = s.harness THEN c.profile_id END
              FROM chat_usage_samples s
              JOIN chat_usage_executions u ON u.execution_id = s.execution_id
              JOIN chat_turns t ON t.id = u.turn_id
+             LEFT JOIN chat_sessions c ON c.id = t.session_id
              WHERE s.recorded_at IS NULL AND t.created_at >= ?1 AND t.created_at < ?2",
         )?;
         let rows = statement.query_map(params![from, to], |row| {
@@ -141,13 +229,15 @@ impl Store {
                 row.get::<_, String>(2)?,
                 row.get::<_, Option<i64>>(3)?,
                 row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
             ))
         })?;
         let mut samples = Vec::new();
         for row in rows {
-            let (harness, day, usage, micros, currency) = row?;
+            let (harness, day, usage, micros, currency, profile) = row?;
             samples.push(SpentSample {
                 harness,
+                profile,
                 day,
                 usage: serde_json::from_str(&usage)?,
                 cost: micros.zip(currency).map(|(micros, currency)| Cost {
@@ -275,6 +365,34 @@ mod tests {
                                "source": "huggingface.co", "quotedAt": 5})
         );
         assert!(store.unpriced_launch("run").unwrap().is_none());
+
+        let billed = Cost {
+            micros: 2_680_000,
+            currency: "USD".into(),
+        };
+        assert!(store.record_run_bill("run", &billed).unwrap());
+        assert!(!store
+            .record_run_bill(
+                "run",
+                &Cost {
+                    micros: 1,
+                    ..billed.clone()
+                }
+            )
+            .unwrap());
+        store
+            .update_status("run", RunStatus::Failed, Some(11), Some(1))
+            .unwrap();
+        let stored: String = store
+            .conn
+            .query_row("SELECT billed_json FROM runs WHERE id = 'run'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&stored).unwrap(),
+            serde_json::json!({"micros": 2_680_000, "currency": "USD"})
+        );
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

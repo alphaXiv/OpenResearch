@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::error::Result;
-use crate::store::{now_ms, Store};
+use crate::store::{now_ms, ChatProjectMove, Store};
 
 use super::model::LocalProject;
 use super::{git, slugify};
@@ -42,13 +42,13 @@ pub(crate) fn expand_path(path: &str) -> Result<PathBuf> {
     if trimmed.is_empty() {
         return Err(crate::error::anyhow!("project path is required"));
     }
-    if trimmed == "~" || trimmed.starts_with("~/") {
+    if let Some(rest) = under_home(trimmed) {
         let home = crate::config::home_dir()
             .ok_or_else(|| crate::error::anyhow!("Could not resolve the home directory"))?;
-        return Ok(if trimmed == "~" {
+        return Ok(if rest.is_empty() {
             home
         } else {
-            home.join(&trimmed[2..])
+            home.join(rest)
         });
     }
     let path = PathBuf::from(trimmed);
@@ -57,6 +57,15 @@ pub(crate) fn expand_path(path: &str) -> Result<PathBuf> {
     } else {
         Ok(relative_base()?.join(path))
     }
+}
+
+/// The rest of a path written from the home folder, as `~` or `~/…`.
+fn under_home(path: &str) -> Option<&str> {
+    if path == "~" {
+        return Some("");
+    }
+    path.strip_prefix("~/")
+        .or_else(|| path.strip_prefix("~\\").filter(|_| cfg!(windows)))
 }
 
 /// Where a relative path is anchored: the working directory, except in the Linux
@@ -221,6 +230,7 @@ pub fn create_project(
         run_command: run_command.filter(|c| !c.trim().is_empty()),
         paper_id: paper_id.filter(|p| !p.trim().is_empty()),
         icon: None,
+        proposal: None,
         created_at: now,
         updated_at: now,
     };
@@ -232,11 +242,16 @@ pub fn scratch_root() -> PathBuf {
     crate::store::data_dir().join("scratch")
 }
 
-/// The project a new chat without a project starts in. A scratch project no
-/// chat uses yet is reused, so opening the draft again leaves no new folder.
+/// What a scratch project is called until the user names it; older versions show it as a project of this name.
+pub const UNNAMED_SCRATCH: &str = "No project";
+
+/// The project a new chat without a project starts in. An unnamed scratch
+/// project no chat uses yet is reused, so opening the draft again leaves no new folder.
 pub fn scratch_project(store: &Store) -> Result<LocalProject> {
     for project in store.list_local_projects()? {
-        if project.is_scratch() && store.list_chat_sessions_by_project(&project.id)?.is_empty() {
+        if project.is_unnamed_scratch()
+            && store.list_chat_sessions_by_project(&project.id)?.is_empty()
+        {
             return Ok(project);
         }
     }
@@ -248,7 +263,7 @@ pub fn scratch_project(store: &Store) -> Result<LocalProject> {
     let project = LocalProject {
         slug: unique_project_slug(store, &format!("scratch-{}", &id[..8]))?,
         id,
-        name: "No project".to_string(),
+        name: UNNAMED_SCRATCH.to_string(),
         github_owner: String::new(),
         github_repo: String::new(),
         github_sync_enabled: false,
@@ -257,6 +272,7 @@ pub fn scratch_project(store: &Store) -> Result<LocalProject> {
         run_command: None,
         paper_id: None,
         icon: None,
+        proposal: None,
         created_at: now,
         updated_at: now,
     };
@@ -264,16 +280,95 @@ pub fn scratch_project(store: &Store) -> Result<LocalProject> {
     Ok(project)
 }
 
-/// Turn a scratch project into a real one at `path`: bring the chat's commits
-/// onto the baseline, move the repository there, and give it `name`. What the
-/// chat left uncommitted stays in its worktree. The caller keeps every chat of
-/// the project idle meanwhile.
+/// A move of a project's files, recorded before it starts so a start after a
+/// crash can finish or undo it ([`recover_project_moves`]). `request` is the
+/// waiting move it carries out, given back to `requester` if it is undone.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum MoveInFlight {
+    /// A scratch project's repository moving from `source` to `target`;
+    /// `tip` is its baseline before the chat's commits came onto it.
+    #[serde(rename_all = "camelCase")]
+    Promote {
+        requester: String,
+        request: ChatProjectMove,
+        source: PathBuf,
+        target: PathBuf,
+        tip: String,
+    },
+    /// A chat's worktree moving to `moved` in a new repository at `target`,
+    /// recorded under the new project's id; `old_link` is its `.git` file before.
+    #[serde(rename_all = "camelCase")]
+    Split {
+        requester: String,
+        request: ChatProjectMove,
+        source_repo: PathBuf,
+        target: PathBuf,
+        worktree: PathBuf,
+        moved: PathBuf,
+        old_link: Option<String>,
+    },
+}
+
+/// What a move that lost its request to a cancel says.
+pub const MOVE_CANCELLED: &str = "The move was cancelled.";
+
+/// Records the move and takes its request in one write, so a crash leaves one or the other.
+fn begin_move(store: &Store, project_id: &str, state: &MoveInFlight) -> Result<()> {
+    let (MoveInFlight::Promote {
+        requester, request, ..
+    }
+    | MoveInFlight::Split {
+        requester, request, ..
+    }) = state;
+    let json = serde_json::to_string(state)?;
+    if !store.begin_project_move(project_id, &json, requester, request.requested_at)? {
+        return Err(crate::error::anyhow!(MOVE_CANCELLED));
+    }
+    Ok(())
+}
+
+/// A finished move needs no recovery; a record left behind only costs a check at the next start.
+fn end_move(store: &Store, project_id: &str) {
+    if let Err(error) = store.end_project_move(project_id) {
+        eprintln!("orx: could not clear the record of moving project {project_id}: {error}");
+    }
+}
+
+/// Where a repository waits beside `target` until it is whole: a copy across
+/// volumes, or a split's new repository.
+fn staged_copy(target: &Path, project_id: &str) -> PathBuf {
+    target
+        .parent()
+        .unwrap_or(target)
+        .join(format!(".orx-copy-{project_id}"))
+}
+
+/// Marks a repository as moved by `project_id`'s move, so undoing it never
+/// removes a folder another move or the user put at the destination.
+fn ownership_mark(repo: &Path, project_id: &str) -> PathBuf {
+    repo.join(".git").join(format!("orx-move-{project_id}"))
+}
+
+fn owned(repo: &Path, project_id: &str) -> bool {
+    ownership_mark(repo, project_id).exists()
+}
+
+/// A mark left behind is an empty file in `.git` that nothing reads.
+fn unmark(repo: &Path, project_id: &str) {
+    let _ = std::fs::remove_file(ownership_mark(repo, project_id));
+}
+
+/// Turn a scratch project into a real one as `request` asks: bring the chat's
+/// commits onto the baseline, move the repository to its folder, and name it.
+/// What the chat left uncommitted stays in its worktree. The caller keeps every
+/// chat of the project idle meanwhile; `requester` is the chat that asked.
 pub fn promote_scratch_project(
     store: &Store,
     project: &LocalProject,
+    requester: &str,
     worktree: Option<&Path>,
-    name: &str,
-    path: &str,
+    request: &ChatProjectMove,
 ) -> Result<LocalProject> {
     if !project.is_scratch() {
         return Err(crate::error::anyhow!(
@@ -282,53 +377,134 @@ pub fn promote_scratch_project(
             project.repo_path
         ));
     }
-    let (name, target) = new_project_place(name, path)?;
-    let name = name.as_str();
-
+    let (name, target) = new_project_place(&request.name, &request.path)?;
     let repo = PathBuf::from(&project.repo_path);
-    if let Some(dir) = worktree.filter(|dir| dir.join(".git").exists()) {
-        let head = git::git(Some(dir), &["rev-parse", "HEAD"])?;
-        git::git(Some(&repo), &["merge", "--ff-only", "--quiet", &head]).map_err(|error| {
-            crate::error::anyhow!(
-                "Could not bring the chat's work onto {}: {error}",
-                project.baseline_branch
-            )
-        })?;
+    let branch = git::require_current_branch(&repo)?;
+    if branch != project.baseline_branch {
+        return Err(crate::error::anyhow!(
+            "{} is on {branch}, not {}; switch it back, then try again.",
+            repo.display(),
+            project.baseline_branch
+        ));
     }
+    let tip = git::git(Some(&repo), &["rev-parse", "HEAD"])?;
+    begin_move(
+        store,
+        &project.id,
+        &MoveInFlight::Promote {
+            requester: requester.to_string(),
+            request: request.clone(),
+            source: repo.clone(),
+            target: target.clone(),
+            tip: tip.clone(),
+        },
+    )?;
 
-    move_repository(&repo, &target)?;
-    let moved = (|| -> Result<LocalProject> {
+    let promoted = (|| -> Result<LocalProject> {
+        std::fs::write(ownership_mark(&repo, &project.id), "")?;
+        if let Some(dir) = worktree.filter(|dir| dir.join(".git").exists()) {
+            let head = git::git(Some(dir), &["rev-parse", "HEAD"])?;
+            git::git(Some(&repo), &["merge", "--ff-only", "--quiet", &head]).map_err(|error| {
+                crate::error::anyhow!(
+                    "Could not bring the chat's work onto {}: {error}",
+                    project.baseline_branch
+                )
+            })?;
+        }
+        move_repository(&repo, &target, &staged_copy(&target, &project.id))?;
         git::git(Some(&target), &["worktree", "repair"])?;
-        let mut promoted = project.clone();
-        promoted.name = name.to_string();
-        promoted.repo_path = crate::paths::canonicalize(&target)?
-            .to_string_lossy()
-            .into_owned();
-        store.update_local_project(&promoted)?;
-        store.restamp_local_project_created(&promoted.id)?;
-        Ok(promoted)
+        record_promotion(store, project, &name, &target, request.proposal.as_deref())
     })();
-    let promoted = match moved {
-        Ok(promoted) => promoted,
-        Err(error) => {
-            let restored = move_repository(&target, &repo)
-                .and_then(|()| git::git(Some(&repo), &["worktree", "repair"]).map(drop));
-            return Err(match restored {
-                Ok(()) => crate::error::anyhow!(
+    match promoted {
+        Ok(promoted) => {
+            unmark(&target, &project.id);
+            remove_copied_source(&repo);
+            end_move(store, &project.id);
+            Ok(promoted)
+        }
+        Err(error) => match undo_promotion(&repo, &target, &project.id, &tip) {
+            Ok(()) => {
+                end_move(store, &project.id);
+                Err(crate::error::anyhow!(
                     "Could not move the project to {}: {error}",
                     target.display()
-                ),
-                Err(restore) => crate::error::anyhow!(
-                    "Could not move the project to {}: {error}. Moving it back also failed: {restore}",
-                    target.display()
-                ),
-            });
-        }
-    };
+                ))
+            }
+            // Still recorded, so the next start tries to put it back again.
+            Err(restore) => Err(crate::error::anyhow!(
+                "Could not move the project to {}: {error}. Moving it back also failed: {restore}",
+                target.display()
+            )),
+        },
+    }
+}
 
-    // The slug, and the artifacts folder named by it, stay: the chat's earlier
-    // messages link to files there.
-    Ok(store.get_local_project(&project.id)?.unwrap_or(promoted))
+/// Names the project and points it at `target`, created as of now. The slug,
+/// and the artifacts folder named by it, stay: the chat's earlier messages link
+/// to files there.
+fn record_promotion(
+    store: &Store,
+    project: &LocalProject,
+    name: &str,
+    target: &Path,
+    proposal: Option<&str>,
+) -> Result<LocalProject> {
+    let now = now_ms();
+    let promoted = LocalProject {
+        name: name.to_string(),
+        repo_path: crate::paths::canonicalize(target)?
+            .to_string_lossy()
+            .into_owned(),
+        proposal: proposal.map(str::to_string),
+        created_at: now,
+        updated_at: now,
+        ..project.clone()
+    };
+    store.promote_local_project(&promoted)?;
+    Ok(promoted)
+}
+
+/// A repository copied across volumes leaves its source until the store names the copy.
+fn remove_copied_source(source: &Path) {
+    if source.exists() {
+        if let Err(error) = std::fs::remove_dir_all(source) {
+            eprintln!(
+                "orx: could not remove {} after copying it: {error}",
+                source.display()
+            );
+        }
+    }
+}
+
+/// Puts a scratch repository back at `source` with its baseline at `tip`,
+/// whichever step the move reached: a copy is dropped while the source is
+/// whole, a renamed repository goes back. Safe to repeat.
+fn undo_promotion(source: &Path, target: &Path, project_id: &str, tip: &str) -> Result<()> {
+    let staged = staged_copy(target, project_id);
+    if staged.exists() {
+        std::fs::remove_dir_all(&staged)?;
+    }
+    let ours = owned(target, project_id);
+    if source.join(".git").exists() {
+        if ours {
+            std::fs::remove_dir_all(target)?;
+        }
+    } else if ours {
+        move_repository(target, source, &staged)?;
+        remove_copied_source(target);
+    } else {
+        return Err(crate::error::anyhow!(
+            "the repository is at neither {} nor {}",
+            source.display(),
+            target.display()
+        ));
+    }
+    unmark(source, project_id);
+    git::git(Some(source), &["worktree", "repair"])?;
+    if git::git(Some(source), &["rev-parse", "HEAD"])? != tip {
+        git::git(Some(source), &["reset", "--keep", "--quiet", tip])?;
+    }
+    Ok(())
 }
 
 /// The trimmed name and the folder for a project made from a chat, which must
@@ -337,6 +513,14 @@ pub fn new_project_place(name: &str, path: &str) -> Result<(String, PathBuf)> {
     let name = name.trim();
     if name.is_empty() {
         return Err(crate::error::anyhow!("Give the project a name."));
+    }
+    // A relative path would land wherever the dashboard happens to run, not where the agent or user meant.
+    if under_home(path.trim()).is_none() && !Path::new(path.trim()).is_absolute() {
+        return Err(crate::error::anyhow!(
+            "{} is not a full path; give the folder as one, such as ~/OpenResearch/{}.",
+            path.trim(),
+            slugify(name)
+        ));
     }
     let target = expand_path(path)?;
     if target.starts_with(crate::store::data_dir()) {
@@ -354,20 +538,21 @@ pub fn new_project_place(name: &str, path: &str) -> Result<(String, PathBuf)> {
     Ok((name.to_string(), target))
 }
 
-/// Move a chat out of `project` into a new project at `path`, seeded with the
-/// project's history up to the chat's latest commit. The chat's worktree moves
-/// whole, uncommitted and ignored files included. `sessions` are the chat and
-/// the side chats sharing its worktree; the caller keeps them idle meanwhile.
+/// Move a chat out of `project` into a new project as `request` asks, seeded
+/// with the project's history up to the chat's latest commit. The chat's
+/// worktree moves whole, uncommitted and ignored files included. `sessions` are
+/// the chat and the side chats sharing `owner`'s worktree; the caller keeps them
+/// idle meanwhile. `requester` is the chat that asked.
 pub fn split_chat_project(
     store: &Store,
     project: &LocalProject,
+    requester: &str,
     owner: &str,
     sessions: &[String],
-    name: &str,
-    path: &str,
+    request: &ChatProjectMove,
 ) -> Result<LocalProject> {
-    let (name, target) = new_project_place(name, path)?;
-    let worktree = git::existing_session_worktree_path(project, owner);
+    let (name, target) = new_project_place(&request.name, &request.path)?;
+    let worktree = git::existing_session_worktree_path(store, project, owner)?;
     let has_worktree = worktree.join(".git").exists();
     // The new repository can't hold staged changes the chat never committed.
     if has_worktree && !git::git(Some(&worktree), &["diff", "--cached", "--name-only"])?.is_empty()
@@ -382,89 +567,271 @@ pub fn split_chat_project(
         PathBuf::from(&project.repo_path)
     };
     let head = git::git(Some(&source), &["rev-parse", "HEAD"])?;
-
-    crate::paths::create_dir_all(&target)?;
-    let seeded = (|| -> Result<()> {
-        git::git(Some(&target), &["init", "--quiet", "-b", "main"])?;
-        // Lets the push below check out what it brings into the empty folder.
-        git::git(
-            Some(&target),
-            &["config", "receive.denyCurrentBranch", "updateInstead"],
-        )?;
-        let into = target.to_string_lossy();
-        git::git(
-            Some(&source),
-            &["push", "--quiet", &into, &format!("{head}:refs/heads/main")],
-        )?;
-        git::git(
-            Some(&target),
-            &["config", "--unset", "receive.denyCurrentBranch"],
-        )?;
-        Ok(())
-    })();
-    if let Err(error) = seeded {
-        let _ = std::fs::remove_dir_all(&target);
-        return Err(crate::error::anyhow!(
-            "Could not start the project at {}: {error}",
-            target.display()
-        ));
-    }
-
-    let now = now_ms();
-    let created = LocalProject {
-        id: uuid::Uuid::new_v4().to_string(),
-        name: name.clone(),
-        slug: unique_project_slug(store, &slugify(&name))?,
-        github_owner: String::new(),
-        github_repo: String::new(),
-        github_sync_enabled: false,
-        baseline_branch: "main".into(),
-        repo_path: crate::paths::canonicalize(&target)?
-            .to_string_lossy()
-            .into_owned(),
-        run_command: project.run_command.clone(),
-        paper_id: project.paper_id.clone(),
-        icon: None,
-        created_at: now,
-        updated_at: now,
-    };
-    let moved = git::session_worktree_path(&created.id, owner);
-    let relinked = if has_worktree {
-        relink_worktree(&worktree, &moved, Path::new(&created.repo_path))
+    let id = uuid::Uuid::new_v4().to_string();
+    let moved = git::session_worktree_path(&id, owner);
+    let old_link = if has_worktree {
+        Some(std::fs::read_to_string(worktree.join(".git"))?)
     } else {
-        Ok(None)
+        None
     };
-    let done = relinked.and_then(|undo| {
-        store
-            .create_local_project_for_chats(&created, sessions)
-            .inspect_err(|_| {
-                if let Some(undo) = undo {
-                    undo();
-                }
-            })
-    });
-    if let Err(error) = done {
-        let _ = std::fs::remove_dir_all(&target);
-        return Err(crate::error::anyhow!(
-            "Could not move the chat to {}: {error}",
-            target.display()
-        ));
-    }
+    begin_move(
+        store,
+        &id,
+        &MoveInFlight::Split {
+            requester: requester.to_string(),
+            request: request.clone(),
+            source_repo: PathBuf::from(&project.repo_path),
+            target: target.clone(),
+            worktree: worktree.clone(),
+            moved: moved.clone(),
+            old_link: old_link.clone(),
+        },
+    )?;
+    let created = (|| -> Result<LocalProject> {
+        // Seeded beside the folder and renamed onto it, which fails rather than
+        // mixing with anything that arrived there since it was checked.
+        let staged = staged_copy(&target, &id);
+        let seeded = (|| -> Result<()> {
+            crate::paths::create_dir_all(staged.parent().unwrap_or(&staged))?;
+            std::fs::create_dir(&staged)?;
+            git::git(Some(&staged), &["init", "--quiet", "-b", "main"])?;
+            std::fs::write(ownership_mark(&staged, &id), "")?;
+            // Lets the push below check out what it brings into the empty folder.
+            git::git(
+                Some(&staged),
+                &["config", "receive.denyCurrentBranch", "updateInstead"],
+            )?;
+            let into = staged.to_string_lossy();
+            git::git(
+                Some(&source),
+                &["push", "--quiet", &into, &format!("{head}:refs/heads/main")],
+            )?;
+            git::git(
+                Some(&staged),
+                &["config", "--unset", "receive.denyCurrentBranch"],
+            )?;
+            // An empty folder the user picked is replaced, which `rename` refuses on Windows.
+            if target.is_dir() {
+                std::fs::remove_dir(&target)?;
+            }
+            std::fs::rename(&staged, &target)?;
+            Ok(())
+        })();
+        if let Err(error) = seeded {
+            let _ = std::fs::remove_dir_all(&staged);
+            return Err(crate::error::anyhow!(
+                "Could not start the project at {}: {error}",
+                target.display()
+            ));
+        }
 
-    if has_worktree {
-        relocate_opencode_sessions(&worktree, &moved);
-        // The old registration only points at a folder that has moved.
-        if let Err(error) = git::git(
-            Some(Path::new(&project.repo_path)),
-            &["worktree", "remove", "--force", &worktree.to_string_lossy()],
-        ) {
-            eprintln!(
-                "orx: left a stale worktree entry in {}: {error}",
-                project.repo_path
-            );
+        let now = now_ms();
+        let created = LocalProject {
+            id: id.clone(),
+            name: name.clone(),
+            slug: unique_project_slug(store, &slugify(&name))?,
+            github_owner: String::new(),
+            github_repo: String::new(),
+            github_sync_enabled: false,
+            baseline_branch: "main".into(),
+            repo_path: crate::paths::canonicalize(&target)?
+                .to_string_lossy()
+                .into_owned(),
+            run_command: project.run_command.clone(),
+            paper_id: project.paper_id.clone(),
+            icon: None,
+            proposal: request.proposal.clone(),
+            created_at: now,
+            updated_at: now,
+        };
+        let relinked = if has_worktree {
+            relink_worktree(&worktree, &moved, Path::new(&created.repo_path))
+        } else {
+            Ok(None)
+        };
+        let done = relinked.and_then(|undo| {
+            store
+                .create_local_project_for_chats(&created, sessions)
+                .inspect_err(|_| {
+                    if let Some(undo) = undo {
+                        undo();
+                    }
+                })
+        });
+        if let Err(error) = done {
+            // Files that couldn't go back still link to the new repository, so it
+            // stays, and so does the record the next start puts them back from.
+            let linked_back = old_link.as_ref().is_none_or(|link| {
+                std::fs::read_to_string(worktree.join(".git")).ok().as_ref() == Some(link)
+            });
+            if moved.exists() || !linked_back {
+                let files = if moved.exists() { &moved } else { &worktree };
+                return Err(crate::error::anyhow!(
+                    "Could not move the chat to {}: {error}. Its files are at {}, and the next start puts them back.",
+                    target.display(),
+                    files.display()
+                ));
+            }
+            if owned(&target, &id) {
+                let _ = std::fs::remove_dir_all(&target);
+            }
+            return Err(crate::error::anyhow!(
+                "Could not move the chat to {}: {error}",
+                target.display()
+            ));
+        }
+
+        unmark(&target, &id);
+        if has_worktree {
+            relocate_opencode_sessions(&worktree, &moved);
+            // The old registration only points at a folder that has moved.
+            if let Err(error) = git::git(
+                Some(Path::new(&project.repo_path)),
+                &["worktree", "remove", "--force", &worktree.to_string_lossy()],
+            ) {
+                eprintln!(
+                    "orx: left a stale worktree entry in {}: {error}",
+                    project.repo_path
+                );
+            }
+        }
+        Ok(created)
+    })();
+    // A chat whose files stayed in the new repository keeps its record for the next start.
+    if created.is_ok() || !target.join(".git").exists() || !owned(&target, &id) {
+        end_move(store, &id);
+    }
+    created
+}
+
+/// Finishes or undoes each move a crash interrupted; run before any chat can
+/// start. A move whose files all reached the new folder is recorded there; any
+/// other goes back and its request waits to be carried out again.
+pub fn recover_project_moves(store: &Store) {
+    let moves = match store.project_moves_in_flight() {
+        Ok(moves) => moves,
+        Err(error) => {
+            eprintln!("orx up: could not read interrupted project moves: {error}");
+            return;
+        }
+    };
+    for (project_id, state) in moves {
+        let recovered = serde_json::from_str::<MoveInFlight>(&state)
+            .map_err(crate::error::Error::from)
+            .and_then(|state| recover_move(store, &project_id, state));
+        match recovered {
+            Ok(()) => end_move(store, &project_id),
+            // Kept, so the next start tries again and says so again.
+            Err(error) => eprintln!(
+                "orx up: could not finish or undo the interrupted move of project {project_id}: {error}"
+            ),
         }
     }
-    Ok(created)
+}
+
+/// Each step checks what is on disk first, so a start cut short here can run it again.
+fn recover_move(store: &Store, project_id: &str, state: MoveInFlight) -> Result<()> {
+    let (requester, request) = match state {
+        MoveInFlight::Promote {
+            requester,
+            request,
+            source,
+            target,
+            tip,
+        } => {
+            let project = store
+                .get_local_project(project_id)?
+                .ok_or_else(|| crate::error::anyhow!("project {project_id} was not found"))?;
+            if !project.is_scratch() {
+                unmark(&target, project_id);
+                remove_copied_source(&source);
+                return Ok(());
+            }
+            if !source.join(".git").exists() && owned(&target, project_id) {
+                git::git(Some(&target), &["worktree", "repair"])?;
+                record_promotion(
+                    store,
+                    &project,
+                    request.name.trim(),
+                    &target,
+                    request.proposal.as_deref(),
+                )?;
+                unmark(&target, project_id);
+                return Ok(());
+            }
+            undo_promotion(&source, &target, project_id, &tip)?;
+            (requester, request)
+        }
+        MoveInFlight::Split {
+            requester,
+            request,
+            source_repo,
+            target,
+            worktree,
+            moved,
+            old_link,
+        } => {
+            if store.get_local_project(project_id)?.is_some() {
+                relocate_opencode_sessions(&worktree, &moved);
+                git::git(Some(&source_repo), &["worktree", "prune"])?;
+                unmark(&target, project_id);
+                return Ok(());
+            }
+            if moved.exists() {
+                if !worktree.exists() {
+                    std::fs::rename(&moved, &worktree)?;
+                } else if only_git_link(&moved)? {
+                    // The registration made before the chat's files moved into it.
+                    std::fs::remove_dir_all(&moved)?;
+                } else {
+                    return Err(crate::error::anyhow!(
+                        "the chat's files are in both {} and {}",
+                        worktree.display(),
+                        moved.display()
+                    ));
+                }
+            }
+            if let Some(link) = old_link {
+                let current = std::fs::read_to_string(worktree.join(".git")).ok();
+                if current.as_deref() != Some(link.as_str()) {
+                    std::fs::write(worktree.join(".git"), link)?;
+                }
+            }
+            if let Some(parent) = moved.parent() {
+                let _ = std::fs::remove_dir(parent);
+            }
+            let staged = staged_copy(&target, project_id);
+            if staged.exists() {
+                std::fs::remove_dir_all(&staged)?;
+            }
+            if owned(&target, project_id) {
+                std::fs::remove_dir_all(&target)?;
+            }
+            (requester, request)
+        }
+    };
+    // A request the chat made since takes precedence over the one cut short.
+    if store.chat_project_move(&requester)?.is_some() {
+        return Ok(());
+    }
+    store.set_chat_project_move(
+        &requester,
+        &request.name,
+        &request.path,
+        request.proposal.as_deref(),
+        request.scratch,
+    )?;
+    Ok(())
+}
+
+/// Whether `dir` holds nothing but a `.git` link.
+fn only_git_link(dir: &Path) -> Result<bool> {
+    for entry in std::fs::read_dir(dir)? {
+        if entry?.file_name() != ".git" {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Moves a chat's worktree, files untouched, to `moved` at the same commit in
@@ -541,7 +908,9 @@ fn relocate_opencode_sessions(from: &Path, to: &Path) {
     }
 }
 
-fn move_repository(from: &Path, to: &Path) -> Result<()> {
+/// Renames `from` to `to`, or across volumes copies it there through `staged`
+/// and leaves `from` for the caller to remove once nothing can fail.
+fn move_repository(from: &Path, to: &Path, staged: &Path) -> Result<()> {
     if let Some(parent) = to.parent() {
         crate::paths::create_dir_all(parent)?;
     }
@@ -560,23 +929,15 @@ fn move_repository(from: &Path, to: &Path) -> Result<()> {
             ))
         }
     }
-    let parent = to.parent().unwrap_or(to);
-    let temporary = parent.join(format!(".orx-copy-{}", uuid::Uuid::new_v4()));
-    if let Err(error) = super::storage::copy_verified(from, &temporary) {
-        let _ = std::fs::remove_dir_all(&temporary);
+    let copied = super::storage::copy_verified(from, staged)
+        .and_then(|()| std::fs::rename(staged, to).map_err(Into::into));
+    if let Err(error) = copied {
+        let _ = std::fs::remove_dir_all(staged);
         return Err(crate::error::anyhow!(
             "Could not copy {} to {}: {error}",
             from.display(),
             to.display()
         ));
-    }
-    std::fs::rename(&temporary, to)?;
-    // The copy is complete; a source that won't go away is only wasted space.
-    if let Err(error) = std::fs::remove_dir_all(from) {
-        eprintln!(
-            "orx: could not remove {} after copying it: {error}",
-            from.display()
-        );
     }
     Ok(())
 }
@@ -591,6 +952,21 @@ pub struct CreateProjectOptions {
     pub run_command: Option<String>,
     pub paper_id: Option<String>,
     pub paper_pdf: Option<Vec<u8>>,
+}
+
+/// A waiting move for `session` to carry out, as a request would leave it.
+#[cfg(test)]
+pub(crate) fn ask(
+    store: &Store,
+    session: &str,
+    name: &str,
+    path: &str,
+    proposal: Option<&str>,
+) -> ChatProjectMove {
+    store
+        .set_chat_project_move(session, name, path, proposal, None)
+        .unwrap();
+    store.chat_project_move(session).unwrap().unwrap()
 }
 
 #[cfg(test)]
@@ -1541,6 +1917,28 @@ mod tests {
     }
 
     #[test]
+    fn naming_a_scratch_project_keeps_it_from_the_next_new_chat() {
+        let root = root();
+        let store = Store::open_at(root.join("data")).unwrap();
+
+        let named = scratch_project(&store).unwrap();
+        assert!(named.is_unnamed_scratch());
+        store
+            .edit_local_project(&named.id, Some("Tokenizer probes"), None, None)
+            .unwrap();
+
+        let next = scratch_project(&store).unwrap();
+        assert_ne!(next.id, named.id);
+        assert!(next.is_unnamed_scratch());
+        let kept = store.get_local_project(&named.id).unwrap().unwrap();
+        assert!(kept.is_scratch() && !kept.is_unnamed_scratch());
+
+        let _ = std::fs::remove_dir_all(&named.repo_path);
+        let _ = std::fs::remove_dir_all(&next.repo_path);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn creating_a_project_moves_the_repository_and_leaves_unsaved_work_in_the_chat() {
         let root = root();
         let store = Store::open_at(root.join("data")).unwrap();
@@ -1579,15 +1977,29 @@ mod tests {
         let project = promote_scratch_project(
             &store,
             &scratch,
+            "owner",
             Some(&worktree),
-            "Fibonacci sandbox",
-            target.to_str().unwrap(),
+            &ask(
+                &store,
+                "owner",
+                "Fibonacci sandbox",
+                target.to_str().unwrap(),
+                Some("toolu_create"),
+            ),
         )
         .unwrap();
 
         assert!(!project.is_scratch());
         assert_eq!(project.id, scratch.id);
         assert_eq!(project.name, "Fibonacci sandbox");
+        assert_eq!(
+            store
+                .get_local_project(&project.id)
+                .unwrap()
+                .unwrap()
+                .proposal,
+            Some("toolu_create".into())
+        );
         assert_eq!(
             Path::new(&project.repo_path),
             crate::paths::canonicalize(&target).unwrap()
@@ -1612,7 +2024,13 @@ mod tests {
             .join("report.md")
             .exists());
 
-        let again = promote_scratch_project(&store, &project, None, "Other", "/nowhere");
+        let again = promote_scratch_project(
+            &store,
+            &project,
+            "owner",
+            None,
+            &ask(&store, "owner", "Other", "/nowhere", None),
+        );
         assert!(again
             .err()
             .unwrap()
@@ -1631,11 +2049,16 @@ mod tests {
         std::fs::create_dir_all(&occupied).unwrap();
         std::fs::write(occupied.join("notes.txt"), "mine").unwrap();
 
-        let error =
-            promote_scratch_project(&store, &scratch, None, "Mine", occupied.to_str().unwrap())
-                .err()
-                .unwrap()
-                .to_string();
+        let error = promote_scratch_project(
+            &store,
+            &scratch,
+            "owner",
+            None,
+            &ask(&store, "owner", "Mine", occupied.to_str().unwrap(), None),
+        )
+        .err()
+        .unwrap()
+        .to_string();
 
         assert!(error.contains("choose a new folder"), "{error}");
         assert!(Path::new(&scratch.repo_path).exists());
@@ -1645,6 +2068,333 @@ mod tests {
             .unwrap()
             .is_scratch());
         let _ = std::fs::remove_dir_all(&scratch.repo_path);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn creating_a_project_needs_a_full_path() {
+        let root = root();
+        let store = Store::open_at(root.join("data")).unwrap();
+        let scratch = scratch_project(&store).unwrap();
+
+        for path in ["probes", "$HOME/probes", "~probes"] {
+            let error = promote_scratch_project(
+                &store,
+                &scratch,
+                "owner",
+                None,
+                &ask(&store, "owner", "Probes", path, None),
+            )
+            .err()
+            .unwrap()
+            .to_string();
+            assert!(error.contains("not a full path"), "{path}: {error}");
+        }
+        assert!(Path::new(&scratch.repo_path).join(".git").is_dir());
+        let _ = std::fs::remove_dir_all(&scratch.repo_path);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn creating_a_project_that_cannot_be_saved_leaves_the_chat_where_it_was() {
+        let root = root();
+        let store = Store::open_at(root.join("data")).unwrap();
+        let scratch = scratch_project(&store).unwrap();
+        let worktree = root.join("worktree");
+        run_git(
+            Path::new(&scratch.repo_path),
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                worktree.to_str().unwrap(),
+                "main",
+            ],
+        );
+        store.conn_execute_for_tests(
+            "CREATE TRIGGER fail_promotion BEFORE UPDATE OF created_at ON local_projects
+             BEGIN SELECT RAISE(FAIL, 'disk I/O error'); END",
+        );
+        let target = root.join("projects").join("fib");
+
+        let error = promote_scratch_project(
+            &store,
+            &scratch,
+            "owner",
+            Some(&worktree),
+            &ask(
+                &store,
+                "owner",
+                "Fibonacci sandbox",
+                target.to_str().unwrap(),
+                Some("toolu_create"),
+            ),
+        )
+        .err()
+        .unwrap()
+        .to_string();
+
+        assert!(error.contains("disk I/O error"), "{error}");
+        assert!(Path::new(&scratch.repo_path).join(".git").is_dir());
+        assert!(!target.exists());
+        let kept = store.get_local_project(&scratch.id).unwrap().unwrap();
+        assert_eq!(kept.repo_path, scratch.repo_path);
+        assert_eq!(kept.name, scratch.name);
+        assert_eq!(kept.created_at, scratch.created_at);
+        assert_eq!(kept.proposal, None);
+        assert_eq!(
+            git_output(&worktree, &["rev-parse", "HEAD"]),
+            git_output(Path::new(&scratch.repo_path), &["rev-parse", "HEAD"])
+        );
+        let _ = std::fs::remove_dir_all(&scratch.repo_path);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A scratch project with a chat worktree, as a crash would find it.
+    fn scratch_with_worktree(root: &Path, store: &Store) -> (LocalProject, PathBuf) {
+        let scratch = scratch_project(store).unwrap();
+        let worktree = root.join("worktree");
+        run_git(
+            Path::new(&scratch.repo_path),
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                worktree.to_str().unwrap(),
+                "main",
+            ],
+        );
+        (scratch, worktree)
+    }
+
+    fn promotion(store: &Store, scratch: &LocalProject, target: &Path) -> MoveInFlight {
+        let path = target.to_string_lossy();
+        MoveInFlight::Promote {
+            requester: "owner".into(),
+            request: ask(store, "owner", "Probes", &path, Some("toolu_create")),
+            source: PathBuf::from(&scratch.repo_path),
+            target: target.to_path_buf(),
+            tip: git_output(Path::new(&scratch.repo_path), &["rev-parse", "HEAD"]),
+        }
+    }
+
+    #[test]
+    fn a_start_after_a_crash_finishes_a_promotion_whose_repository_moved() {
+        let root = root();
+        let store = Store::open_at(root.join("data")).unwrap();
+        let (scratch, worktree) = scratch_with_worktree(&root, &store);
+        let target = root.join("projects").join("probes");
+        begin_move(&store, &scratch.id, &promotion(&store, &scratch, &target)).unwrap();
+        // Another try before the start that recovers it would lose what it needs.
+        let again = begin_move(&store, &scratch.id, &promotion(&store, &scratch, &target));
+        assert!(again.unwrap_err().to_string().contains("didn't finish"));
+        store.take_chat_project_move("owner", None).unwrap();
+        let source = PathBuf::from(&scratch.repo_path);
+        std::fs::write(ownership_mark(&source, &scratch.id), "").unwrap();
+        move_repository(&source, &target, &staged_copy(&target, &scratch.id)).unwrap();
+
+        recover_project_moves(&store);
+
+        let project = store.get_local_project(&scratch.id).unwrap().unwrap();
+        assert_eq!(project.name, "Probes");
+        assert_eq!(project.proposal.as_deref(), Some("toolu_create"));
+        assert_eq!(
+            Path::new(&project.repo_path),
+            crate::paths::canonicalize(&target).unwrap()
+        );
+        assert_eq!(
+            git_output(&worktree, &["rev-parse", "HEAD"]),
+            git_output(&target, &["rev-parse", "HEAD"])
+        );
+        assert!(store.project_moves_in_flight().unwrap().is_empty());
+        assert_eq!(store.chat_project_move("owner").unwrap(), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_start_after_a_crash_undoes_a_copy_and_asks_for_the_move_again() {
+        let root = root();
+        let store = Store::open_at(root.join("data")).unwrap();
+        let (scratch, worktree) = scratch_with_worktree(&root, &store);
+        let target = root.join("projects").join("probes");
+        begin_move(&store, &scratch.id, &promotion(&store, &scratch, &target)).unwrap();
+        let source = PathBuf::from(&scratch.repo_path);
+        std::fs::write(ownership_mark(&source, &scratch.id), "").unwrap();
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        // Copied across volumes and repaired there, cut short before the store named it.
+        crate::local::storage::copy_verified(&source, &target).unwrap();
+        run_git(&target, &["worktree", "repair"]);
+        crate::local::storage::copy_verified(&source, &staged_copy(&target, &scratch.id)).unwrap();
+
+        recover_project_moves(&store);
+
+        assert!(!target.exists());
+        assert!(!staged_copy(&target, &scratch.id).exists());
+        assert!(store
+            .get_local_project(&scratch.id)
+            .unwrap()
+            .unwrap()
+            .is_scratch());
+        assert_eq!(
+            git_output(&worktree, &["rev-parse", "HEAD"]),
+            git_output(&source, &["rev-parse", "HEAD"])
+        );
+        let waiting = store.chat_project_move("owner").unwrap().unwrap();
+        assert_eq!(
+            (waiting.name.as_str(), Path::new(&waiting.path)),
+            ("Probes", target.as_path())
+        );
+        assert_eq!(waiting.proposal.as_deref(), Some("toolu_create"));
+        assert!(store.project_moves_in_flight().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&scratch.repo_path);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_start_after_a_crash_puts_back_a_chat_moved_into_an_unrecorded_project() {
+        // Cut short with the chat's files moved, after they went back but before their
+        // link did (a recovery itself cut short), and with only Git's registration made.
+        for cut in ["relinked", "put back", "registered"] {
+            split_cut_short(cut);
+        }
+    }
+
+    fn split_cut_short(cut: &str) {
+        let root = root();
+        let store = Store::open_at(root.join("data")).unwrap();
+        let source = root.join("source");
+        initialized(&source);
+        let project = create_project(
+            &store,
+            "Source",
+            source.to_str().unwrap(),
+            Default::default(),
+        )
+        .unwrap();
+        let session = format!("chat_{}", uuid::Uuid::new_v4());
+        let worktree = git::session_worktree_path(&project.id, &session);
+        std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        run_git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                worktree.to_str().unwrap(),
+                "main",
+            ],
+        );
+        std::fs::write(worktree.join("draft.md"), "unsaved\n").unwrap();
+        let target = root.join("split");
+        let id = uuid::Uuid::new_v4().to_string();
+        let moved = git::session_worktree_path(&id, &session);
+        begin_move(
+            &store,
+            &id,
+            &MoveInFlight::Split {
+                requester: session.clone(),
+                request: ask(
+                    &store,
+                    &session,
+                    "Probe",
+                    &target.to_string_lossy(),
+                    Some("toolu_split"),
+                ),
+                source_repo: source.clone(),
+                target: target.clone(),
+                worktree: worktree.clone(),
+                moved: moved.clone(),
+                old_link: Some(std::fs::read_to_string(worktree.join(".git")).unwrap()),
+            },
+        )
+        .unwrap();
+        // Seeded and relinked, cut short before the store recorded the project.
+        std::fs::create_dir_all(&target).unwrap();
+        run_git(&target, &["init", "--quiet", "-b", "main"]);
+        std::fs::write(ownership_mark(&target, &id), "").unwrap();
+        run_git(
+            &source,
+            &[
+                "push",
+                "--quiet",
+                target.to_str().unwrap(),
+                "main:refs/heads/side",
+            ],
+        );
+        run_git(&target, &["branch", "-m", "side", "main"]);
+        let head = git_output(&worktree, &["rev-parse", "HEAD"]);
+        if cut == "registered" {
+            run_git(
+                &target,
+                &[
+                    "worktree",
+                    "add",
+                    "--no-checkout",
+                    "--detach",
+                    moved.to_str().unwrap(),
+                    &head,
+                ],
+            );
+        } else {
+            std::mem::forget(relink_worktree(&worktree, &moved, &target).unwrap());
+        }
+        if cut == "put back" {
+            std::fs::rename(&moved, &worktree).unwrap();
+        }
+
+        recover_project_moves(&store);
+
+        assert!(!moved.exists(), "{cut}");
+        assert!(!target.exists(), "{cut}");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("draft.md")).unwrap(),
+            "unsaved\n"
+        );
+        assert_eq!(
+            git_output(&worktree, &["rev-parse", "HEAD"]),
+            git_output(&source, &["rev-parse", "HEAD"])
+        );
+        assert!(store.get_local_project(&id).unwrap().is_none());
+        assert!(store.project_moves_in_flight().unwrap().is_empty(), "{cut}");
+        let waiting = store.chat_project_move(&session).unwrap().unwrap();
+        assert_eq!(waiting.name, "Probe");
+        assert_eq!(waiting.proposal.as_deref(), Some("toolu_split"));
+        let _ = std::fs::remove_dir_all(worktree.parent().unwrap());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn undoing_a_promotion_leaves_a_folder_another_move_filled() {
+        let root = root();
+        let store = Store::open_at(root.join("data")).unwrap();
+        let first = scratch_project(&store).unwrap();
+        store
+            .edit_local_project(&first.id, Some("First"), None, None)
+            .unwrap();
+        let second = scratch_project(&store).unwrap();
+        assert_ne!(first.id, second.id);
+        // Both checked the same empty folder; the first got there first.
+        let target = root.join("projects").join("shared");
+        let path = target.to_string_lossy();
+        let kept = promote_scratch_project(
+            &store,
+            &first,
+            "first",
+            None,
+            &ask(&store, "first", "First", &path, None),
+        )
+        .unwrap();
+        let tip = git_output(Path::new(&second.repo_path), &["rev-parse", "HEAD"]);
+
+        undo_promotion(Path::new(&second.repo_path), &target, &second.id, &tip).unwrap();
+
+        assert!(target.join(".git").is_dir());
+        assert_eq!(
+            Path::new(&kept.repo_path),
+            crate::paths::canonicalize(&target).unwrap()
+        );
+        assert!(Path::new(&second.repo_path).join(".git").is_dir());
+        let _ = std::fs::remove_dir_all(&second.repo_path);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1713,27 +2463,82 @@ mod tests {
             &store,
             &project,
             &session,
+            &session,
             std::slice::from_ref(&session),
-            "Probe",
-            root.join("staged").to_str().unwrap(),
+            &ask(
+                &store,
+                &session,
+                "Probe",
+                root.join("staged").to_str().unwrap(),
+                None,
+            ),
         );
         assert!(staged.err().unwrap().to_string().contains("staged changes"));
         assert!(!root.join("staged").exists());
         run_git(&worktree, &["reset", "--quiet"]);
+
+        // A store that can't record the project puts the chat's files back as they were.
+        store.conn_execute_for_tests(
+            "CREATE TRIGGER fail_split BEFORE INSERT ON local_projects
+             BEGIN SELECT RAISE(FAIL, 'disk I/O error'); END",
+        );
+        let unsaved = split_chat_project(
+            &store,
+            &project,
+            &session,
+            &session,
+            std::slice::from_ref(&session),
+            &ask(
+                &store,
+                &session,
+                "Probe",
+                root.join("unsaved").to_str().unwrap(),
+                None,
+            ),
+        );
+        assert!(unsaved
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("disk I/O error"));
+        assert!(!root.join("unsaved").exists());
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("README.md")).unwrap(),
+            "# edited\n"
+        );
+        assert_eq!(
+            git_output(&worktree, &["status", "--porcelain"]),
+            "M README.md"
+        );
+        store.conn_execute_for_tests("DROP TRIGGER fail_split");
 
         let target = root.join("split");
         let created = split_chat_project(
             &store,
             &project,
             &session,
+            &session,
             std::slice::from_ref(&session),
-            "Probe",
-            target.to_str().unwrap(),
+            &ask(
+                &store,
+                &session,
+                "Probe",
+                target.to_str().unwrap(),
+                Some(""),
+            ),
         )
         .unwrap();
 
         assert_ne!(created.id, project.id);
         assert!(!created.is_scratch());
+        assert_eq!(
+            store
+                .get_local_project(&created.id)
+                .unwrap()
+                .unwrap()
+                .proposal,
+            Some(String::new())
+        );
         // Git's own copy: a Windows checkout ends lines with CRLF.
         assert_eq!(git_output(&target, &["show", "HEAD:probe.py"]), "print(2)");
         assert_eq!(

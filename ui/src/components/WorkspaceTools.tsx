@@ -1,7 +1,9 @@
 import { useWorkspace } from "../workspace";
 import { EscapeScope } from "./EscapeScope";
-import { type ChatSession, type Experiment, type Run, fmtNumber, timeAgo } from "../api";
-import { runDisplay } from "../runDisplay";
+import { type ChatSession, type Experiment, type Run, type WorkspacePane, fmtNumber, timeAgo } from "../api";
+import { runActive, runDisplay } from "../runDisplay";
+import { runTone } from "../runMonitor/model";
+import { Mark } from "./run/Mark";
 import { activeWorkspaceRuns } from "../workspaceRuns";
 import { statusLabel } from "./StatusBadge";
 
@@ -47,20 +49,27 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
   onSelectSideChat: (sessionId: string) => void;
   onOpenDelegate: (sessionId: string) => void;
 }) {
-  const { getComputeSettingsQuery } = useWorkspace().queries;
+  const { queries: { getComputeSettingsQuery }, api: { captureUiEvent } } = useWorkspace();
+  const opened = <A extends unknown[]>(pane: WorkspacePane, open: (...args: A) => void) => (...args: A) => {
+    captureUiEvent({ name: "pane_opened", pane });
+    open(...args);
+  };
+  const sideChat = onSideChat && opened("side_chat", onSideChat);
+  const selectSideChat = opened("side_chat", onSelectSideChat);
 
   const experimentRows = activeWorkspaceRuns(experiments, runs, sessionId);
   const compute = useQuery({ ...getComputeSettingsQuery(projectId), enabled: expanded });
-  const defaultBackend = compute.data?.configuredDefaultBackend ?? compute.data?.defaultBackend;
+  const defaultBackend = compute.data?.projectDefault?.backend ?? compute.data?.configuredDefaultBackend ?? compute.data?.defaultBackend;
   const computeLabel = defaultBackend ? TARGET_LABELS[defaultBackend]() : compute.isPending ? "…" : compute.isError ? m.model_picker_unavailable() : m.settings_not_set();
-  const items = [
+  const items = ([
     { id: "search", label: m.chat_search_title(), Icon: Search, onClick: onFind, shortcut: appHotkeys["chat.find"].hotkey },
     { id: "files", label: m.app_files(), Icon: FolderOpen, onClick: onFiles, shortcut: appHotkeys["files.open"].hotkey },
     { id: "artifacts", label: m.app_artifacts(), Icon: Package, onClick: onArtifacts, shortcut: appHotkeys["artifacts.open"].hotkey },
     { id: "experiments", label: m.app_experiments(), Icon: FlaskConical, onClick: onExperiments, shortcut: appHotkeys["experiments.open"].hotkey },
     { id: "terminal", label: m.workspace_terminal(), Icon: Terminal, onClick: onTerminal, shortcut: appHotkeys["terminal.open"].hotkey },
-  ].map((item) => ({
+  ] as const).map((item) => ({
     ...item,
+    onClick: opened(item.id, item.onClick),
     pressed: item.id === "search" ? findOpen : activeView === item.id,
     ariaShortcut: typeof item.shortcut === "string" ? `${item.shortcut.replace("Mod+", "Meta+")} ${item.shortcut.replace("Mod+", "Control+")}` : undefined,
   }));
@@ -73,7 +82,7 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
           <span>{label}</span>
         </button>
       ))}
-      {onSideChat && sessionId && <SideChatPicker parentId={sessionId} sessions={sessions} onSelect={onSelectSideChat} onCreate={onSideChat} mobile />}
+      {sideChat && sessionId && <SideChatPicker parentId={sessionId} sessions={sessions} onSelect={selectSideChat} onCreate={sideChat} mobile />}
     </nav>
     <div className="workspace-tools absolute end-3.5 top-2 mac-titlebar:top-1.5 z-30" style={{ insetInlineEnd: rightOffset }}>
       {!expanded ? (
@@ -83,7 +92,7 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
               <Icon size={16} />
             </IconButton>
           ))}
-          {onSideChat && sessionId && <SideChatPicker parentId={sessionId} sessions={sessions} onSelect={onSelectSideChat} onCreate={onSideChat} />}
+          {sideChat && sessionId && <SideChatPicker parentId={sessionId} sessions={sessions} onSelect={selectSideChat} onCreate={sideChat} />}
         </nav>
       ) : (
         <nav data-keyboard-list aria-label={m.workspace_tools_heading()} onKeyDown={navigateKeyboardList} className="workspace-tools-card flex w-60 flex-col gap-0.5 rounded-xl border border-border bg-background px-1.5 py-2 shadow-control-subtle">
@@ -98,7 +107,7 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
               <span className="flex items-center gap-4"><Icon size={16} />{itemLabel}</span>
             </MenuItem>
           ))}
-          <MenuItem data-keyboard-item className="py-1" data-tip={formatForDisplay(appHotkeys["compute.open"].hotkey ?? [])} aria-label={`${m.workspace_default_compute()}: ${computeLabel}`} aria-keyshortcuts="Meta+Alt+C Control+Alt+C" onClick={onCompute}>
+          <MenuItem data-keyboard-item className="py-1" data-tip={formatForDisplay(appHotkeys["compute.open"].hotkey ?? [])} aria-label={`${m.workspace_default_compute()}: ${computeLabel}`} aria-keyshortcuts="Meta+Alt+C Control+Alt+C" onClick={opened("compute", onCompute)}>
             <span className="flex min-w-0 flex-col gap-0.5">
               <span className="flex items-center gap-4 text-sm text-text"><Cpu size={16} className="shrink-0" />{m.workspace_default_compute()}</span>
               <span className="flex items-center gap-1.5 ps-8 text-menu text-subtext">
@@ -114,11 +123,11 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
                 <span className="flex items-center gap-4"><Icon size={16} />{label}</span>
               </MenuItem>
             ))}
-            {onSideChat && sessionId && (
-              <SideChatPicker parentId={sessionId} sessions={sessions} onSelect={onSelectSideChat} onCreate={onSideChat} expanded />
+            {sideChat && sessionId && (
+              <SideChatPicker parentId={sessionId} sessions={sessions} onSelect={selectSideChat} onCreate={sideChat} expanded />
             )}
-            {sessionId && <ChatBranch key={sessionId} sessionId={sessionId} busy={busy} onChanges={onChanges} />}
-            {sessionId && <SubagentLineage sessions={sessions} sessionId={sessionId} onOpen={onOpenDelegate} />}
+            {sessionId && <ChatBranch key={sessionId} sessionId={sessionId} busy={busy} onChanges={opened("changes", onChanges)} />}
+            {sessionId && <SubagentLineage sessions={sessions} sessionId={sessionId} onOpen={opened("subagent", onOpenDelegate)} />}
             {experimentRows.length > 0 && (
               <div>
                 <h2 className="m-0 flex items-center gap-4 px-2 py-1 text-sm font-normal text-text">
@@ -128,8 +137,11 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
                 {experimentRows.map((row) => {
                   const display = runDisplay(row.run);
                   return (
-                    <MenuItem key={row.run.id} data-keyboard-item className="min-h-7 py-1" onClick={() => onOpenExperiment(row.experiment.id, row.run.id)}>
-                      <span className="min-w-0 truncate ps-8 text-menu text-subtext" title={`${row.experiment.title || row.experiment.slug} · ${statusLabel(display.status, display.stopping)}`}>{row.experiment.title || row.experiment.slug}</span>
+                    <MenuItem key={row.run.id} data-keyboard-item className="min-h-7 py-1" onClick={() => opened("active_experiment", onOpenExperiment)(row.experiment.id, row.run.id)}>
+                      <span className="flex min-w-0 items-center gap-4">
+                        <span className="flex w-[15px] shrink-0 justify-center"><Mark tone={runTone(row.run)} live={runActive(row.run.status)} label={statusLabel(display.status, display.stopping)} /></span>
+                        <span className="min-w-0 truncate text-menu text-subtext" title={`${row.experiment.title || row.experiment.slug} · ${statusLabel(display.status, display.stopping)}`}>{row.experiment.title || row.experiment.slug}</span>
+                      </span>
                     </MenuItem>
                   );
                 })}

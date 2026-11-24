@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createElement } from "react";
+import { act, createElement } from "react";
 import { DetailDrawer } from "../src/components/DetailDrawer.tsx";
 import { m } from "../src/paraglide/messages.js";
-import { render, serve, settle } from "./render.mjs";
+import { find, press, render, serve, settle } from "./render.mjs";
+
+const click = async (element) => { await act(async () => element.click()); await settle(); };
 
 const runs = [
   { id: "run-old", experimentId: "experiment-a", createdAt: 1, status: "completed" },
@@ -19,7 +21,7 @@ const props = {
 };
 
 /** Renders the drawer against a backend whose Trackio store holds `trackioRuns`; returns the runs whose logs it read. */
-async function show(overrides, trackioRuns = []) {
+async function show(overrides, trackioRuns = [], sessions = []) {
   const logs = [];
   serve((path) => {
     const log = path.match(/^\/api\/runs\/([^/]+)\/log/);
@@ -28,6 +30,8 @@ async function show(overrides, trackioRuns = []) {
       return { generation: "g", offset: 0, dataBase64: "", nextOffset: 0, eof: true };
     }
     if (path === "/api/compute/hosts") return [];
+    if (path.startsWith("/api/chat/sessions")) return { sessions };
+    if (path.startsWith("/api/projects/project-a/code-tree")) return { root: "repo", branch: "main", entries: ["notes.md"] };
     if (path === "/api/trackio/projects/project-a/runs") {
       return { dashboardUrl: trackioRuns.length ? "http://127.0.0.1:7860" : null, project: "p", runs: trackioRuns };
     }
@@ -126,4 +130,59 @@ test("an unconfirmed launch offers Stop and Abandon", async () => {
   const buttons = [...(await show({ runs: [launch] })).container.querySelectorAll("button")].map((button) => button.textContent);
   assert.ok(buttons.includes(m.common_stop()), buttons.join());
   assert.ok(buttons.includes(m.run_abandon()), buttons.join());
+});
+
+test("Stop asks first; Escape keeps the run, a refusal stays in the dialog, and Stop run cancels it", async () => {
+  const live = { id: "run-live", experimentId: "experiment-a", projectId: "project-a", createdAt: 4, status: "running", cancelling: false, contact: null, host: null };
+  const cancels = [];
+  let refusal = "The run's machine is offline.";
+  serve((path, init) => {
+    if (path === "/api/runs/run-live/cancel" && init.method === "POST") {
+      cancels.push(path);
+      return refusal ? Response.json({ error: refusal }, { status: 409 }) : { ok: true };
+    }
+    if (path.startsWith("/api/runs/run-live/log")) return { generation: "g", offset: 0, dataBase64: "", nextOffset: 0, eof: true };
+    if (path === "/api/compute/hosts") return [];
+    if (path === "/api/projects/project-a/experiments") return { experiments: [] };
+    if (path === "/api/trackio/projects/project-a/runs") return { dashboardUrl: null, project: "p", runs: [] };
+  });
+  const { container } = await render(createElement(DetailDrawer, { ...props, selectedRunId: null, runs: [live] }));
+  await settle();
+  const stop = () => [...container.querySelectorAll(".term-bar button")].find((button) => button.textContent === m.common_stop());
+  const dialog = () => document.querySelector('[role="dialog"]');
+
+  await click(stop());
+  assert.ok(dialog().textContent.replace(/[⁦-⁩]/g, "").includes(m.run_stop_title({ name: "example" })));
+  await press("Escape");
+  await settle();
+  assert.equal(dialog(), null);
+  assert.deepEqual(cancels, []);
+
+  await click(stop());
+  await click(find('[role="dialog"] button', m.experiments_stop_run()));
+  assert.ok(dialog().textContent.includes(refusal), "the refusal is said where the user confirmed");
+
+  refusal = null;
+  await click(find('[role="dialog"] button', m.experiments_stop_run()));
+  assert.equal(cancels.length, 2);
+  assert.equal(dialog(), null);
+});
+
+const described = { ...props.experiment, description: '<file path="notes.md" />', chatSessionId: "chat-a", createdAt: 1 };
+
+async function openDescribedFile(sessions) {
+  const opened = [];
+  const { container } = await show({ view: "overview", experiment: described, experiments: [], onOpenFile: (...args) => opened.push(args) }, [], sessions);
+  const chip = container.querySelector(".file-chip");
+  assert.equal(chip.disabled, false);
+  await click(chip);
+  return opened[0];
+}
+
+test("a file reference in the overview description opens the file in the experiment's chat", async () => {
+  assert.deepEqual((await openDescribedFile([{ id: "chat-a", harness: "claude" }])).slice(0, 2), ["notes.md", "chat-a"]);
+});
+
+test("a file reference opens without the chat once the chat is deleted", async () => {
+  assert.deepEqual((await openDescribedFile([{ id: "chat-b" }])).slice(0, 2), ["notes.md", null]);
 });

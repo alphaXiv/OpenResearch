@@ -10,7 +10,8 @@ use crate::error::{anyhow, Context, Result};
 #[path = "opencode_db.rs"]
 pub mod opencode_database;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum NativeStore {
     Isolated,
     Legacy,
@@ -745,6 +746,46 @@ pub(crate) fn claude_config_file() -> PathBuf {
     }
 }
 
+/// A Claude Code home for one-shots, `name` among them: `home`'s settings and a private copy of
+/// its account file, without its memory, skills or plugins. The sign-in is read where
+/// `CLAUDE_SECURESTORAGE_CONFIG_DIR` points, never linked: a refreshed token must land in the
+/// account's own home, and Windows' hard-link fallback would make that home's files look shared.
+pub fn prepare_claude_one_shot(home: &Path, name: &str) -> Result<PathBuf> {
+    let root = crate::store::data_dir().join("agents/one-shot").join(name);
+    let sources = ["settings.json", "settings.local.json"].map(|file| home.join(file));
+    prepare_links(&root, home, &sources)?;
+
+    let (account, copy) = (home.join(".claude.json"), root.join(".claude.json"));
+    match std::fs::read(&account) {
+        Ok(bytes) if std::fs::read(&copy).ok().as_ref() != Some(&bytes) => {
+            crate::local::git::atomic_write_with_mode(&copy, &bytes, Some(0o600))?;
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if copy.exists() {
+                std::fs::remove_file(&copy)?;
+            }
+        }
+        Err(error) => {
+            return Err(anyhow!("could not read {}: {error}", account.display()));
+        }
+    }
+    Ok(root)
+}
+
+/// A Codex home for one-shots, `name` among them: `home`'s configuration and sign-in, without its
+/// instructions, skills, hooks or sessions. Windows keeps `home` itself: its links fall back to hard
+/// links or copies, and a copied sign-in would miss the token a one-shot refreshes.
+pub fn prepare_codex_one_shot(home: &Path, name: &str) -> Result<PathBuf> {
+    if cfg!(windows) {
+        return Ok(home.to_path_buf());
+    }
+    let root = crate::store::data_dir().join("agents/one-shot").join(name);
+    let sources = ["config.toml", "auth.json"].map(|file| home.join(file));
+    prepare_links(&root, home, &sources)?;
+    Ok(root)
+}
+
 pub(crate) fn prepare_claude_links(
     root: &Path,
     legacy: &Path,
@@ -776,6 +817,8 @@ pub fn prepare_codex(store: NativeStore) -> Result<PathBuf> {
     Ok(crate::paths::canonicalize(&root).unwrap_or(root))
 }
 
+/// Links every entry of the user's Codex home but its private state, where Claude's home takes an
+/// allowlist, so paths Codex's configuration gives relative to its home still resolve.
 pub(crate) fn prepare_codex_links(root: &Path, legacy: &Path, share_auth: bool) -> Result<()> {
     std::fs::create_dir_all(root)?;
     let isolated = crate::paths::canonicalize(root)?;

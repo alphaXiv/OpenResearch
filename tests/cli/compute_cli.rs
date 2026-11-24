@@ -255,6 +255,38 @@ fn experiment_checkout_hint_matches_the_invoking_shell_and_stops_when_cd_fails()
 }
 
 #[test]
+fn options_for_the_other_compute_type_are_rejected() {
+    let sandbox = Sandbox::new();
+    let cases: [&[&str]; 6] = [
+        &[
+            "instance", "create", "org", "--cpu", "cpu5c", "--disk", "500",
+        ],
+        &[
+            "instance", "create", "org", "--cpu", "cpu5c", "--count", "2",
+        ],
+        &[
+            "instance",
+            "create",
+            "org",
+            "--cpu",
+            "cpu5c",
+            "--provider",
+            "runpod",
+        ],
+        &[
+            "instance", "create", "org", "--gpu", "H100_SXM", "--vcpus", "32",
+        ],
+        &["compute", "catalog", "--cpu", "--gpu", "H100"],
+        &["compute", "--cpu", "--provider", "runpod"],
+    ];
+
+    for args in cases {
+        let output = sandbox.run(args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+    }
+}
+
+#[test]
 fn standalone_settings_defaults_and_instruction_conflicts() {
     let sandbox = Sandbox::new();
     let saved = sandbox.json(&[
@@ -567,4 +599,128 @@ fn custom_instructions_survive_reinstall_and_harness_switches_across_projects() 
         sandbox.json(&["compute", "instructions", "show", "--json"]),
         saved
     );
+}
+
+#[test]
+fn the_default_target_belongs_to_the_project_the_command_runs_in() {
+    let sandbox = Sandbox::new();
+    let repo = sandbox.0.join("research");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    sandbox.json(&["projects", "--json"]);
+    let db = rusqlite::Connection::open(sandbox.0.join("data/orx.db")).unwrap();
+    db.execute(
+        "INSERT INTO local_projects (id, name, slug, github_owner, github_repo, github_sync_enabled, baseline_branch, repo_path, created_at, updated_at) VALUES ('project', 'Research', 'research', '', '', 0, 'main', ?1, 0, 0)",
+        [repo.to_str().unwrap()],
+    )
+    .unwrap();
+    let json_in = |dir: &std::path::Path, args: &[&str]| -> Value {
+        let output = sandbox
+            .command()
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    let inside = repo.join("src");
+    let outside = sandbox.0.clone();
+
+    let set = json_in(
+        &inside,
+        &[
+            "compute", "default", "set", "slurm", "--flavor", "h100:1", "--json",
+        ],
+    );
+    assert_eq!(set["project"]["name"], "Research");
+    assert_eq!(
+        set["projectDefault"],
+        serde_json::json!({"backend": "slurm", "flavor": "h100:1"})
+    );
+    assert_eq!(set["configuredDefaultBackend"], Value::Null);
+    assert_eq!(
+        json_in(&outside, &["compute", "status", "--json"])["configuredDefaultBackend"],
+        Value::Null
+    );
+
+    let machine = json_in(
+        &inside,
+        &[
+            "compute",
+            "default",
+            "set",
+            "modal",
+            "--flavor",
+            "A10G",
+            "--machine",
+            "--json",
+        ],
+    );
+    assert_eq!(machine["configuredDefaultBackend"], "modal");
+    let status = json_in(&inside, &["compute", "status", "--json"]);
+    assert_eq!(status["projectDefault"]["backend"], "slurm");
+    assert_eq!(status["configuredDefaultBackend"], "modal");
+
+    let cleared = json_in(&inside, &["compute", "default", "clear", "--json"]);
+    assert_eq!(cleared["projectDefault"], Value::Null);
+    assert_eq!(cleared["configuredDefaultBackend"], "modal");
+
+    let runs = sandbox
+        .command()
+        .current_dir(&inside)
+        .args(["runs"])
+        .output()
+        .unwrap();
+    assert!(
+        runs.status.success(),
+        "{}",
+        String::from_utf8_lossy(&runs.stderr)
+    );
+    // A project nested in another's folder is the one its folder names, however recently the outer one changed.
+    let nested = repo.join("src/vision");
+    std::fs::create_dir_all(&nested).unwrap();
+    db.execute(
+        "INSERT INTO local_projects (id, name, slug, github_owner, github_repo, github_sync_enabled, baseline_branch, repo_path, created_at, updated_at) VALUES ('nested', 'Vision', 'vision', '', '', 0, 'main', ?1, 0, 0)",
+        [nested.to_str().unwrap()],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE local_projects SET updated_at = 9999999999999 WHERE id = 'project'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        json_in(&nested, &["compute", "status", "--json"])["project"]["name"],
+        "Vision"
+    );
+    assert_eq!(
+        json_in(&inside, &["compute", "status", "--json"])["project"]["name"],
+        "Research"
+    );
+
+    // A cloud box's chat id is not in this store; the folder still names the project.
+    let foreign = sandbox
+        .command()
+        .current_dir(&inside)
+        .env("ORX_CHAT_SESSION_ID", "ses_cloud_box")
+        .args(["runs"])
+        .output()
+        .unwrap();
+    assert!(
+        foreign.status.success(),
+        "{}",
+        String::from_utf8_lossy(&foreign.stderr)
+    );
+    let runs = sandbox
+        .command()
+        .current_dir(&outside)
+        .args(["runs"])
+        .output()
+        .unwrap();
+    assert!(!runs.status.success());
+    assert!(String::from_utf8_lossy(&runs.stderr).contains("orx projects"));
 }

@@ -24,6 +24,7 @@ mod file_lock;
 mod folder_picker;
 mod invocation;
 mod jobs;
+mod keep;
 // Local mode (`orx up`): builds out across stages; not all of it is wired yet.
 #[allow(dead_code)]
 mod local;
@@ -236,6 +237,18 @@ enum AlphaXivCommand {
         #[arg(long)]
         json: bool,
     },
+    /// List the alphaXiv tools, or show one tool's arguments.
+    Tools {
+        /// A tool to describe.
+        name: Option<String>,
+    },
+    /// Call an alphaXiv tool.
+    Call {
+        /// The tool, from `orx alphaxiv tools`.
+        name: String,
+        /// Its arguments as a JSON object, or `-` to read them from stdin.
+        arguments: Option<String>,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -262,7 +275,8 @@ pub struct ProjectArgs {
 pub enum ProjectCommand {
     /// Show a local project's details and experiment tree.
     View {
-        project_id: String,
+        /// Project id from `orx projects`; defaults to the chat's or the current folder's project.
+        project_id: Option<String>,
         /// Include archived experiments in the listing.
         #[arg(long)]
         all: bool,
@@ -270,7 +284,8 @@ pub enum ProjectCommand {
 
     /// Edit a local project's name or run command.
     Edit {
-        project_id: String,
+        /// Project id from `orx projects`; defaults to the chat's or the current folder's project.
+        project_id: Option<String>,
         /// Rename the project.
         #[arg(long)]
         name: Option<String>,
@@ -284,7 +299,8 @@ pub enum ProjectCommand {
     /// or publish it as an openresearch.sh link with --publish.
     /// Every chat is included unless narrowed with --chat or left out with --no-chats.
     Share {
-        project_id: String,
+        /// Project id from `orx projects`; defaults to the chat's or the current folder's project.
+        project_id: Option<String>,
         /// File to write (default: ./<project>.orx).
         #[arg(long, conflicts_with = "publish")]
         out: Option<String>,
@@ -319,7 +335,10 @@ pub enum ProjectCommand {
     },
 
     /// Delete a project's published openresearch.sh link and its file.
-    Unpublish { project_id: String },
+    Unpublish {
+        /// Project id from `orx projects`; defaults to the chat's or the current folder's project.
+        project_id: Option<String>,
+    },
 
     /// Open a shared .orx file, or an openresearch.sh/p/... link, as a new project.
     Import {
@@ -332,7 +351,8 @@ pub enum ProjectCommand {
 
 #[derive(Args, Debug)]
 pub struct RunsArgs {
-    pub project_id: String,
+    /// Project id from `orx projects`; defaults to the chat's or the current folder's project.
+    pub project_id: Option<String>,
     /// Filter to one experiment.
     #[arg(long)]
     pub experiment: Option<String>,
@@ -368,8 +388,8 @@ pub struct MetricsArgs {
 
 #[derive(Args, Debug)]
 pub struct CreateExperimentArgs {
-    /// Local project id from `orx projects`.
-    pub project_id: String,
+    /// Project id from `orx projects`; defaults to the chat's or the current folder's project.
+    pub project_id: Option<String>,
     /// Experiment title (required).
     #[arg(long)]
     pub title: Option<String>,
@@ -455,25 +475,25 @@ pub struct InstanceCreateArgs {
     pub org_id: String,
     /// Provision a GPU instance with this GPU id, e.g. `H100_SXM` — the exact id
     /// from `orx compute`, not a family name like `H100`.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "cpu")]
     pub gpu: Option<String>,
     /// GPUs per instance (with `--gpu`; default 1).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "cpu")]
     pub count: Option<i64>,
     /// Disk in GB (with `--gpu`; default 100).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "cpu")]
     pub disk: Option<i64>,
     /// Provider to provision from (with `--gpu`), e.g. runpod, vast, lambda.
     /// Omit to pick the cheapest matching offer across providers (like the
     /// dashboard). See `orx compute` for providers; validated server-side.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "cpu")]
     pub provider: Option<String>,
     /// Provision a CPU-only instance with this flavor: cpu5c (compute), cpu5g
     /// (general), or cpu5m (memory-optimized). Mutually exclusive with `--gpu`.
     #[arg(long)]
     pub cpu: Option<String>,
     /// vCPUs for a CPU instance (with `--cpu`): 2, 8, or 32 (default 8).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "gpu")]
     pub vcpus: Option<i64>,
 }
 
@@ -550,6 +570,12 @@ pub enum ExpCommand {
         /// Query live Slurm accounting in addition to locally stored status.
         #[arg(long)]
         scheduler: bool,
+        /// Inspect a particular run belonging to this experiment.
+        #[arg(long)]
+        run: Option<String>,
+        /// Print the run's stage, progress, signals, estimate and flags as JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// View the experiment's description/notes, or overwrite it with `--set` / `--stdin`.
@@ -573,6 +599,39 @@ pub enum ExpCommand {
         /// Cancel only this run. With an experiment id, the run must belong to it.
         #[arg(long)]
         run: Option<String>,
+        /// Why the run is being stopped, kept on the run and shown with it.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+
+    /// Mark a stopped run as being repaired by this chat's agent, so it shows as Revising until
+    /// the experiment's next run starts or this turn ends.
+    Revise {
+        exp_id: String,
+        /// The stopped run the repair follows: the experiment's newest.
+        #[arg(long)]
+        run: String,
+    },
+
+    /// Settle a flag on a run: keep it going, stop it, or leave the choice to the user.
+    #[command(group(clap::ArgGroup::new("choice").required(true).args(["keep", "ask", "stop"])))]
+    Flag {
+        run: String,
+        /// The flag, as the wake or `orx exp status` names it.
+        #[arg(long = "flag")]
+        flag: String,
+        /// The run is fine: keep it going. The watcher's next look reads the reason.
+        #[arg(long)]
+        keep: bool,
+        /// Leave the choice to the user, who sees the flag with Stop run and Keep going.
+        #[arg(long)]
+        ask: bool,
+        /// Stop the run, as `orx exp cancel` does.
+        #[arg(long)]
+        stop: bool,
+        /// Why, kept with the choice and shown with the run.
+        #[arg(long)]
+        reason: Option<String>,
     },
 
     /// Abandon a run whose outcome cannot be recovered; keep its cancel pending.
@@ -580,6 +639,12 @@ pub enum ExpCommand {
 
     /// Send this chat the result of the experiment's latest run when it finishes.
     Wake { exp_id: String },
+
+    /// Set, read, inspect or check the view an experiment's runs are drawn with.
+    View {
+        #[command(subcommand)]
+        command: ViewCommand,
+    },
 
     /// Wait for a run to finish: one experiment (`<expId>`) or the next completion in a project (`--project`).
     Wait {
@@ -602,9 +667,69 @@ pub enum ExpCommand {
     },
 }
 
+#[derive(Subcommand, Debug)]
+pub enum ViewCommand {
+    /// Save the view this experiment's runs are drawn with, its patterns, its stage plan, or any
+    /// of them; experiments created under it later start with a copy.
+    #[command(group(clap::ArgGroup::new("view_input").multiple(false)))]
+    #[command(group(clap::ArgGroup::new("view_change").required(true).multiple(true).args(["file", "stdin", "pattern", "config"])))]
+    Set {
+        exp_id: String,
+        /// Read the view's markup from this file.
+        #[arg(long, group = "view_input")]
+        file: Option<std::path::PathBuf>,
+        /// Read the view's markup from standard input.
+        #[arg(long, group = "view_input")]
+        stdin: bool,
+        /// Read signals from the run's log with the JSON list of patterns in this file:
+        /// `[{"regex": "…", "phase": "…", "unit": "…", "row": "…"}]`. Its runs' logs are read again.
+        #[arg(long)]
+        pattern: Option<std::path::PathBuf>,
+        /// Read the experiment's config from this JSON file: the stages every run goes through,
+        /// `"plan": [{"phase": "…", "of": N, "unit": "…"}]`; the rules orx stops or asks by,
+        /// `"rules": [{"name": "…", "text": "…", "does": "stop|ask", "when": {…}}]`; what the
+        /// watcher is told, `"brief": {"question": "…", "healthy": "…", "noise": "…",
+        /// "worth_a_flag": "…"}`; and its gaps, `"watch": {"minGapS": 120, "maxGapS": 1800}`. An
+        /// empty value clears that key; a key left out keeps what is saved.
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
+    /// Print the experiment's saved view, or the one orx draws when none is saved.
+    Get {
+        exp_id: String,
+        /// Print the markup, its tree and where it comes from as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Describe the run's current card from its collected data, including charts and missing signals.
+    Show {
+        /// Run id; omit when exactly one run is shown in this agent's chat.
+        run_id: Option<String>,
+    },
+    /// Check a view against what a run reported: the experiment's saved view, or the one in --file;
+    /// with patterns, saved or in --pattern, what each matches in the run's log now.
+    Check {
+        run_id: String,
+        /// Check this file's markup instead of the saved view.
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
+        /// Check this file's patterns instead of the saved ones.
+        #[arg(long)]
+        pattern: Option<std::path::PathBuf>,
+        /// Print what the run reported and what the view draws as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Args, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExpRunArgs {
     pub exp_id: String,
+    /// Estimate stage and total duration from the parent, and their cost on the chosen compute,
+    /// without launching a run.
+    #[arg(long)]
+    #[serde(skip)]
+    pub estimate: bool,
     /// Disk in GB for a `--backend openresearch` instance (default 100).
     #[arg(long)]
     pub disk: Option<i64>,
@@ -845,9 +970,11 @@ pub struct UpArgs {
     /// Internal persistent dashboard/agent-host mode.
     #[arg(long, hide = true)]
     pub remote_host: bool,
-    /// Serving the desktop app's window, which only restarts when asked.
-    #[arg(skip)]
-    pub desktop_app: bool,
+    /// Serve the desktop window that started this, which only restarts when asked: its
+    /// stdin is the window's lease, and end of input means the window is gone. A contract
+    /// with every window shipped (src/commands/app/FROZEN.md).
+    #[arg(long, hide = true, conflicts_with_all = ["remote", "remote_host", "headless"])]
+    pub app_window: bool,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -858,6 +985,10 @@ pub struct RemoteHostArgs {
 
 #[derive(Clone, Subcommand, Debug)]
 pub enum RemoteHostCommand {
+    Restart {
+        #[arg(long)]
+        expected_instance: String,
+    },
     Ensure {
         #[arg(long)]
         expected_instance: Option<String>,
@@ -1116,11 +1247,24 @@ pub struct PaperArgs {
 }
 
 fn main() {
+    // Before any thread starts: a keeper forks to leave this process tree.
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() == Some(std::ffi::OsStr::new("keep")) {
+        let status = match (args.next(), args.next()) {
+            (Some(dir), None) => orx_keep::run(std::path::Path::new(&dir)).map_or(1, |()| 0),
+            _ => {
+                eprintln!("usage: orx keep KEEPER_DIR");
+                2
+            }
+        };
+        std::process::exit(status);
+    }
     if let Err(error) = commands::remote_host::prepare_readiness_pipe() {
         eprintln!("Could not prepare server readiness: {error}");
         std::process::exit(1);
     }
     run_cli();
+    commands::up::flush_stderr();
 }
 
 // Desktop app mode blocks the main thread while the dashboard runs on worker threads.
@@ -1190,7 +1334,44 @@ async fn run_cli() {
         return;
     }
 
-    let cli = Cli::parse();
+    let cli = Cli::try_parse().unwrap_or_else(|mut error| {
+        if error.kind() == clap::error::ErrorKind::InvalidSubcommand {
+            use clap::error::{ContextKind, ContextValue};
+            use clap::CommandFactory;
+
+            let root = Cli::command();
+            let mut command = &root;
+            let mut path = invocation::orx().to_owned();
+            for argument in std::env::args_os().skip(1) {
+                let Some(argument) = argument.to_str() else {
+                    break;
+                };
+                if argument.starts_with('-') {
+                    continue;
+                }
+                let Some(child) = command.find_subcommand(argument) else {
+                    break;
+                };
+                path.push(' ');
+                path.push_str(child.get_name());
+                command = child;
+            }
+            let commands = command
+                .get_subcommands()
+                .filter(|command| !command.is_hide_set())
+                .map(|command| command.get_name())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let hint = format!("Available commands: {commands}. Run `{path} --help` for usage.");
+            let mut hints = match error.remove(ContextKind::Suggested) {
+                Some(ContextValue::StyledStrs(hints)) => hints,
+                _ => Vec::new(),
+            };
+            hints.push(hint.into());
+            error.insert(ContextKind::Suggested, ContextValue::StyledStrs(hints));
+        }
+        error.exit()
+    });
     // Double-clicked from Explorer: open the desktop app instead of a console session.
     #[cfg(windows)]
     if cli.command.is_none() && owns_its_console() {
@@ -1224,10 +1405,7 @@ async fn run_cli() {
     // plan mode): it must stay fast and touch neither stdout nor the network, so
     // skip the update check and telemetry and run it directly.
     if matches!(command, Command::InvocationGate) {
-        // Fail open: a missing model only loses attribution, a deny blocks every Bash call.
-        if let Err(error) = commands::invocation_gate::run().await {
-            eprintln!("orx invocation-gate: {error}");
-        }
+        // Older Claude settings files still invoke this hook.
         return;
     }
     if matches!(command, Command::PlanGate) {
@@ -1322,6 +1500,7 @@ async fn run_cli() {
         } else {
             1
         };
+        commands::up::flush_stderr();
         std::process::exit(code);
     }
 }
@@ -1373,9 +1552,9 @@ fn relaunch_as_app(no_telemetry: bool) {
 fn show_error_dialog(message: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 
-    // The app's console is hidden, and shared with the agents it runs, so it
-    // doesn't own it.
-    if !owns_its_console() && !commands::app::launched_with_app_arg() {
+    // orx's own children (the updater, the window's server) also own a console no one sees.
+    let double_clicked = std::env::args_os().len() == 1 && owns_its_console();
+    if !double_clicked && !commands::app::launched_with_app_arg() {
         return;
     }
     let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
@@ -1467,6 +1646,9 @@ fn should_capture_command(command: &Command) -> bool {
         Command::Update(UpdateArgs {
             background: true,
             ..
+        }) | Command::Up(UpArgs {
+            app_window: true,
+            ..
         })
     )
 }
@@ -1533,6 +1715,10 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Logout => commands::logout::run().await,
         Command::Alphaxiv(args) => match args.command {
             AlphaXivCommand::Library { json } => alphaxiv::print_library(json).await,
+            AlphaXivCommand::Tools { name } => commands::alphaxiv_mcp::print_tools(name).await,
+            AlphaXivCommand::Call { name, arguments } => {
+                commands::alphaxiv_mcp::call(&name, arguments).await
+            }
         },
         Command::Projects(args) => commands::projects::run(args).await,
         Command::Orgs(args) => commands::orgs::run(args).await,
@@ -1574,7 +1760,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Feedback(args) => commands::feedback::run(args).await,
         // Handled before dispatch (fast path, no telemetry/update check).
         Command::PlanGate => commands::plan_gate::run().await,
-        Command::InvocationGate => commands::invocation_gate::run().await,
+        Command::InvocationGate => unreachable!("handled before dispatch"),
         Command::Mcp => commands::mcp::run().await,
         Command::AntigravityGate => commands::mcp::run_antigravity().await,
         #[cfg(all(desktop_app, target_os = "linux"))]

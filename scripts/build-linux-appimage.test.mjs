@@ -74,3 +74,12 @@ test('file links containing spaces reach the desktop app',{skip},()=>{
  try{assert.deepEqual(app.run(['some ignored argument','/tmp/a report.orx']).args,['app','/tmp/a report.orx'])}
  finally{rmSync(app.sandbox,{recursive:true,force:true})}
 })
+test('server runs the image orx with its arguments as given, in the app environment',{skip},()=>{
+ const app=fixture()
+ try{
+  const r=app.run(['server','up','--app-window','--port','4792','openresearch:project/test'])
+  assert.deepEqual(r.args,['up','--app-window','--port','4792','openresearch:project/test'])
+  assert.equal(r.env.ORX_APPIMAGE_RUNTIME,'bundled')
+  assert.equal(r.env.ORX_HOST_LD_LIBRARY_PATH,'=/session/lib')
+ }finally{rmSync(app.sandbox,{recursive:true,force:true})}
+})

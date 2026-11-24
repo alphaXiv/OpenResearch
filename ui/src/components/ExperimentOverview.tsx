@@ -2,6 +2,7 @@ import { useWorkspace } from "../workspace";
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
 import {
+  ArrowUpRight,
   CalendarDays,
   ChartLine,
   Clock3,
@@ -10,21 +11,27 @@ import {
   GitCompareArrows,
   Terminal,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
 import {
-  fmtDuration,
   timeAgo,
   type Experiment,
   type Project,
   type Run,
 } from "../api";
-import { autoDir } from "../i18n";
-import { noticeRun, runActive, runDisplay, runResult } from "../runDisplay";
+import { autoDir, fmtNumber, ltr } from "../i18n";
+import { capitalized } from "../runMonitor/words";
+import { noticeRun, runActive, runDisplay, runDuration, runNeverStarted, runResult } from "../runDisplay";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { BackendBadge } from "./BackendLogos";
 import { BranchPill } from "./BranchPill";
-import { Md } from "./Md";
+import type { OpenFile } from "./FileReference";
+import { ChatImageScope, Md } from "./Md";
 import { RunContactNotice } from "./RunContactNotice";
+import { useRunClock } from "./RunTiming";
+import { RunDetails } from "./run/Details";
+import { RunPage, WatchSection } from "./run/RunPage";
+import { historySentence } from "../runMonitor/model";
 import { StatusBadge } from "./StatusBadge";
 import { Button, Tooltip } from "./ui";
 import { ExperimentLineage } from "./ExperimentLineage";
@@ -51,17 +58,16 @@ function fmtDate(ms: number): string {
   });
 }
 
-function runDuration(run: Run, now: number): string {
-  return fmtDuration((run.endedAt ?? now) - run.createdAt);
-}
-
 export function ExperimentOverview({
   experiment,
   lineageNode,
   onOpenExperiment,
+  onOpenFile,
   parentExperiment,
   project,
   runs,
+  selectedRunId = null,
+  onOpenRun,
   onOpenLogs,
   onOpenTrackio,
   onOpenCode,
@@ -70,36 +76,46 @@ export function ExperimentOverview({
   experiment: Experiment;
   lineageNode: HistoryNode | null;
   onOpenExperiment: (id: string, intent: TabOpenIntent) => void;
+  onOpenFile: (path: string, sessionId: string | null | undefined, line: number | undefined, exp: string | undefined, ref: string | undefined, intent: TabOpenIntent) => void;
   parentExperiment: Experiment | null;
   project: Project;
   runs: Run[];
+  selectedRunId?: string | null;
+  onOpenRun: (runId: string, intent: TabOpenIntent) => void;
   onOpenLogs: (runId: string, intent: TabOpenIntent) => void;
   onOpenTrackio: (runId: string, intent: TabOpenIntent) => void;
   onOpenCode: (intent: TabOpenIntent) => void;
   onOpenDiff: (intent: TabOpenIntent) => void;
 }) {
-  const { useTrackioRuns } = useWorkspace().queries;
+  const { useTrackioRuns, listChatSessionsQuery } = useWorkspace().queries;
   const { trackioRunUrl } = useWorkspace().api;
 
-  const latestRun = runs[0] ?? null;
-  const latestDisplay = latestRun ? runDisplay(latestRun) : null;
-  const waiting = latestDisplay?.waiting;
-  const attentionRun = noticeRun(runs);
-  const result = latestRun ? runResult(latestRun) : null;
+  const run = selectedRunId ? runs.find((run) => run.id === selectedRunId) ?? null : runs[0] ?? null;
+  const runHeading = !run ? m.experiment_runs()
+    : run === runs[0] ? m.experiment_latest_run()
+    : capitalized(m.run_number({ number: ltr(fmtNumber(runs.length - runs.indexOf(run))) }));
+  const display = run ? runDisplay(run) : null;
+  const waiting = display?.waiting;
+  const attentionRun = selectedRunId ? run : noticeRun(runs);
+  const result = run && run.status !== "failed" ? runResult(run) : null;
   const hasLiveRun = runs.some((run) => runActive(run.status));
-  const [now, setNow] = useState(() => Date.now());
+  const now = useRunClock(hasLiveRun);
+  const overview = useRef<HTMLDivElement>(null);
   const trackio = useTrackioRuns(experiment.projectId, hasLiveRun).data;
-  const hasTrackio = latestRun !== null && trackioRunUrl(trackio, latestRun.id) !== null;
+  const sessions = useQuery(listChatSessionsQuery(experiment.projectId)).data;
+  // The experiment outlives its chat; the file route 404s a deleted session.
+  const chatDeleted = sessions?.every((session) => session.id !== experiment.chatSessionId);
+  const chatSessionId = chatDeleted ? null : experiment.chatSessionId;
+  const openFile: OpenFile = (path, line, exp, ref, intent) => onOpenFile(path, chatSessionId, line, exp, ref, intent);
+  const hasTrackio = run !== null && trackioRunUrl(trackio, run.id) !== null;
 
   useEffect(() => {
-    if (!hasLiveRun) return;
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [hasLiveRun]);
+    if (overview.current) overview.current.scrollTop = 0;
+  }, [selectedRunId]);
 
   return (
-    <div className="experiment-overview absolute inset-0 overflow-y-auto bg-background [&_h1]:m-0 [&_h1]:text-text [&_h1]:text-xl [&_h1]:leading-tight">
+    <ChatImageScope projectId={experiment.projectId} sessionId={chatSessionId}>
+    <div ref={overview} className="experiment-overview absolute inset-0 overflow-y-auto bg-background [&_h1]:m-0 [&_h1]:text-text [&_h1]:text-xl [&_h1]:leading-tight">
       <div className="experiment-overview-inner w-full max-w-230 my-0 mx-auto pt-6.5 px-7 pb-10 [@media((max-width:_720px))]:pt-5 [@media((max-width:_720px))]:px-4.5 [@media((max-width:_720px))]:pb-8">
         <header className="experiment-overview-head flex items-start justify-between gap-6">
           <div className="experiment-overview-heading min-w-0">
@@ -107,26 +123,26 @@ export function ExperimentOverview({
             <div className="experiment-overview-slug mt-1 text-muted text-sm">{experiment.slug}</div>
             {waiting && <div className="mt-1 truncate text-subtext text-sm" title={waiting}>{autoDir(waiting)}</div>}
           </div>
-          {latestDisplay ? <StatusBadge {...latestDisplay} waiting={undefined} /> : <StatusBadge status="idle" />}
+          {display ? <StatusBadge {...display} waiting={undefined} /> : <StatusBadge status="idle" />}
         </header>
 
         <div className="experiment-overview-actions flex gap-2 mt-4.5 [@media((max-width:_720px))]:flex-wrap">
-          {latestRun && (
+          {run && (
             <Button
               {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
-                onOpenLogs(latestRun.id, intent),
+                onOpenLogs(run.id, intent),
               )}
             >
               <Terminal size={16} />
               {m.experiment_overview_logs()}
             </Button>
           )}
-          {latestRun && hasTrackio && (
+          {run && hasTrackio && (
             <Tooltip interactive content={m.a11y_trackio_charts()} className="rounded-md">
               <Button
                 aria-description={m.a11y_trackio_charts()}
                 {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
-                  onOpenTrackio(latestRun.id, intent),
+                  onOpenTrackio(run.id, intent),
                 )}
               >
                 <ChartLine size={16} />
@@ -154,46 +170,51 @@ export function ExperimentOverview({
         {experiment.description && (
           <section className="experiment-overview-section mt-5.5 pt-4.5 border-t border-t-border-variant [&_h2]:mt-0 [&_h2]:mx-0 [&_h2]:mb-3.5 [&_h2]:text-text [&_h2]:text-sm [&_h2]:font-semibold overview-description [&_.md]:text-text [&_.md]:leading-relaxed">
             <h2>{m.experiment_overview_description()}</h2>
-            <Md text={experiment.description} />
+            <Md text={experiment.description} onOpenFile={openFile} />
           </section>
         )}
 
         <section className={EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME}>
-          <h2>{latestRun ? m.experiment_latest_run() : m.experiment_runs()}</h2>
-          {latestRun && (
+          <h2>{runHeading}</h2>
+          {run && (
             <>
               <div className="experiment-overview-meta flex items-center flex-wrap gap-y-2.5 gap-x-4.5 text-text text-sm [&_svg]:text-muted [&_.backend-badge]:text-text [&_.status-badge]:text-text [&_>_span]:inline-flex [&_>_span]:items-center [&_>_span]:gap-1 [&_code]:text-text [&_code]:text-xs">
-                <StatusBadge {...runDisplay(latestRun)} className="max-w-full" />
-                <BackendBadge backend={latestRun.backend} />
-                <span title={m.experiment_overview_started()}>
-                  <CalendarDays size={14} />
-                  {fmtDate(latestRun.createdAt)}
-                </span>
-                <span title={m.experiment_overview_duration()}>
-                  <Clock3 size={14} />
-                  {runDuration(latestRun, now)}
-                </span>
-                {latestRun.commitSha && (
-                  <span title={m.experiment_overview_commit()}>
-                    <GitCommitHorizontal size={14} />
-                    <code>{latestRun.commitSha.slice(0, 7)}</code>
+                <StatusBadge {...runDisplay(run)} className="max-w-full" />
+                <BackendBadge backend={run.backend} />
+                {run.startedAt != null && (
+                  <span title={m.experiment_overview_started()}>
+                    <CalendarDays size={14} />
+                    {fmtDate(run.startedAt)}
                   </span>
                 )}
-                {latestRun.exitCode !== null &&
-                  latestRun.exitCode !== undefined &&
-                  latestRun.exitCode !== 0 && (
-                    <span>{m.experiment_overview_exit()} {latestRun.exitCode}</span>
+                {!runNeverStarted(run) && (
+                  <span title={m.experiment_overview_duration()}>
+                    <Clock3 size={14} />
+                    {runDuration(run, now)}
+                  </span>
+                )}
+                {run.commitSha && (
+                  <span title={m.experiment_overview_commit()}>
+                    <GitCommitHorizontal size={14} />
+                    <code>{run.commitSha.slice(0, 7)}</code>
+                  </span>
+                )}
+                {run.exitCode !== null &&
+                  run.exitCode !== undefined &&
+                  run.exitCode !== 0 && (
+                    <span>{m.experiment_overview_exit()} {run.exitCode}</span>
                   )}
               </div>
-              {latestRun.command && (
-                <code className={EXPERIMENT_OVERVIEW_COMMAND_CLASS_NAME}>$ {latestRun.command}</code>
+              {run.command && (
+                <code className={EXPERIMENT_OVERVIEW_COMMAND_CLASS_NAME}>$ {run.command}</code>
               )}
-              {attentionRun && <RunContactNotice run={attentionRun} className="mt-4" />}
+              <RunPage key={run.id} run={run} name={experiment.slug} chatSessionId={experiment.chatSessionId} now={now} />
+              {attentionRun && !((run.monitor || run.status === "failed") && attentionRun.id === run.id) && <RunContactNotice run={attentionRun} className="mt-4" />}
               {result && (
                 <div
-                  className={`experiment-overview-result mt-4 [&.failed]:text-accent-red ${latestRun.status === "failed" ? "failed" : ""}`}
+                  className={`experiment-overview-result mt-4 [&.failed]:text-accent-red ${run.status === "failed" ? "failed" : ""}`}
                 >
-                  <Md text={result} />
+                  <Md text={result} onOpenFile={openFile} />
                 </div>
               )}
             </>
@@ -203,24 +224,29 @@ export function ExperimentOverview({
         {runs.length > 0 && (
           <section className={`${EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME} @container`}>
             <h2>{m.experiment_overview_run_history()}</h2>
-            <div className="experiment-run-history divide-y divide-border-variant [&_button]:w-full [&_button]:grid [&_button]:grid-cols-[minmax(72px,_0.7fr)_minmax(100px,_1fr)_minmax(70px,_0.7fr)_60px_16px] [&_button]:items-center [&_button]:gap-3.5 [&_button]:py-3 [&_button]:px-0.5 [&_button]:text-text [&_button]:text-start [&_button]:text-sm [&_button:hover]:bg-surface @max-lg:[&_button]:grid-cols-[48px_minmax(0,_1fr)_40px_16px] @max-lg:[&_button_>_:nth-child(3)]:hidden">
-              {runs.map((run, index) => (
+            <div className="experiment-run-history divide-y divide-border-variant [&_button]:w-full [&_button]:grid [&_button]:grid-cols-[minmax(56px,_0.5fr)_minmax(100px,_0.9fr)_minmax(0,_2.2fr)_minmax(64px,_0.6fr)_60px_16px] [&_button]:items-center [&_button]:gap-3.5 [&_button]:py-3 [&_button]:px-0.5 [&_button]:text-text [&_button]:text-start [&_button]:text-sm [&_button:hover]:bg-surface @max-lg:[&_button]:grid-cols-[48px_minmax(0,_1fr)_40px_16px] @max-lg:[&_button]:gap-y-1">
+              {runs.map((attempt, index) => (
                 <button
-                  key={run.id}
+                  key={attempt.id}
+                  aria-current={attempt.id === run?.id ? true : undefined}
+                  className="focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:-outline-offset-2"
                   {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
-                    onOpenLogs(run.id, intent),
+                    onOpenRun(attempt.id, intent),
                   )}
                 >
                   <span className="experiment-run-number text-xs font-medium">{m.experiment_overview_run()} {runs.length - index}</span>
-                  <StatusBadge {...runDisplay(run)} className="min-w-0" />
-                  <span>{timeAgo(run.createdAt)}</span>
-                  <span>{runDuration(run, now)}</span>
-                  <Terminal size={14} />
+                  <StatusBadge {...runDisplay(attempt)} className="min-w-0" />
+                  <span className="truncate text-ink-subtext @max-lg:order-last @max-lg:col-start-2 @max-lg:col-span-3 @max-lg:line-clamp-2 @max-lg:whitespace-normal @max-lg:empty:hidden">{historySentence(attempt, now)}</span>
+                  <span className="@max-lg:hidden">{timeAgo(attempt.createdAt)}</span>
+                  <span>{runDuration(attempt, now)}</span>
+                  <ArrowUpRight size={14} aria-hidden="true" />
                 </button>
               ))}
             </div>
           </section>
         )}
+
+        {run?.monitor && <WatchSection key={run.id} run={run} chatSessionId={experiment.chatSessionId} now={now} className={EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME} />}
 
         {lineageNode && (
           <div className="mt-5.5 border-t border-border-variant pt-4.5">
@@ -245,12 +271,14 @@ export function ExperimentOverview({
               {m.experiment_overview_created()} {timeAgo(experiment.createdAt)}
             </span>
           </div>
-          {experiment.runCommand !== latestRun?.command && (
+          {experiment.runCommand !== run?.command && (
             <code className={EXPERIMENT_OVERVIEW_COMMAND_CLASS_NAME}>$ {experiment.runCommand}</code>
           )}
         </section>
 
+        {run?.monitor && <RunDetails key={`details:${run.id}`} run={run} className="mt-5.5 border-t border-t-border-variant pt-4.5" />}
       </div>
     </div>
+    </ChatImageScope>
   );
 }

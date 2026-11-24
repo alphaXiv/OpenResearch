@@ -47,6 +47,7 @@ use crate::store::Store;
 pub(crate) use claude::{
     question_prompt, should_synthesize_plan, synthesize_resume, SKIPPED_QUESTION_MESSAGE,
 };
+pub(crate) use codex::codex_luna;
 pub(crate) use detect::{
     detect_spawn_output_timed, probe_timing_scope, spawn_retrying_busy, unique as unique_bins,
     ProbeTiming, ProbeTimingSink,
@@ -64,8 +65,9 @@ pub(crate) use selection::{
 /// rather than held busy forever. Known false positive: a command that is
 /// legitimately silent this long (a quiet build, a training step with
 /// buffered output) is indistinguishable from a hang — hence the generous
-/// bound; the interruption is a clear, recoverable error either way. Shared
-/// by the codex and claude adapters (each applies it to its own event wait).
+/// bound; the interruption is a clear, recoverable error either way. Every
+/// adapter that reads a child's output applies it to its own event wait;
+/// OpenCode's have none.
 pub(crate) const TURN_WATCHDOG: Duration = Duration::from_secs(30 * 60);
 
 pub(crate) const ORX_MAX_RETRIES: u32 = 3;
@@ -324,6 +326,21 @@ pub enum ResumeAction {
     Nothing,
 }
 
+/// One chat's kept agent, as a starting server found it.
+#[derive(Debug, Clone)]
+pub struct Adoption {
+    pub keep_id: String,
+    pub session_id: String,
+    /// The owner record's `state`, as this harness wrote it.
+    pub state: serde_json::Value,
+    /// The checkpoint offset of the chat's running turn, which resumes on this agent next.
+    /// Output before it was applied; output after it belongs to that turn, so nothing may
+    /// consume it first. `None` when no turn resumes: unacknowledged output is new.
+    pub resume_at: Option<u64>,
+    /// Commands kept for this agent (`keep::Owner::AgentCommand`): keep id, command id, state.
+    pub commands: Vec<(String, String, serde_json::Value)>,
+}
+
 /// One coding-agent integration. See the module docs for the capability model.
 #[async_trait]
 // async-trait marks its boxed futures `#[must_use]`; clippy 1.99 flags that generated code.
@@ -382,6 +399,23 @@ pub trait Harness: Send + Sync {
         false
     }
 
+    /// Whether [`Harness::run_turn`] honors `ctx.resume`: it goes on with a turn a previous
+    /// server left running on a kept agent, from its checkpoint, without sending the prompt.
+    /// A harness that cannot is never handed a resume; its turns recover as failed instead.
+    fn supports_resume(&self) -> bool {
+        false
+    }
+
+    /// Takes back an agent a previous server kept for this harness (`crate::keep`), before
+    /// any turn resumes on it. An error stops the kept agent and its commands.
+    async fn adopt(
+        &self,
+        _chat: &Arc<crate::local::chat::ChatHost>,
+        _adoption: Adoption,
+    ) -> Result<()> {
+        Err(anyhow!("{} cannot take back a kept agent", self.name()))
+    }
+
     /// Whether native compaction or the shared summarize-and-reseed path is supported.
     fn supports_compaction(&self) -> bool {
         false
@@ -426,12 +460,17 @@ pub trait Harness: Send + Sync {
         title::sanitize_title(&raw)
     }
 
+    /// [`Self::run_one_shot`], as one of the [`ONE_SHOTS`] a restart waits for.
+    async fn one_shot(&self, request: OneShot<'_>) -> Result<String> {
+        ONE_SHOTS.run(self.name(), self.run_one_shot(request)).await
+    }
+
     /// Run one headless request on a throwaway child at the requested
     /// [`OneShotQuality`] and return the model's reply verbatim. The child
     /// cannot write or reach MCP servers (tools are disabled where the CLI
     /// allows), and nothing is recorded in the harness's own session store.
     /// The error says why it couldn't run or failed, in the CLI's own words where it gave any.
-    async fn one_shot(&self, _request: OneShot<'_>) -> Result<String> {
+    async fn run_one_shot(&self, _request: OneShot<'_>) -> Result<String> {
         Err(anyhow!("{} cannot run one-shot requests", self.name()))
     }
 
@@ -439,6 +478,21 @@ pub trait Harness: Send + Sync {
     /// should not vary the key for a harness that ignores it.
     fn one_shot_honours_model(&self) -> bool {
         true
+    }
+
+    /// Whether [`Self::one_shot_without_tools`] can promise a child with no tools at all.
+    fn runs_without_tools(&self) -> bool {
+        false
+    }
+
+    /// [`Self::one_shot`] on a child that cannot run a command, read or write a file, search the
+    /// web or reach an MCP server, with what the CLI reports the request used. A reply from a
+    /// child that started a tool anyway is an error, never an answer.
+    async fn one_shot_without_tools(&self, _request: OneShot<'_>) -> Result<OneShotReply> {
+        Err(anyhow!(
+            "{} cannot run a request without tools",
+            self.name()
+        ))
     }
 
     /// Decide how an answered prompt flows back, and (for inline harnesses)
@@ -621,6 +675,59 @@ fn registry_with_acp(definitions: Vec<crate::local::acp::Definition>) -> Vec<Box
     harnesses
 }
 
+/// The one-shots in flight. Nothing carries one to the next server, so a restart waits a moment
+/// for them to answer, then ends the rest: they are short and cheap to ask again.
+pub static ONE_SHOTS: std::sync::LazyLock<OneShots> = std::sync::LazyLock::new(OneShots::new);
+
+pub struct OneShots {
+    running: tokio::sync::watch::Sender<usize>,
+    ended: tokio::sync::watch::Sender<bool>,
+}
+
+impl OneShots {
+    /// How long [`Self::finish`] waits for one-shots to answer.
+    const GRACE: Duration = Duration::from_secs(5);
+
+    fn new() -> Self {
+        Self {
+            running: tokio::sync::watch::Sender::new(0),
+            ended: tokio::sync::watch::Sender::new(false),
+        }
+    }
+
+    async fn run(
+        &self,
+        agent: &str,
+        answer: impl std::future::Future<Output = Result<String>>,
+    ) -> Result<String> {
+        struct Running<'a>(&'a tokio::sync::watch::Sender<usize>);
+        impl Drop for Running<'_> {
+            fn drop(&mut self) {
+                self.0.send_modify(|running| *running -= 1);
+            }
+        }
+
+        let mut ended = self.ended.subscribe();
+        self.running.send_modify(|running| *running += 1);
+        let _running = Running(&self.running);
+        tokio::select! {
+            answer = answer => answer,
+            _ = ended.wait_for(|ended| *ended) => {
+                Err(anyhow!("OpenResearch restarted before {agent} answered"))
+            }
+        }
+    }
+
+    /// For a restart: waits up to [`Self::GRACE`] for the one-shots in flight, then ends the
+    /// rest and every one asked after, and stops their children.
+    pub async fn finish(&self) {
+        let mut running = self.running.subscribe();
+        let _ = tokio::time::timeout(Self::GRACE, running.wait_for(|running| *running == 0)).await;
+        self.ended.send_replace(true);
+        crate::local::acp::stop_one_shots().await;
+    }
+}
+
 /// A single self-contained request for [`Harness::one_shot`].
 #[derive(Debug, Clone, Copy)]
 pub struct OneShot<'a> {
@@ -635,6 +742,93 @@ pub struct OneShot<'a> {
     /// provider with no working key); Claude keeps its per-quality alias.
     pub model: Option<&'a str>,
     pub timeout: Duration,
+}
+
+/// What [`Harness::one_shot_without_tools`] answered.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OneShotReply {
+    pub text: String,
+    /// None when the CLI reported nothing.
+    pub usage: Option<OneShotUsage>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OneShotUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    /// None when the CLI does not price its requests.
+    pub cost_usd: Option<f64>,
+}
+
+pub(crate) fn sign_in_revision(harness: &str, profile: Option<&str>) -> Result<String> {
+    use crate::local::native_store::{claude_config_file, claude_home, codex_home, NativeStore};
+
+    use sha2::{Digest, Sha256};
+
+    let mut vars: Vec<&str> = match harness {
+        "claude-code" => claude::CLAUDE_CREDENTIAL_VARS.into(),
+        "codex" => vec!["OPENAI_API_KEY", "CODEX_API_KEY"],
+        _ => unreachable!("only Claude Code and Codex take looks"),
+    };
+    let custom_key;
+    let files = match (harness, profile) {
+        ("claude-code", None) => vec![
+            claude_home(NativeStore::Legacy).join(".credentials.json"),
+            claude_config_file(),
+        ],
+        ("claude-code", Some(id)) => {
+            let home = crate::local::agent_profiles::home(id, harness)?;
+            vec![home.join(".credentials.json"), home.join(".claude.json")]
+        }
+        ("codex", profile) => {
+            let home = profile
+                .map(|id| crate::local::agent_profiles::home(id, harness))
+                .transpose()?
+                .unwrap_or_else(|| codex_home(NativeStore::Legacy));
+            let config = home.join("config.toml");
+            custom_key = codex::provider_env_key(&config);
+            vars.extend(custom_key.as_deref());
+            vec![home.join("auth.json"), config]
+        }
+        _ => unreachable!("only Claude Code and Codex take looks"),
+    };
+    let mut times = Vec::new();
+    for file in files {
+        match std::fs::metadata(&file).and_then(|metadata| metadata.modified()) {
+            Ok(time) => times.push(Some(time)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => times.push(None),
+            Err(error) => return Err(anyhow!("Couldn't inspect {}: {error}", file.display())),
+        }
+    }
+    let configured: Vec<_> = vars.into_iter().map(detect::api_key).collect();
+    let revision = serde_json::to_vec(&(times, configured))?;
+    Ok(format!("{:x}", Sha256::digest(revision)))
+}
+
+#[derive(Debug)]
+pub(crate) struct OneShotAuthError;
+
+impl std::fmt::Display for OneShotAuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Sign-in was refused")
+    }
+}
+
+impl std::error::Error for OneShotAuthError {}
+
+fn one_shot_request_error(detail: &str) -> Error {
+    let lower = detail.trim().to_ascii_lowercase();
+    if lower.starts_with("not logged in")
+        || lower.starts_with("invalid api key")
+        || lower.starts_with("api error: 401")
+        || lower.contains("unexpected status 401")
+        || lower.contains("refresh token was already used")
+    {
+        OneShotAuthError.into()
+    } else {
+        anyhow!("{detail}")
+    }
 }
 
 /// A failed one-shot child's message from the first of `outputs` it wrote to,
@@ -707,7 +901,24 @@ pub fn runs_on_acp_host(id: &str) -> bool {
     id.starts_with("acp:") || id == "antigravity"
 }
 
+/// Harnesses a test registers by id, which `session_harness` serves before the registry's.
+#[cfg(test)]
+pub(crate) static TEST_HARNESSES: std::sync::Mutex<Vec<(&str, TestHarness)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) type TestHarness = fn() -> Box<dyn Harness>;
+
 pub fn session_harness(id: &str, session_id: &str) -> Option<Box<dyn Harness>> {
+    #[cfg(test)]
+    if let Some((_, harness)) = TEST_HARNESSES
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(test, _)| *test == id)
+    {
+        return Some(harness());
+    }
     if id.starts_with("acp:") {
         let state = Store::open()
             .ok()?
@@ -859,7 +1070,7 @@ pub(crate) fn xdg_config_home() -> PathBuf {
 /// invocation; the body only points the agent at the bundled guide.
 pub(super) const CLAUDE_SKILL: &str = r#"---
 name: orx
-description: Drive automated ML research on OpenResearch with the `orx` CLI — create experiments, launch and monitor runs on compute, analyze local results and logs, and search literature. Use whenever the user wants to understand, explain, explore, or work on an OpenResearch project, run experiments, do auto-research, or mentions orx or OpenResearch.
+description: Drive ML research with OpenResearch's `orx` CLI. Use whenever the user works on or asks about an OpenResearch project, runs experiments or auto-research, or mentions orx or OpenResearch.
 ---
 
 # OpenResearch (`orx`)
@@ -874,11 +1085,10 @@ session** instead of relying on this file or prior memory.
 orx skill
 ```
 
-This prints the current manual — the cardinal rules and a command
-quick-reference — followed by a **bundled index of modules**. Read it before taking
-any action. For the detail on a specific area, run `orx skill <name>` to print
-that module (e.g. `orx skill experiment-tree`, `orx skill compute`); the same
-command reads that module directly from the installed CLI.
+This prints the current manual followed by a **bundled index of modules**, each
+with when to load it. Read it before taking any action, then run
+`orx skill <name>` for the module that matches the task (e.g.
+`orx skill experiment-tree`, `orx skill compute`).
 
 ## 2. Carry out the user's research goal
 
@@ -900,8 +1110,8 @@ compute or account command reports `Not logged in`, ask the user to run
 /// Codex doesn't expand it).
 pub(super) const CODEX_PROMPT: &str = r#"Drive automated ML research on OpenResearch using the `orx` CLI.
 
-Start by running `orx skill` to load the current operating manual — the cardinal
-rules, a command quick-reference, and a bundled index of modules. Always read it
+Start by running `orx skill` to load the current operating manual and its
+bundled index of modules. Always read it
 at the start of a session rather than relying on memory. Pull up a
 module's detail with `orx skill <name>` (e.g. `orx skill experiment-tree`,
 `orx skill compute`).
@@ -969,6 +1179,31 @@ mod tests {
         assert!(!DefaultHarness.supports_compaction());
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_restart_waits_for_one_shots_then_ends_the_rest() {
+        let one_shots = Arc::new(OneShots::new());
+        let ask = |agent: &'static str, takes: u64| {
+            let one_shots = one_shots.clone();
+            tokio::spawn(async move {
+                let answer = async {
+                    tokio::time::sleep(Duration::from_secs(takes)).await;
+                    Ok(format!("{agent} answered"))
+                };
+                one_shots.run(agent, answer).await
+            })
+        };
+        let quick = ask("Quick", 1);
+        let slow = ask("Slow", 60);
+        tokio::task::yield_now().await;
+
+        let started = tokio::time::Instant::now();
+        one_shots.finish().await;
+        assert_eq!(started.elapsed(), OneShots::GRACE);
+        assert_eq!(quick.await.unwrap().unwrap(), "Quick answered");
+        let ended = slow.await.unwrap().unwrap_err().to_string();
+        assert!(ended.contains("restarted before Slow answered"), "{ended}");
+    }
+
     #[tokio::test]
     async fn title_uses_only_the_selected_opencode_model() {
         struct TitleHarness {
@@ -983,7 +1218,7 @@ mod tests {
             fn name(&self) -> &str {
                 self.id
             }
-            async fn one_shot(&self, request: OneShot<'_>) -> Result<String> {
+            async fn run_one_shot(&self, request: OneShot<'_>) -> Result<String> {
                 self.calls
                     .lock()
                     .unwrap()

@@ -22,9 +22,12 @@ pub struct LocalProject {
     pub run_command: Option<String>,
     /// arXiv or alphaXiv paper id the project starts from (versionless, e.g. `2401.12345`).
     pub paper_id: Option<String>,
-    /// The user's mark for the project; without one the UI draws its initials.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<serde_json::Value>,
+    /// The tool call id of the agent proposal the user created it from; `""` when
+    /// made without one, `None` when not known, as from an older orx or dashboard.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -42,6 +45,11 @@ impl LocalProject {
     /// names the project and gives it a folder of its own.
     pub fn is_scratch(&self) -> bool {
         std::path::Path::new(&self.repo_path).starts_with(super::projects::scratch_root())
+    }
+
+    /// A scratch project nobody has named: it has no icon or title of its own and goes with its last chat.
+    pub fn is_unnamed_scratch(&self) -> bool {
+        self.is_scratch() && self.name == super::projects::UNNAMED_SCRATCH
     }
 
     pub fn github_url(&self) -> Option<String> {
@@ -79,6 +87,7 @@ impl LocalProject {
                         error.into(),
                     )
                 })?,
+            proposal: row.get(13)?,
         })
     }
 }

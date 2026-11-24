@@ -46,8 +46,8 @@ use super::options::{
 };
 use super::{
     should_synthesize_plan, synthesize_resume, CompactCtx, CompactOutcome, Harness, OneShot,
-    OneShotQuality, ResumeAction, TurnFailure, TurnOutcome, TurnResult, Waited, ORX_MAX_ATTEMPTS,
-    TURN_WATCHDOG,
+    OneShotQuality, OneShotReply, OneShotUsage, ResumeAction, TurnFailure, TurnOutcome, TurnResult,
+    Waited, ORX_MAX_ATTEMPTS, TURN_WATCHDOG,
 };
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
@@ -353,6 +353,34 @@ async fn codex_model_list(bin: &Path, home: Option<&Path>) -> Option<Value> {
         .ok()?
         .get("result")
         .cloned()
+}
+
+/// The GPT Luna this Codex sign-in's own catalog offers, newest first by its id, with the name the
+/// catalog gives it; None when it offers none.
+pub(crate) async fn codex_luna(profile: Option<&str>) -> Result<Option<(String, String)>> {
+    let bin = find_codex().ok_or_else(|| anyhow!("Codex is not installed"))?;
+    let home = profile
+        .map(|id| crate::local::agent_profiles::prepare(id, "codex"))
+        .transpose()?;
+    let catalog = codex_model_list(&bin, home.as_deref())
+        .await
+        .ok_or_else(|| anyhow!("Codex did not list its models"))?;
+    let mut lunas: Vec<_> = parse_model_list(&catalog, None)
+        .into_iter()
+        .filter(|model| {
+            crate::local::model_routes::canonical(&model.id)
+                .split('-')
+                .any(|part| part == "luna")
+        })
+        .collect();
+    lunas.sort_by(|a, b| b.id.cmp(&a.id));
+    Ok(lunas.into_iter().next().map(|model| {
+        let label = model
+            .display_name
+            .clone()
+            .unwrap_or_else(|| model.id.clone());
+        (model.id, label)
+    }))
 }
 
 /// One request on a throwaway `codex app-server`: `initialize` →
@@ -1176,6 +1204,10 @@ impl CustomProvider {
     }
 }
 
+pub(super) fn provider_env_key(config: &Path) -> Option<String> {
+    parse_custom_provider(&std::fs::read_to_string(config).ok()?)?.env_key
+}
+
 /// The active provider, when it is a custom one that bypasses OpenAI auth.
 /// `None` means first-party detection (auth.json) applies.
 fn parse_custom_provider(raw: &str) -> Option<CustomProvider> {
@@ -1317,6 +1349,42 @@ pub(crate) async fn profile_auth(bin: Option<&Path>, home: &Path, version: Optio
 ///
 /// A failed turn's error event becomes the error; stderr is only Codex's own logging.
 async fn codex_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
+    codex_exec_one_shot(bin, request, false)
+        .await
+        .map(|reply| reply.text)
+}
+
+/// Switches that take every tool away from a `codex exec` turn. Codex names a switch it does not
+/// know in an `error` item, so a CLI that would keep one of these tools is caught by name.
+const NO_TOOLS: &[&str] = &[
+    "features.shell_tool=false",
+    "features.unified_exec=false",
+    "features.apply_patch_freeform=false",
+    "features.image_generation=false",
+    "features.multi_agent=false",
+    "features.apps=false",
+    "features.browser_use=false",
+    "features.computer_use=false",
+    "features.in_app_browser=false",
+    "features.sleep_tool=false",
+    "features.goals=false",
+    "features.hooks=false",
+    "features.tool_suggest=false",
+    "features.skill_search=false",
+    "features.code_mode_host=false",
+    "web_search=\"disabled\"",
+];
+
+/// Items a `codex exec` turn writes that are words, never an action.
+const WORDS_ONLY: &[&str] = &["agent_message", "reasoning", "error"];
+
+/// `request` on a throwaway `codex exec`; with `tool_free`, every tool switched off and the
+/// stream watched so a turn that acts anyway is stopped and refused.
+async fn codex_exec_one_shot(
+    bin: &Path,
+    request: OneShot<'_>,
+    tool_free: bool,
+) -> Result<OneShotReply> {
     let effort = match request.quality {
         OneShotQuality::Cheap => "low",
         OneShotQuality::Standard => "medium",
@@ -1334,7 +1402,12 @@ async fn codex_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
         // Nor skills: the plugin catalog alone injected ~6k prompt tokens
         // (24.3k → 18k input measured) into a request that ignores it.
         .args(["-c", "features.plugins=false"])
-        .arg(&message)
+        // Nor the user's hooks, which would run on every request.
+        .args(["-c", "features.hooks=false"]);
+    if tool_free {
+        cmd.args(NO_TOOLS.iter().flat_map(|switch| ["-c", switch]));
+    }
+    cmd.arg(&message)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -1343,12 +1416,17 @@ async fn codex_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
         // server cwd's AGENTS.md into a request that carries its own context.
         .current_dir(std::env::temp_dir());
     prepare_env(&mut cmd);
-    let home = match request.profile {
-        Some(id) => crate::local::agent_profiles::prepare(id, "codex")?,
-        None => native_store::prepare_codex(NativeStore::Isolated)?,
+    let (home, name) = match request.profile {
+        Some(id) => (crate::local::agent_profiles::prepare(id, "codex")?, id),
+        None => (native_store::prepare_codex(NativeStore::Isolated)?, "codex"),
     };
     let sqlite = native_store::codex_home(NativeStore::Isolated);
-    cmd.env("CODEX_HOME", home);
+    // A one-shot brings its own context: the user's AGENTS.md and skills would add
+    // thousands of tokens to every request.
+    cmd.env(
+        "CODEX_HOME",
+        native_store::prepare_codex_one_shot(&home, name)?,
+    );
     cmd.args([
         "-c",
         &format!("sqlite_home={}", native_store::toml_string(&sqlite)),
@@ -1361,41 +1439,95 @@ async fn codex_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
     // Detached: a caller that gives up must not drop, and so kill, a child saving a sign-in.
-    let (status, last, error) = tokio::spawn(async move {
+    let (status, last, error, usage) = tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         // Keep the last agent message: a chatty run may narrate before it
         // answers, and the reply is what it settled on.
         let mut last = None;
         let mut error = None;
+        let mut usage = None;
         let finished = tokio::time::timeout_at(deadline, async {
             while let Ok(Some(line)) = lines.next_line().await {
+                if tool_free {
+                    if let Some(refusal) = exec_line_tool(&line) {
+                        let _ = child.kill().await;
+                        return Err(anyhow!("{refusal}"));
+                    }
+                }
                 if let Some(text) = exec_line_agent_message(&line) {
                     last = Some(text);
                 } else if let Some(message) = exec_line_error(&line) {
                     error = Some(message);
+                } else if let Some(used) = exec_line_usage(&line) {
+                    usage = Some(used);
                 }
             }
-            child.wait().await
+            Ok(child.wait().await?)
         })
         .await;
         let Ok(status) = finished else {
             crate::process::ask_agent_to_stop(&mut child, None).await;
             return Err(anyhow!("timed out after {timeout}s"));
         };
-        Ok((status?, last, error))
+        Ok((status?, last, error, usage))
     })
     .await??;
     match (status.success(), last, error) {
-        (true, Some(text), _) => Ok(text),
-        (_, _, Some(message)) => Err(anyhow!("{message}")),
+        (_, _, Some(error)) if error.is::<super::OneShotAuthError>() => Err(error),
+        (true, Some(text), _) => Ok(OneShotReply { text, usage }),
+        (_, _, Some(error)) => Err(error),
         (true, None, None) => Err(anyhow!("returned no reply")),
         (false, _, None) => Err(anyhow!("{status}")),
     }
 }
 
+/// Why a tool-free turn must stop at this line: it started something other than words, or the
+/// CLI ignored one of the switches that keep tools away.
+fn exec_line_tool(line: &str) -> Option<String> {
+    let event = serde_json::from_str::<Value>(line).ok()?;
+    let item = event.get("item")?;
+    let kind = item
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if !WORDS_ONLY.contains(&kind) {
+        return Some(format!(
+            "Codex started a {kind} in a request that allows no tools, so it was stopped"
+        ));
+    }
+    let message = item.get("message").and_then(Value::as_str)?;
+    let ignored = NO_TOOLS
+        .iter()
+        .map(|switch| switch.split('=').next().unwrap_or(switch))
+        .find(|key| message.contains(&format!("`{key}` is ignored")))?;
+    Some(format!(
+        "This Codex does not know `{ignored}`, so it cannot run a request without tools; update Codex"
+    ))
+}
+
+/// A `codex exec --json` line's token counts, from the turn's completion.
+fn exec_line_usage(line: &str) -> Option<OneShotUsage> {
+    let event = serde_json::from_str::<Value>(line).ok()?;
+    if event.get("type").and_then(Value::as_str) != Some("turn.completed") {
+        return None;
+    }
+    let usage = event.get("usage")?;
+    Some(OneShotUsage {
+        input_tokens: usage
+            .get("input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        output_tokens: usage
+            .get("output_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        cost_usd: None,
+    })
+}
+
 /// A `codex exec --json` line's turn error, with the provider's message
 /// unwrapped from the JSON body Codex embeds in it.
-fn exec_line_error(line: &str) -> Option<String> {
+fn exec_line_error(line: &str) -> Option<crate::error::Error> {
     let event = serde_json::from_str::<Value>(line).ok()?;
     let message = match event.get("type").and_then(Value::as_str)? {
         "error" => event.get("message"),
@@ -1404,10 +1536,15 @@ fn exec_line_error(line: &str) -> Option<String> {
     }?
     .as_str()?;
     let nested = serde_json::from_str::<Value>(message).ok();
+    if nested.as_ref().is_some_and(|body| {
+        body["status"] == 401 || body["error"]["type"] == "authentication_error"
+    }) {
+        return Some(super::OneShotAuthError.into());
+    }
     let inner = nested
         .as_ref()
-        .and_then(|body| body.get("error")?.get("message")?.as_str());
-    Some(inner.unwrap_or(message).to_string())
+        .and_then(|body| body["error"]["message"].as_str());
+    Some(super::one_shot_request_error(inner.unwrap_or(message)))
 }
 
 /// One `codex exec --json` stdout line → its agent message text, if it carries
@@ -1704,7 +1841,13 @@ impl Harness for Codex {
                 let Some(event) = rx.recv().await else {
                     return Err(anyhow!("codex stopped reporting during compaction"));
                 };
+                let event = match event {
+                    TurnEvent::At { event, .. } => *event,
+                    event => event,
+                };
                 let (method, params) = match event {
+                    TurnEvent::At { .. } => unreachable!("nested Codex event offset"),
+                    TurnEvent::StartResult(_) => continue,
                     TurnEvent::Notification { method, params } => (method, params),
                     // Leaving an approval unanswered blocks the child.
                     TurnEvent::Request { id, .. } => {
@@ -1781,8 +1924,31 @@ impl Harness for Codex {
         self.detect_at(true).await
     }
 
+    fn supports_resume(&self) -> bool {
+        true
+    }
+
+    async fn adopt(
+        &self,
+        chat: &Arc<crate::local::chat::ChatHost>,
+        adoption: super::Adoption,
+    ) -> Result<()> {
+        if adoption.state["per_turn"] == true {
+            if adoption.resume_at.is_none() {
+                return Err(anyhow!("Codex exec child has no turn checkpoint"));
+            }
+            return Ok(());
+        }
+        chat.codex.adopt(adoption).await
+    }
+
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
-        if !runs_app_server().await {
+        if ctx
+            .resume
+            .as_ref()
+            .is_some_and(|r| r.state.get("counter").is_some())
+            || (ctx.resume.is_none() && !runs_app_server().await)
+        {
             let result = run_turn_exec(ctx).await;
             // Still `Unknown` after a failure means codex died before its first
             // event — nothing was delivered, so the card must offer Retry, not a
@@ -1800,9 +1966,19 @@ impl Harness for Codex {
             .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()))
     }
 
-    async fn one_shot(&self, request: OneShot<'_>) -> Result<String> {
+    async fn run_one_shot(&self, request: OneShot<'_>) -> Result<String> {
         let bin = find_codex().ok_or_else(|| anyhow!("{} is not installed", self.name()))?;
         codex_one_shot(&bin, request).await
+    }
+
+    /// Every tool switched off, and a turn that starts one anyway is stopped.
+    fn runs_without_tools(&self) -> bool {
+        true
+    }
+
+    async fn one_shot_without_tools(&self, request: OneShot<'_>) -> Result<OneShotReply> {
+        let bin = find_codex().ok_or_else(|| anyhow!("{} is not installed", self.name()))?;
+        codex_exec_one_shot(&bin, request, true).await
     }
 
     fn options(&self) -> HarnessOptions {
@@ -3043,12 +3219,12 @@ async fn finish_completed_turn(
     ctx: &mut TurnCtx,
     client: &CodexClient,
     thread_id: &str,
-    turn_id: Option<&str>,
     plan_card_wanted: bool,
-    open_requests: &mut HashMap<String, (Value, ServerReqKind)>,
-) {
-    sweep_open_requests(ctx, client, open_requests).await;
-    reconcile_turn_items(ctx, client, thread_id, turn_id).await;
+    state: &mut AppTurnState,
+    offset: u64,
+) -> Result<()> {
+    sweep_open_requests(ctx, client, &mut state.open_requests).await;
+    reconcile_turn_items(ctx, client, thread_id, state.turn_id.as_deref()).await;
     // A sub-agent whose `turn/completed` never arrived before the turn ended
     // would otherwise spin forever.
     settle_running_subagents(&mut ctx.assistant.parts);
@@ -3057,7 +3233,9 @@ async fn finish_completed_turn(
             ctx.upsert_part(part);
         }
     }
-    let _ = ctx.flush();
+    state.finished = true;
+    ctx.flush_at(client.keeper(), offset, state)?;
+    client.saved_through(offset)
 }
 
 /// How long a quiet post-parent drain waits before settling the turn. The
@@ -3077,6 +3255,7 @@ fn turn_phase_quiet(parent_done: bool) -> Duration {
 }
 
 /// A sub-agent thread discovered this parent turn, keyed by its threadId.
+#[derive(serde::Serialize, serde::Deserialize)]
 struct SubThread {
     /// The `subagent` spawn part (anywhere in the tree) that owns this thread's
     /// transcript. Its `children` is the bucket the thread's parts stream into.
@@ -3502,6 +3681,10 @@ async fn ensure_codex_pre_accept(
                     ctx.mark_setup_failure("codex_setup", &error);
                     return Err(error);
                 };
+                eprintln!(
+                    "orx up: Codex setup for turn {} failed, retrying: {error:#}",
+                    ctx.turn_id
+                );
                 ctx.show_retry_status(
                     "orx",
                     "Restarting Codex app-server",
@@ -3582,228 +3765,269 @@ fn codex_thread_setup(
     Ok(setup)
 }
 
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct AppTurnState {
+    turn_id: Option<String>,
+    open_requests: HashMap<String, (Value, ServerReqKind)>,
+    sub_threads: HashMap<String, SubThread>,
+    parent_done: bool,
+    finished: bool,
+}
+
 async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
-    // Entry sweep: any HELD (native_id) card still unresolved from an earlier
-    // turn is a zombie — its JSON-RPC request died with its turn (or child), and
-    // worse, codex request ids restart per child, so a click on a stale card
-    // could be delivered to a live request minted later. Resolve them before
-    // this turn can surface anything. Native-only (`true`) now that end-turn
-    // cards exist (the synthesized plan card): those carry no native_id and
-    // resume by message — the next user message replaces them, exactly like
-    // Claude's precedent. Behavior-preserving for the pre-plan-mode cards (all
-    // of which were native).
-    ctx.host.resolve_stale_prompts(&ctx.session_id, true)?;
-    let (repo, playbook_md) = codex_playbook(&ctx.project, &ctx.session_id).await?;
+    let (client, thread_id, mut turn_id, mut rx, _route, mut state, mut offset) =
+        if let Some(resume) = &ctx.resume {
+            let client = ctx
+                .host
+                .codex
+                .resume_client(&ctx.session_id, &resume.keep_id)
+                .await
+                .ok_or_else(|| anyhow!("Codex resumed session has no adopted client"))?;
+            let state: AppTurnState = serde_json::from_value(resume.state.clone())?;
+            let thread_id = client
+                .resumed_thread()
+                .ok_or_else(|| anyhow!("Codex resumed session has no thread"))?;
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let route = client.register_turn(tx);
+            let turn_id = state.turn_id.clone().or_else(|| client.active_turn());
+            if turn_id.is_none() && !client.awaiting_turn_start() {
+                ctx.mark_delivery(DeliveryState::NotSent);
+                return Err(anyhow!(
+                    "Codex turn was not sent before the server restarted. Retry the message."
+                ));
+            }
+            (client, thread_id, turn_id, rx, route, state, resume.offset)
+        } else {
+            // Entry sweep: any HELD (native_id) card still unresolved from an earlier
+            // turn is a zombie — its JSON-RPC request died with its turn (or child), and
+            // worse, codex request ids restart per child, so a click on a stale card
+            // could be delivered to a live request minted later. Resolve them before
+            // this turn can surface anything. Native-only (`true`) now that end-turn
+            // cards exist (the synthesized plan card): those carry no native_id and
+            // resume by message — the next user message replaces them, exactly like
+            // Claude's precedent. Behavior-preserving for the pre-plan-mode cards (all
+            // of which were native).
+            ctx.host.resolve_stale_prompts(&ctx.session_id, true)?;
+            let (repo, playbook_md) = codex_playbook(&ctx.project, &ctx.session_id).await?;
 
-    let native_session = match ctx.native_session_id.as_deref() {
-        Some(id) => codex_native_session(id, ctx.profile.is_some()).await?,
-        None => None,
-    };
-    let preferred_store = native_session
-        .as_ref()
-        .map(|session| session.store)
-        .unwrap_or(NativeStore::Isolated);
-    let mut client = ensure_codex_pre_accept(ctx, preferred_store).await?;
-    let config_client = client.clone();
-    // Bypass needs the configuration only to avoid MCP server name collisions.
-    let mut config = match codex_turn_config(&client, &repo).await {
-        Err(_) if ctx.permission_mode == Some(PermissionMode::Bypass) => Value::Null,
-        config => config?,
-    };
-    let auto_review_supported =
-        config_supports_auto_review(&config) && super::detect::api_key("OPENAI_BASE_URL").is_none();
-    let (_, approval_policy, approvals_reviewer) =
-        codex_policies(ctx.permission_mode, auto_review_supported);
+            let native_session = match ctx.native_session_id.as_deref() {
+                Some(id) => codex_native_session(id, ctx.profile.is_some()).await?,
+                None => None,
+            };
+            let preferred_store = native_session
+                .as_ref()
+                .map(|session| session.store)
+                .unwrap_or(NativeStore::Isolated);
+            let mut client = ensure_codex_pre_accept(ctx, preferred_store).await?;
+            let config_client = client.clone();
+            // Bypass needs the configuration only to avoid MCP server name collisions.
+            let mut config = match codex_turn_config(&client, &repo).await {
+                Err(_) if ctx.permission_mode == Some(PermissionMode::Bypass) => Value::Null,
+                config => config?,
+            };
+            let auto_review_supported = config_supports_auto_review(&config)
+                && super::detect::api_key("OPENAI_BASE_URL").is_none();
+            let (_, approval_policy, approvals_reviewer) =
+                codex_policies(ctx.permission_mode, auto_review_supported);
 
-    // Thread bring-up: reuse the thread this child already carries, resume a
-    // persisted one on a fresh child (after an orx up restart or child crash),
-    // else start a new thread. The playbook rides developerInstructions on
-    // both start and resume, so a long-lived session picks up playbook
-    // improvements on the next restart rather than keeping its first version
-    // forever.
-    let mut thread_setup = codex_thread_setup(
-        &repo,
-        &playbook_md,
-        ctx.permission_mode,
-        auto_review_supported,
-        ctx.model.as_deref(),
-        ctx.service_tier.as_deref(),
-        &config,
-    )?;
-    add_orx_server(
-        &mut thread_setup["config"],
-        &ctx.session_id,
-        ctx.host.up_port(),
-    );
-    if ctx.reset_codex_model {
-        // Codex keeps the old thread model when a turn omits its model override.
-        append_native_recovery_context(ctx, &mut thread_setup)?;
-        ctx.native_session_id = None;
-    }
-    let thread_id = match (ctx.native_session_id.clone(), native_session.as_ref()) {
-        (Some(id), _) if client.resumed_thread().as_deref() == Some(id.as_str()) => id,
-        (Some(_), None) => {
-            append_native_recovery_context(ctx, &mut thread_setup)?;
-            start_thread(ctx, &client, thread_setup).await?
-        }
-        (Some(id), Some(session)) => {
-            let mut params = thread_setup.clone();
-            params["threadId"] = Value::String(id.clone());
-            params["path"] = Value::String(session.path.to_string_lossy().into_owned());
-            let (resume_client, resumed) = codex_resume_thread(ctx, client.clone(), params).await?;
-            client = resume_client;
-            match resumed {
-                Ok(resumed) => {
-                    // Capture the effective model codex reports (top-level
-                    // `model`) — the required `settings.model` for a
-                    // collaborationMode mask, and the escape path when the
-                    // session carries no explicit model.
-                    client.set_thread_model(resumed.get("model").and_then(Value::as_str));
-                    client.set_resumed_thread(&id);
-                    id
-                }
-                Err(err) => {
-                    // Transport failures never reach this arm. Recover only if
-                    // the exact rollout disappeared after the initial lookup.
-                    if codex_native_session(&id, ctx.profile.is_some())
-                        .await?
-                        .is_some()
-                    {
-                        ctx.mark_terminal_failure("json_rpc", err.to_string());
-                        return Err(anyhow!("codex thread/resume failed: {err}"));
-                    }
-                    if client.native_store() != NativeStore::Isolated {
-                        ctx.host.codex.kill_session(&ctx.session_id).await;
-                        client = ensure_codex_pre_accept(ctx, NativeStore::Isolated).await?;
-                    }
+            // Thread bring-up: reuse the thread this child already carries, resume a
+            // persisted one on a fresh child (after an orx up restart or child crash),
+            // else start a new thread. The playbook rides developerInstructions on
+            // both start and resume, so a long-lived session picks up playbook
+            // improvements on the next restart rather than keeping its first version
+            // forever.
+            let mut thread_setup = codex_thread_setup(
+                &repo,
+                &playbook_md,
+                ctx.permission_mode,
+                auto_review_supported,
+                ctx.model.as_deref(),
+                ctx.service_tier.as_deref(),
+                &config,
+            )?;
+            add_orx_server(
+                &mut thread_setup["config"],
+                &ctx.session_id,
+                ctx.host.up_port(),
+            );
+            if ctx.reset_codex_model {
+                // Codex keeps the old thread model when a turn omits its model override.
+                append_native_recovery_context(ctx, &mut thread_setup)?;
+                ctx.native_session_id = None;
+            }
+            let thread_id = match (ctx.native_session_id.clone(), native_session.as_ref()) {
+                (Some(id), _) if client.resumed_thread().as_deref() == Some(id.as_str()) => id,
+                (Some(_), None) => {
                     append_native_recovery_context(ctx, &mut thread_setup)?;
                     start_thread(ctx, &client, thread_setup).await?
                 }
+                (Some(id), Some(session)) => {
+                    let mut params = thread_setup.clone();
+                    params["threadId"] = Value::String(id.clone());
+                    params["path"] = Value::String(session.path.to_string_lossy().into_owned());
+                    let (resume_client, resumed) =
+                        codex_resume_thread(ctx, client.clone(), params).await?;
+                    client = resume_client;
+                    match resumed {
+                        Ok(resumed) => {
+                            // Capture the effective model codex reports (top-level
+                            // `model`) — the required `settings.model` for a
+                            // collaborationMode mask, and the escape path when the
+                            // session carries no explicit model.
+                            client.set_thread_model(resumed.get("model").and_then(Value::as_str));
+                            client.set_resumed_thread(&id);
+                            id
+                        }
+                        Err(err) => {
+                            // Transport failures never reach this arm. Recover only if
+                            // the exact rollout disappeared after the initial lookup.
+                            if codex_native_session(&id, ctx.profile.is_some())
+                                .await?
+                                .is_some()
+                            {
+                                ctx.mark_terminal_failure("json_rpc", err.to_string());
+                                return Err(anyhow!("codex thread/resume failed: {err}"));
+                            }
+                            if client.native_store() != NativeStore::Isolated {
+                                ctx.host.codex.kill_session(&ctx.session_id).await;
+                                client =
+                                    ensure_codex_pre_accept(ctx, NativeStore::Isolated).await?;
+                            }
+                            append_native_recovery_context(ctx, &mut thread_setup)?;
+                            start_thread(ctx, &client, thread_setup).await?
+                        }
+                    }
+                }
+                (None, _) => start_thread(ctx, &client, thread_setup).await?,
+            };
+
+            if ctx.permission_mode != Some(PermissionMode::Bypass)
+                && !Arc::ptr_eq(&client, &config_client)
+            {
+                config = codex_turn_config(&client, &repo).await?;
             }
-        }
-        (None, _) => start_thread(ctx, &client, thread_setup).await?,
-    };
 
-    if ctx.permission_mode != Some(PermissionMode::Bypass) && !Arc::ptr_eq(&client, &config_client)
-    {
-        config = codex_turn_config(&client, &repo).await?;
-    }
+            // Route events to this turn before starting it — nothing is missed.
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let _route = client.register_turn(tx);
 
-    // Route events to this turn before starting it — nothing is missed.
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let _route = client.register_turn(tx);
+            let mut turn_params = serde_json::json!({
+                "threadId": thread_id,
+                "input": [{ "type": "text", "text": ctx.text }],
+                // Explicit per turn — the composer can change mode/model mid-session,
+                // and configuration can add writable roots to an already running chat.
+                "approvalPolicy": approval_policy,
+                "approvalsReviewer": approvals_reviewer,
+                "sandboxPolicy": sandbox_policy_json(ctx.permission_mode, &repo, &config).await?,
+            });
+            if let Some(service_tier) = &ctx.service_tier {
+                turn_params["serviceTier"] = Value::String(service_tier.clone());
+            }
+            if let Some(model) = &ctx.model {
+                turn_params["model"] = Value::String(model.clone());
+            }
+            let effort = codex_reasoning(ctx.reasoning_level.as_deref());
+            if let Some(effort) = effort {
+                turn_params["effort"] = Value::String(effort.to_string());
+            }
 
-    let mut turn_params = serde_json::json!({
-        "threadId": thread_id,
-        "input": [{ "type": "text", "text": ctx.text }],
-        // Explicit per turn — the composer can change mode/model mid-session,
-        // and configuration can add writable roots to an already running chat.
-        "approvalPolicy": approval_policy,
-        "approvalsReviewer": approvals_reviewer,
-        "sandboxPolicy": sandbox_policy_json(ctx.permission_mode, &repo, &config).await?,
-    });
-    if let Some(service_tier) = &ctx.service_tier {
-        turn_params["serviceTier"] = Value::String(service_tier.clone());
-    }
-    if let Some(model) = &ctx.model {
-        turn_params["model"] = Value::String(model.clone());
-    }
-    let effort = codex_reasoning(ctx.reasoning_level.as_deref());
-    if let Some(effort) = effort {
-        turn_params["effort"] = Value::String(effort.to_string());
-    }
+            // Conditional collaborationMode mask (see `collaboration_mode_json`).
+            // Attaching a mask always injects a template, so attach one ONLY when we
+            // want it:
+            //   * Plan turn → the `plan` mask (codex's plan.md template + question tool).
+            //   * Non-plan turn whose thread MAY be sticky-planned → the `default` mask,
+            //     once, to un-stick (a `plan` turn leaves the thread planning until a
+            //     turn carries `default`; there is no way back to "no template"). "May
+            //     be sticky-planned" fires on either signal: the durable reset marker
+            //     (survives restarts) or this child's in-memory `last_collab_mode` (a
+            //     `plan` mask we sent and haven't cleared).
+            //   * Otherwise → attach nothing (preserves today's template-free context).
+            // The mask's required `settings.model` is the session model, falling back to
+            // codex's reported thread model; keep the top-level `model`/`effort` above
+            // so the None-model escape path still works (mask omitted, plain turn).
+            let plan_turn = ctx.plan_mode;
+            let mask_mode = collaboration_mask_mode(
+                plan_turn,
+                ctx.plan_reset_pending,
+                client.last_collab_mode(),
+            );
+            let mut applied_mask_mode = None;
+            if let Some(mode) = mask_mode {
+                let collab_model = ctx.model.clone().or_else(|| client.thread_model());
+                match collab_model {
+                    Some(model) => {
+                        turn_params["collaborationMode"] =
+                            collaboration_mode_json(mode, &model, effort);
+                        client.set_last_collab_mode(mode);
+                        applied_mask_mode = Some(mode);
+                    }
+                    None if plan_turn => {
+                        // Plan mode with no known model can't build the mask (settings
+                        // .model is required) — fail clearly rather than silently run a
+                        // plain (non-planning) turn the user asked to plan.
+                        return Err(anyhow!(
+                            "codex did not report a model — cannot enter plan mode"
+                        ));
+                    }
+                    None => {
+                        // Un-stick wanted but no model to build the mask: omit it and
+                        // log. Degrades to today's behavior (the thread stays planned
+                        // until a turn carries `default`); rare (a resume before any
+                        // start/resume reported a model).
+                        eprintln!(
+                        "orx up: codex reported no model — skipping the plan-mode un-stick mask"
+                    );
+                    }
+                }
+            }
 
-    // Conditional collaborationMode mask (see `collaboration_mode_json`).
-    // Attaching a mask always injects a template, so attach one ONLY when we
-    // want it:
-    //   * Plan turn → the `plan` mask (codex's plan.md template + question tool).
-    //   * Non-plan turn whose thread MAY be sticky-planned → the `default` mask,
-    //     once, to un-stick (a `plan` turn leaves the thread planning until a
-    //     turn carries `default`; there is no way back to "no template"). "May
-    //     be sticky-planned" fires on either signal: the durable reset marker
-    //     (survives restarts) or this child's in-memory `last_collab_mode` (a
-    //     `plan` mask we sent and haven't cleared).
-    //   * Otherwise → attach nothing (preserves today's template-free context).
-    // The mask's required `settings.model` is the session model, falling back to
-    // codex's reported thread model; keep the top-level `model`/`effort` above
-    // so the None-model escape path still works (mask omitted, plain turn).
+            client.preparing_turn()?;
+            ctx.flush_at(
+                client.keeper(),
+                client.checkpoint_offset(),
+                &AppTurnState::default(),
+            )?;
+            let started =
+                codex_pre_accept_request(ctx, &client, "turn/start", turn_params, true).await?;
+            if applied_mask_mode == Some("default") && ctx.plan_reset_pending {
+                Store::open()?.clear_chat_session_plan_reset(&ctx.session_id)?;
+                ctx.plan_reset_pending = false;
+            }
+            // Everything below is filtered to this turn: an earlier turn of the same
+            // session that was orx-side aborted (its native interrupt raced or never
+            // fired) can still be streaming into the shared channel, and its tail —
+            // fatally, its `turn/completed` — must not leak into this transcript.
+            let turn_id = started
+                .get("turn")
+                .and_then(|t| t.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if turn_id.is_some() {
+                ctx.mark_delivery(DeliveryState::Accepted);
+            } else {
+                ctx.mark_delivery(DeliveryState::Unknown);
+                return Err(anyhow!("codex turn/start returned no turn id"));
+            }
+            // Arm the native interrupt now rather than on `turn/started` — an
+            // interrupt landing before that notification would otherwise no-op.
+            if let Some(turn_id) = turn_id.as_deref() {
+                client.set_active_turn(turn_id);
+            }
+
+            let state = AppTurnState {
+                turn_id: turn_id.clone(),
+                ..Default::default()
+            };
+            let offset = client.checkpoint_offset();
+            (client, thread_id, turn_id, rx, _route, state, offset)
+        };
     let plan_turn = ctx.plan_mode;
-    let mask_mode =
-        collaboration_mask_mode(plan_turn, ctx.plan_reset_pending, client.last_collab_mode());
-    let mut applied_mask_mode = None;
-    if let Some(mode) = mask_mode {
-        let collab_model = ctx.model.clone().or_else(|| client.thread_model());
-        match collab_model {
-            Some(model) => {
-                turn_params["collaborationMode"] = collaboration_mode_json(mode, &model, effort);
-                client.set_last_collab_mode(mode);
-                applied_mask_mode = Some(mode);
-            }
-            None if plan_turn => {
-                // Plan mode with no known model can't build the mask (settings
-                // .model is required) — fail clearly rather than silently run a
-                // plain (non-planning) turn the user asked to plan.
-                return Err(anyhow!(
-                    "codex did not report a model — cannot enter plan mode"
-                ));
-            }
-            None => {
-                // Un-stick wanted but no model to build the mask: omit it and
-                // log. Degrades to today's behavior (the thread stays planned
-                // until a turn carries `default`); rare (a resume before any
-                // start/resume reported a model).
-                eprintln!("orx up: codex reported no model — skipping the plan-mode un-stick mask");
-            }
-        }
+    ctx.flush_at(client.keeper(), offset, &state)?;
+    client.saved_through(offset)?;
+    if state.finished {
+        return Ok(());
     }
-
-    let started = codex_pre_accept_request(ctx, &client, "turn/start", turn_params, true).await?;
-    if applied_mask_mode == Some("default") && ctx.plan_reset_pending {
-        Store::open()?.clear_chat_session_plan_reset(&ctx.session_id)?;
-        ctx.plan_reset_pending = false;
-    }
-    // Everything below is filtered to this turn: an earlier turn of the same
-    // session that was orx-side aborted (its native interrupt raced or never
-    // fired) can still be streaming into the shared channel, and its tail —
-    // fatally, its `turn/completed` — must not leak into this transcript.
-    let turn_id = started
-        .get("turn")
-        .and_then(|t| t.get("id"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    if turn_id.is_some() {
-        ctx.mark_delivery(DeliveryState::Accepted);
-    } else {
-        ctx.mark_delivery(DeliveryState::Unknown);
-        return Err(anyhow!("codex turn/start returned no turn id"));
-    }
-    // Arm the native interrupt now rather than on `turn/started` — an
-    // interrupt landing before that notification would otherwise no-op.
-    if let Some(turn_id) = turn_id.as_deref() {
-        client.set_active_turn(turn_id);
-    }
-
-    // Open request cards surfaced this turn: WirePart id → (JSON-RPC request
-    // id, kind). Kind picks the settle shape (a permission `decline` vs a
-    // userInput empty-answers) on every exit path. Invariant: no unresolved
-    // codex card outlives its turn — every exit path below sweeps them (resolve
-    // + settle with codex), so a dead turn can't leave a live-looking card. (A
-    // task *abort* skips the sweep, but `ChatHost::interrupt` settles pending
-    // requests natively first, and the next turn's entry sweep in this function
-    // resolves whatever survived.)
-    let mut open_requests: HashMap<String, (Value, ServerReqKind)> = HashMap::new();
-    // Absolute, so steering can't push the watchdog back on a wedged turn.
     let mut deadline = tokio::time::Instant::now() + TURN_WATCHDOG;
-
-    // Sub-agent threads spawned this turn (Codex collaboration). Their events
-    // stream on this same connection with a foreign turnId; we route them into
-    // the spawning part's `children` instead of dropping them.
-    let mut sub_threads: HashMap<String, SubThread> = HashMap::new();
-    // The parent turn's `turn/completed` arrived while sub-agent threads were
-    // still live — we're draining their tails before ending the turn (bounded
-    // by DRAIN_QUIET_SETTLE, see the deadline below).
-    let mut parent_done = false;
-
     loop {
         // Watchdog (see TURN_WATCHDOG for the false-positive trade-off).
         // Suspended while a card is pending — user think-time is unbounded by
@@ -3821,7 +4045,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
             let flush_due = ctx.flush_due();
             let steering = &mut ctx.steering;
             let event = async {
-                if open_requests.is_empty() {
+                if state.open_requests.is_empty() {
                     tokio::time::timeout_at(deadline, rx.recv()).await
                 } else {
                     Ok(rx.recv().await)
@@ -3835,19 +4059,30 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         };
         let event = match waited {
             Waited::Flush => {
-                let _ = ctx.flush();
+                ctx.flush_at(client.keeper(), offset, &state)?;
+                client.saved_through(offset)?;
                 continue;
             }
             Waited::Steer(steer) => {
-                steer_turn(ctx, &client, &thread_id, turn_id.as_deref(), steer).await;
+                steer_turn(
+                    ctx,
+                    &client,
+                    &thread_id,
+                    turn_id.as_deref(),
+                    steer,
+                    &state,
+                    offset,
+                )
+                .await?;
                 continue;
             }
             Waited::Event(Ok(event)) => {
-                deadline = tokio::time::Instant::now() + turn_phase_quiet(parent_done);
+                deadline = tokio::time::Instant::now() + turn_phase_quiet(state.parent_done);
                 event
             }
-            Waited::Event(Err(_)) if parent_done => {
-                let stuck: Vec<&str> = sub_threads
+            Waited::Event(Err(_)) if state.parent_done => {
+                let stuck: Vec<&str> = state
+                    .sub_threads
                     .iter()
                     .filter(|(_, s)| s.live)
                     .map(|(tid, _)| tid.as_str())
@@ -3857,15 +4092,8 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                      (threads without a terminal event: {stuck:?})",
                     DRAIN_QUIET_SETTLE.as_secs()
                 );
-                finish_completed_turn(
-                    ctx,
-                    &client,
-                    &thread_id,
-                    turn_id.as_deref(),
-                    plan_turn,
-                    &mut open_requests,
-                )
-                .await;
+                finish_completed_turn(ctx, &client, &thread_id, plan_turn, &mut state, offset)
+                    .await?;
                 return Ok(());
             }
             Waited::Event(Err(_)) => {
@@ -3877,18 +4105,50 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                 ctx.mark_terminal_failure("codex_watchdog", message.clone());
                 ctx.push_error(message);
                 settle_running_subagents(&mut ctx.assistant.parts);
-                let _ = ctx.flush();
+                state.finished = true;
+                ctx.flush_at(client.keeper(), offset, &state)?;
+                client.saved_through(offset)?;
                 return Ok(());
             }
         };
         let Some(event) = event else {
             settle_running_subagents(&mut ctx.assistant.parts);
-            let _ = ctx.flush();
+            ctx.flush_at(client.keeper(), offset, &state)?;
+            client.saved_through(offset)?;
             return Err(anyhow!("codex app-server event stream ended mid-turn"));
         };
+        let event = match event {
+            TurnEvent::At { offset: end, event } => {
+                offset = end;
+                *event
+            }
+            event => event,
+        };
+        let server_request = matches!(&event, TurnEvent::Request { .. });
         match event {
+            TurnEvent::At { .. } => unreachable!("nested Codex event offset"),
+            TurnEvent::StartResult(result) => {
+                let started = result
+                    .map_err(|error| anyhow!("Codex turn/start failed after restart: {error}"))?;
+                if turn_id.is_none() {
+                    turn_id = started
+                        .pointer("/turn/id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    state.turn_id = turn_id.clone();
+                    ctx.mark_delivery(DeliveryState::Accepted);
+                }
+            }
+
             TurnEvent::Notification { method, params } => {
-                let scope = classify_event_thread(turn_id.as_deref(), &sub_threads, &params);
+                if turn_id.is_none()
+                    && params.get("threadId").and_then(Value::as_str) == Some(&thread_id)
+                    && method == "turn/started"
+                {
+                    turn_id = event_turn_id(&params).map(str::to_string);
+                    state.turn_id = turn_id.clone();
+                }
+                let scope = classify_event_thread(turn_id.as_deref(), &state.sub_threads, &params);
                 if matches!(scope, EventScope::Stale) || method == "turn/completed" {
                     record_unowned(client.session_id(), client.turn_models(), &method, &params);
                 }
@@ -3896,20 +4156,22 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                     EventScope::Stale => continue,
                     EventScope::SubAgent(tid) => {
                         capture_token_notification(ctx, client.turn_models(), &method, &params);
-                        route_sub_event(ctx, &mut sub_threads, &thread_id, &tid, &method, &params);
-                        ctx.maybe_flush();
+                        route_sub_event(
+                            ctx,
+                            &mut state.sub_threads,
+                            &thread_id,
+                            &tid,
+                            &method,
+                            &params,
+                        );
+                        ctx.maybe_flush_at(client.keeper(), offset, &state);
                         // Draining after the parent's turn/completed: the last
                         // live thread retiring ends the turn for real.
-                        if parent_done && !sub_threads.values().any(|s| s.live) {
+                        if state.parent_done && !state.sub_threads.values().any(|s| s.live) {
                             finish_completed_turn(
-                                ctx,
-                                &client,
-                                &thread_id,
-                                turn_id.as_deref(),
-                                plan_turn,
-                                &mut open_requests,
+                                ctx, &client, &thread_id, plan_turn, &mut state, offset,
                             )
-                            .await;
+                            .await?;
                             return Ok(());
                         }
                         continue;
@@ -3924,16 +4186,17 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                 if method == "serverRequest/resolved" {
                     if let Some(request_id) = params.get("requestId") {
                         let part_id = request_part_id(turn_id.as_deref(), request_id);
-                        if open_requests.remove(&part_id).is_some() {
+                        if state.open_requests.remove(&part_id).is_some() {
                             resolve_card(ctx, &part_id);
-                            let _ = ctx.flush();
+                            ctx.flush_at(client.keeper(), offset, &state)?;
+                            client.saved_through(offset)?;
                         }
                     }
                 }
                 // A parent collab item spawns/drives sub-agents — register the
                 // thread ids it references so their (foreign-turn) events route
                 // into this spawn part's `children` from here on.
-                register_sub_threads_from(&thread_id, &method, &params, &mut sub_threads);
+                register_sub_threads_from(&thread_id, &method, &params, &mut state.sub_threads);
                 match apply_notification(ctx, &method, &params) {
                     Some(TurnEnd::Done { interrupted }) => {
                         // Spawned sub-agents outlive the parent turn — codex
@@ -3943,10 +4206,12 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                         // until every live thread retires (its own
                         // turn/completed); the watchdog still backstops a
                         // thread that never does. An interrupt ends everything.
-                        if !interrupted && sub_threads.values().any(|s| s.live) {
-                            parent_done = true;
-                            deadline = tokio::time::Instant::now() + turn_phase_quiet(parent_done);
-                            let _ = ctx.flush();
+                        if !interrupted && state.sub_threads.values().any(|s| s.live) {
+                            state.parent_done = true;
+                            deadline =
+                                tokio::time::Instant::now() + turn_phase_quiet(state.parent_done);
+                            ctx.flush_at(client.keeper(), offset, &state)?;
+                            client.saved_through(offset)?;
                             continue;
                         }
                         // Plan card only for a non-interrupted Plan turn — an
@@ -3955,22 +4220,24 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                             ctx,
                             &client,
                             &thread_id,
-                            turn_id.as_deref(),
                             plan_turn && !interrupted,
-                            &mut open_requests,
+                            &mut state,
+                            offset,
                         )
-                        .await;
+                        .await?;
                         return Ok(());
                     }
                     Some(TurnEnd::Failed(message)) => {
-                        sweep_open_requests(ctx, &client, &mut open_requests).await;
+                        sweep_open_requests(ctx, &client, &mut state.open_requests).await;
                         settle_running_subagents(&mut ctx.assistant.parts);
                         // A terminal `error` notification may have already
                         // pushed this exact message — don't render it twice.
                         if !has_error_part(ctx, &message) {
                             ctx.push_error(message);
                         }
-                        let _ = ctx.flush();
+                        state.finished = true;
+                        ctx.flush_at(client.keeper(), offset, &state)?;
+                        client.saved_through(offset)?;
                         // The turn *finished* (with an error the transcript
                         // already shows); an Err here would double-report.
                         return Ok(());
@@ -4001,9 +4268,10 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                                     // Surface the card and keep consuming events —
                                     // codex holds the command; the reply arrives
                                     // via `resume_from_prompt` on the user's click.
-                                    open_requests.insert(part_id, (id, kind));
+                                    state.open_requests.insert(part_id, (id, kind));
                                     ctx.upsert_part(part);
-                                    let _ = ctx.flush();
+                                    ctx.flush_at(client.keeper(), offset, &state)?;
+                                    client.saved_through(offset)?;
                                 }
                             } else {
                                 // Classified Approval but no card (unknown method
@@ -4019,9 +4287,10 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                             // proceeds without them.
                             match user_input_card(turn_id.as_deref(), &id, &params) {
                                 Some((part_id, part)) => {
-                                    open_requests.insert(part_id, (id, kind));
+                                    state.open_requests.insert(part_id, (id, kind));
                                     ctx.upsert_part(part);
-                                    let _ = ctx.flush();
+                                    ctx.flush_at(client.keeper(), offset, &state)?;
+                                    client.saved_through(offset)?;
                                 }
                                 None => {
                                     let _ = client
@@ -4042,18 +4311,24 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                 // Child gone: nothing to settle with codex; just close cards and
                 // stamp any orphaned running sub-agent rows so they don't spin
                 // forever in the persisted transcript.
-                for part_id in std::mem::take(&mut open_requests).into_keys() {
+                for part_id in std::mem::take(&mut state.open_requests).into_keys() {
                     resolve_card(ctx, &part_id);
                 }
                 settle_running_subagents(&mut ctx.assistant.parts);
-                let _ = ctx.flush();
+                ctx.flush_at(client.keeper(), offset, &state)?;
+                client.saved_through(offset)?;
                 return Err(anyhow!(
                     "codex app-server exited mid-turn; see {}",
                     crate::store::data_dir().join("agent-codex.log").display()
                 ));
             }
         }
-        ctx.maybe_flush();
+        if server_request {
+            ctx.flush_at(client.keeper(), offset, &state)?;
+            client.saved_through(offset)?;
+        } else {
+            ctx.maybe_flush_at(client.keeper(), offset, &state);
+        }
     }
 }
 
@@ -4480,6 +4755,10 @@ async fn codex_resume_thread(
                     ctx.mark_terminal_failure("codex_resume", error.to_string());
                     return Err(error);
                 };
+                eprintln!(
+                    "orx up: resuming the Codex thread for turn {} failed, retrying: {error:#}",
+                    ctx.turn_id
+                );
                 ctx.show_retry_status(
                     "orx",
                     "Reconnecting to Codex",
@@ -4514,13 +4793,15 @@ async fn steer_turn(
     thread_id: &str,
     turn_id: Option<&str>,
     steer: SteerMessage,
-) {
+    state: &AppTurnState,
+    offset: u64,
+) -> Result<()> {
     let Some(turn_id) = turn_id else {
         ctx.host.release_steer(&ctx.session_id, &steer.id);
-        return;
+        return Ok(());
     };
     if !ctx.host.steer_pending(&ctx.session_id, &steer.id) {
-        return;
+        return Ok(());
     }
     let answered = client
         .try_request_with_timeout(
@@ -4536,12 +4817,20 @@ async fn steer_turn(
     // codex reads an accepted steer at once, so its answer marks the spot.
     match answered {
         Ok(Ok(_)) => ctx.record_steer(&steer),
-        Ok(Err(_)) => ctx.host.release_steer(&ctx.session_id, &steer.id),
-        Err(e) => {
+        Ok(Err(_)) => {
+            ctx.host.release_steer(&ctx.session_id, &steer.id);
+            return Ok(());
+        }
+        Err(error) => {
             ctx.record_steer(&steer);
-            ctx.push_error(format!("codex did not confirm the steering message ({e})"));
+            ctx.push_error(format!(
+                "codex did not confirm the steering message ({error})"
+            ));
         }
     }
+    ctx.flush_at(client.keeper(), offset, state)?;
+    client.saved_through(offset)?;
+    Ok(())
 }
 
 /// `thread/start` and record the new thread id as the session's native id.
@@ -4730,323 +5019,231 @@ fn codex_exec_command(bin: &Path, roots: &[PathBuf], native_id: Option<&str>) ->
     cmd
 }
 
-async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
-    let bin = find_codex_required()?;
-    let project = ctx.project.clone();
-    let session_id = ctx.session_id.clone();
-    // The modular orx skills land in the harness's session-skills dir, fresh,
-    // for this session's agent to auto-load — source of truth is the trait.
-    let skills_dir = Codex.session_skills_dir();
-    let (repo, playbook) =
-        tokio::task::spawn_blocking(move || ensure_playbook(&project, &session_id, skills_dir))
-            .await
-            .map_err(|e| anyhow!("playbook task failed: {e}"))??;
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct ExecState {
+    counter: usize,
+    open_text: Option<String>,
+    open_reasoning: Option<String>,
+}
 
-    let native_session = match ctx.native_session_id.as_deref() {
-        Some(id) => codex_native_session(id, ctx.profile.is_some()).await?,
-        None => None,
-    };
-    let native_store = native_session
-        .as_ref()
-        .map(|session| session.store)
-        .unwrap_or(NativeStore::Isolated);
-    let profile = ctx.profile.clone();
-    let codex_home = tokio::task::spawn_blocking(move || match profile {
-        Some(id) => crate::local::agent_profiles::prepare(&id, "codex"),
-        None => native_store::prepare_codex(native_store),
-    })
-    .await
-    .map_err(|error| anyhow!("Codex config preparation failed: {error}"))??;
-    let policy = if ctx.plan_mode {
-        Some("read-only")
-    } else {
-        codex_sandbox(ctx.permission_mode)
-    };
-    let data_dir = (policy == Some("workspace-write"))
-        .then(ensure_orx_data_dir)
-        .flatten();
-    let roots: Vec<PathBuf> = if policy == Some("workspace-write") {
-        [
-            data_dir,
-            Some(ensure_orx_lifecycle_lock_dir()?),
-            shared_git_dir(&repo).await,
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
-    } else {
-        Vec::new()
-    };
-    let native_id = ctx
-        .native_session_id
-        .as_deref()
-        .filter(|_| native_session.is_some());
-    let mut cmd = codex_exec_command(&bin, &roots, native_id);
-    cmd.args(["--json", "--skip-git-repo-check"])
-        .current_dir(&repo)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::from(crate::local::chat::harness_log("codex")?))
-        .kill_on_drop(true);
-    // Permission mode → sandbox policy. `codex exec` can't prompt, so the
-    // sandbox is the approval boundary: non-bypass modes run sandboxed with
-    // approvals disabled (nothing to escalate to), `Bypass` drops both.
-    //
-    // Set the policy via `-c sandbox_mode=` rather than `-s`: the `exec resume`
-    // subcommand rejects `-s` ("unexpected argument"), but accepts `-c` on both
-    // the fresh and resume paths (verified against codex-cli 0.143), so one form
-    // works for the whole session lifecycle.
-    match policy {
-        Some(policy) => {
-            cmd.args([
-                "-c",
-                &format!("sandbox_mode=\"{policy}\""),
-                "-c",
-                "approval_policy=\"never\"",
-            ]);
-            // workspace-write out of the box is too tight for the orx
-            // workflow in four ways (all verified via `codex sandbox` against
-            // codex-cli 0.144; in the TUI these denials escalate to approval
-            // prompts, which `codex exec` doesn't have):
-            //   * Network is blocked by default — DNS doesn't even resolve, so
-            //     `git fetch`/`push`, package installs, and the `orx` CLI's
-            //     localhost API calls all die. The agent's job is launching
-            //     experiments over that API; Auto must keep the network open.
-            //   * The orx store isn't writable — the SQLite DB lives in the
-            //     data dir under `~/.local/share`, outside the workspace, so
-            //     every `orx` command that touches it fails with "unable to
-            //     open database file"; grant the data dir (see
-            //     `ensure_orx_data_dir`).
-            //   * Every stateful `orx` command takes a lifecycle lock before
-            //     opening the store. Grant its directory without granting
-            //     the neighboring credentials (see `ensure_orx_lifecycle_lock_dir`).
-            //   * Git metadata isn't writable — codex protects `.git` inside
-            //     the workspace, and a worktree's real metadata (the hub
-            //     clone's `.git`) sits outside it — so `git fetch`/`commit`
-            //     fail outright; grant the common dir (see `shared_git_dir`).
-            if policy == "workspace-write" {
-                cmd.args(["-c", "sandbox_workspace_write.network_access=true"]);
-            }
-        }
-        None => {
-            cmd.arg("--dangerously-bypass-approvals-and-sandbox");
-        }
-    }
-    // Reasoning level → Codex's own `model_reasoning_effort` config override.
-    if let Some(effort) = codex_reasoning(ctx.reasoning_level.as_deref()) {
-        cmd.args(["-c", &format!("model_reasoning_effort=\"{effort}\"")]);
-    }
-    if let Some(service_tier) = &ctx.service_tier {
-        cmd.args(["-c", &format!("service_tier=\"{service_tier}\"")]);
-    }
-    if let Some(model) = &ctx.model {
-        cmd.args(["-m", model]);
-    }
-    if let Some(override_arg) =
-        native_store::codex_sqlite_override(native_store, &codex_home, ctx.profile.is_some())
-    {
-        cmd.args(["-c", &override_arg]);
-    }
-    // Only for the server-name collision check; an unreadable file keeps the default name.
-    let configured: serde_json::Map<String, Value> = [
-        codex_home.join("config.toml"),
-        repo.join(".codex").join("config.toml"),
-    ]
-    .iter()
-    .filter_map(|path| {
-        std::fs::read_to_string(path)
-            .ok()?
-            .parse::<toml::Value>()
-            .ok()
-    })
-    .filter_map(|config| serde_json::to_value(config.get("mcp_servers")?).ok())
-    .filter_map(|servers| servers.as_object().cloned())
-    .flatten()
-    .collect();
-    let servers = crate::local::codex::alphaxiv_config(&Value::Object(configured))?;
-    let servers = toml::Value::try_from(servers)?;
-    cmd.args(["-c", &format!("mcp_servers={servers}")]);
-    let mut turn_text = legacy_exec_text(&ctx.text, ctx.plan_mode);
-    if ctx.native_session_id.is_some() && native_session.is_none() {
-        if let Some(recovery) = super::native_recovery_context(ctx, "Codex thread")? {
-            turn_text = format!("{recovery}\n\n{turn_text}");
-        }
-    }
-    let prompt = if native_session.is_none() {
-        let playbook_md = std::fs::read_to_string(&playbook).unwrap_or_default();
-        format!(
-            "<system-context>\n{playbook_md}\n</system-context>\n\n{}",
-            turn_text
+async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
+    let (mut child, mut state, mut offset) = if let Some(resume) = &ctx.resume {
+        (
+            crate::keep::attach(&resume.keep_id).await?,
+            serde_json::from_value::<ExecState>(resume.state.clone())?,
+            resume.offset,
         )
     } else {
-        turn_text
-    };
-    cmd.arg(prompt);
-    prepare_env(&mut cmd);
-    cmd.env("CODEX_HOME", codex_home);
-    // Plain text only: a synced FORCE_COLOR would put escape codes in the
-    // `--json` event stream, and every unparseable line reads as "not delivered".
-    cmd.env("NO_COLOR", "1");
-    // Tag the run this sandboxed turn may launch (`orx exp run`) with the
-    // session so it can be explicitly subscribed to. After prepare_env so it
-    // isn't shadowed by a synced value.
-    set_chat_session_env(&mut cmd, &ctx.session_id, "codex", ctx.host.up_port())?;
-    ctx.persist_delivery(DeliveryState::Unknown)?;
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(error) => {
-            ctx.mark_delivery(DeliveryState::NotSent);
-            return Err(anyhow!("Could not spawn {}: {}", bin.display(), error));
+        let bin = find_codex_required()?;
+        let project = ctx.project.clone();
+        let session_id = ctx.session_id.clone();
+        // The modular orx skills land in the harness's session-skills dir, fresh,
+        // for this session's agent to auto-load — source of truth is the trait.
+        let skills_dir = Codex.session_skills_dir();
+        let (repo, playbook) =
+            tokio::task::spawn_blocking(move || ensure_playbook(&project, &session_id, skills_dir))
+                .await
+                .map_err(|e| anyhow!("playbook task failed: {e}"))??;
+
+        let native_session = match ctx.native_session_id.as_deref() {
+            Some(id) => codex_native_session(id, ctx.profile.is_some()).await?,
+            None => None,
+        };
+        let native_store = native_session
+            .as_ref()
+            .map(|session| session.store)
+            .unwrap_or(NativeStore::Isolated);
+        let profile = ctx.profile.clone();
+        let codex_home = tokio::task::spawn_blocking(move || match profile {
+            Some(id) => crate::local::agent_profiles::prepare(&id, "codex"),
+            None => native_store::prepare_codex(native_store),
+        })
+        .await
+        .map_err(|error| anyhow!("Codex config preparation failed: {error}"))??;
+        let policy = if ctx.plan_mode {
+            Some("read-only")
+        } else {
+            codex_sandbox(ctx.permission_mode)
+        };
+        let data_dir = (policy == Some("workspace-write"))
+            .then(ensure_orx_data_dir)
+            .flatten();
+        let roots: Vec<PathBuf> = if policy == Some("workspace-write") {
+            [
+                data_dir,
+                Some(ensure_orx_lifecycle_lock_dir()?),
+                shared_git_dir(&repo).await,
+            ]
+            .into_iter()
+            .flatten()
+            .collect()
+        } else {
+            Vec::new()
+        };
+        let native_id = ctx
+            .native_session_id
+            .as_deref()
+            .filter(|_| native_session.is_some());
+        let mut cmd = codex_exec_command(&bin, &roots, native_id);
+        cmd.args(["--json", "--skip-git-repo-check"])
+            .current_dir(&repo);
+        // Permission mode → sandbox policy. `codex exec` can't prompt, so the
+        // sandbox is the approval boundary: non-bypass modes run sandboxed with
+        // approvals disabled (nothing to escalate to), `Bypass` drops both.
+        //
+        // Set the policy via `-c sandbox_mode=` rather than `-s`: the `exec resume`
+        // subcommand rejects `-s` ("unexpected argument"), but accepts `-c` on both
+        // the fresh and resume paths (verified against codex-cli 0.143), so one form
+        // works for the whole session lifecycle.
+        match policy {
+            Some(policy) => {
+                cmd.args([
+                    "-c",
+                    &format!("sandbox_mode=\"{policy}\""),
+                    "-c",
+                    "approval_policy=\"never\"",
+                ]);
+                // workspace-write out of the box is too tight for the orx
+                // workflow in four ways (all verified via `codex sandbox` against
+                // codex-cli 0.144; in the TUI these denials escalate to approval
+                // prompts, which `codex exec` doesn't have):
+                //   * Network is blocked by default — DNS doesn't even resolve, so
+                //     `git fetch`/`push`, package installs, and the `orx` CLI's
+                //     localhost API calls all die. The agent's job is launching
+                //     experiments over that API; Auto must keep the network open.
+                //   * The orx store isn't writable — the SQLite DB lives in the
+                //     data dir under `~/.local/share`, outside the workspace, so
+                //     every `orx` command that touches it fails with "unable to
+                //     open database file"; grant the data dir (see
+                //     `ensure_orx_data_dir`).
+                //   * Every stateful `orx` command takes a lifecycle lock before
+                //     opening the store. Grant its directory without granting
+                //     the neighboring credentials (see `ensure_orx_lifecycle_lock_dir`).
+                //   * Git metadata isn't writable — codex protects `.git` inside
+                //     the workspace, and a worktree's real metadata (the hub
+                //     clone's `.git`) sits outside it — so `git fetch`/`commit`
+                //     fail outright; grant the common dir (see `shared_git_dir`).
+                if policy == "workspace-write" {
+                    cmd.args(["-c", "sandbox_workspace_write.network_access=true"]);
+                }
+            }
+            None => {
+                cmd.arg("--dangerously-bypass-approvals-and-sandbox");
+            }
         }
+        // Reasoning level → Codex's own `model_reasoning_effort` config override.
+        if let Some(effort) = codex_reasoning(ctx.reasoning_level.as_deref()) {
+            cmd.args(["-c", &format!("model_reasoning_effort=\"{effort}\"")]);
+        }
+        if let Some(service_tier) = &ctx.service_tier {
+            cmd.args(["-c", &format!("service_tier=\"{service_tier}\"")]);
+        }
+        if let Some(model) = &ctx.model {
+            cmd.args(["-m", model]);
+        }
+        if let Some(override_arg) =
+            native_store::codex_sqlite_override(native_store, &codex_home, ctx.profile.is_some())
+        {
+            cmd.args(["-c", &override_arg]);
+        }
+        // Only for the server-name collision check; an unreadable file keeps the default name.
+        let configured: serde_json::Map<String, Value> = [
+            codex_home.join("config.toml"),
+            repo.join(".codex").join("config.toml"),
+        ]
+        .iter()
+        .filter_map(|path| {
+            std::fs::read_to_string(path)
+                .ok()?
+                .parse::<toml::Value>()
+                .ok()
+        })
+        .filter_map(|config| serde_json::to_value(config.get("mcp_servers")?).ok())
+        .filter_map(|servers| servers.as_object().cloned())
+        .flatten()
+        .collect();
+        let servers = crate::local::codex::alphaxiv_config(&Value::Object(configured))?;
+        let servers = toml::Value::try_from(servers)?;
+        cmd.args(["-c", &format!("mcp_servers={servers}")]);
+        let mut turn_text = legacy_exec_text(&ctx.text, ctx.plan_mode);
+        if ctx.native_session_id.is_some() && native_session.is_none() {
+            if let Some(recovery) = super::native_recovery_context(ctx, "Codex thread")? {
+                turn_text = format!("{recovery}\n\n{turn_text}");
+            }
+        }
+        let prompt = if native_session.is_none() {
+            let playbook_md = std::fs::read_to_string(&playbook).unwrap_or_default();
+            format!(
+                "<system-context>\n{playbook_md}\n</system-context>\n\n{}",
+                turn_text
+            )
+        } else {
+            turn_text
+        };
+        cmd.arg(prompt);
+        prepare_env(&mut cmd);
+        cmd.env("CODEX_HOME", codex_home);
+        // Plain text only: a synced FORCE_COLOR would put escape codes in the
+        // `--json` event stream, and every unparseable line reads as "not delivered".
+        cmd.env("NO_COLOR", "1");
+        // Tag the run this sandboxed turn may launch (`orx exp run`) with the
+        // session so it can be explicitly subscribed to. After prepare_env so it
+        // isn't shadowed by a synced value.
+        set_chat_session_env(&mut cmd, &ctx.session_id, "codex", ctx.host.up_port())?;
+        ctx.persist_delivery(DeliveryState::Unknown)?;
+        let child = crate::keep::spawn(crate::keep::Keep {
+            command: cmd.as_std(),
+            io: crate::keep::Io::Pipes {
+                stderr: Some(crate::store::data_dir().join("agent-codex.log")),
+            },
+            retain: crate::keep::LOSSLESS,
+            owner: crate::keep::Owner::Agent {
+                harness: "codex".into(),
+                session_id: ctx.session_id.clone(),
+                state: serde_json::json!({"per_turn":true}),
+            }
+            .to_value(),
+        })
+        .await
+        .inspect_err(|_| {
+            ctx.mark_delivery(DeliveryState::NotSent);
+        })?;
+        child.handle().close_stdin();
+        (child, ExecState::default(), 0)
     };
-    let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
-    let mut lines = BufReader::new(stdout).lines();
-    let mut counter = 0usize;
-    let mut next_id = |prefix: &str| {
-        counter += 1;
-        format!("{prefix}-{counter}")
-    };
-    // Streaming deltas accumulate into one part until the complete event.
-    let mut open_text: Option<String> = None;
-    let mut open_reasoning: Option<String> = None;
+    let keeper = child.handle();
+    let mut lines = child
+        .take_stdout()
+        .ok_or_else(|| anyhow!("Codex keeper has no stdout"))?
+        .lines();
+    lines.skip_to(offset)?;
+    ctx.flush_at(&keeper, offset, &state)?;
 
     loop {
         let line = tokio::select! {
+            biased;
             line = lines.next_line() => line?,
+            _ = keeper.wait() => break,
             _ = ctx.flush_due() => {
-                let _ = ctx.flush();
+                ctx.flush_at(&keeper, offset, &state)?;
                 continue;
             }
         };
-        let Some(line) = line else {
+        let Some((line, end)) = line else {
             break;
         };
+        offset = end;
         let Ok(event) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        ctx.mark_delivery(DeliveryState::Accepted);
-        // Legacy events nest under "msg"; item-style events are flat.
-        let msg = event.get("msg").unwrap_or(&event);
-        let kind = msg.get("type").and_then(Value::as_str).unwrap_or("");
-
-        // Session/thread id, wherever this version put it.
-        for key in ["session_id", "thread_id", "conversation_id"] {
-            if let Some(sid) = msg
-                .get(key)
-                .or_else(|| event.get(key))
-                .and_then(Value::as_str)
-            {
-                ctx.set_native_session_id(sid);
-            }
-        }
-
-        match kind {
-            "agent_message_delta" => {
-                let delta = msg.get("delta").and_then(Value::as_str).unwrap_or("");
-                let id = open_text.get_or_insert_with(|| next_id("text")).clone();
-                if ctx.assistant.parts.iter().all(|p| p.id != id) {
-                    ctx.upsert_part(WirePart::text(id.clone(), ""));
-                }
-                ctx.append_part_text(&id, delta);
-            }
-            "agent_message" => {
-                let text = msg.get("message").and_then(Value::as_str).unwrap_or("");
-                let id = open_text.take().unwrap_or_else(|| next_id("text"));
-                ctx.upsert_part(WirePart::text(id, text));
-            }
-            "agent_reasoning_delta" => {
-                let delta = msg.get("delta").and_then(Value::as_str).unwrap_or("");
-                let id = open_reasoning
-                    .get_or_insert_with(|| next_id("think"))
-                    .clone();
-                if ctx.assistant.parts.iter().all(|p| p.id != id) {
-                    ctx.upsert_part(WirePart::reasoning(id.clone(), ""));
-                }
-                ctx.append_part_text(&id, delta);
-            }
-            "agent_reasoning" => {
-                let text = msg.get("text").and_then(Value::as_str).unwrap_or("");
-                let id = open_reasoning.take().unwrap_or_else(|| next_id("think"));
-                ctx.upsert_part(WirePart::reasoning(id, text));
-            }
-            "exec_command_begin" => {
-                let id = msg
-                    .get("call_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| next_id("cmd"));
-                let command = msg.get("command").map(command_string).unwrap_or_default();
-                ctx.upsert_part(WirePart {
-                    id,
-                    kind: "tool".into(),
-                    text: None,
-                    tool: Some("bash".into()),
-                    state: Some(WireToolState {
-                        status: "running".into(),
-                        input: Some(serde_json::json!({ "command": command })),
-                        output: None,
-                        error: None,
-                        title: None,
-                    }),
-                    prompt: None,
-                    phase: None,
-                    children: Vec::new(),
-                    orx: None,
-                });
-            }
-            "exec_command_end" => {
-                let call_id = msg.get("call_id").and_then(Value::as_str).unwrap_or("");
-                let exit_ok = msg
-                    .get("exit_code")
-                    .and_then(Value::as_i64)
-                    .is_none_or(|c| c == 0);
-                let output = msg
-                    .get("aggregated_output")
-                    .or_else(|| msg.get("stdout"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                if let Some(part) = ctx.assistant.parts.iter_mut().find(|p| p.id == call_id) {
-                    if let Some(state) = part.state.as_mut() {
-                        state.status = if exit_ok { "completed" } else { "error" }.into();
-                        state.output = Some(output);
-                    }
-                }
-            }
-            "error" | "stream_error" | "turn.failed" => {
-                let detail = msg
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("codex reported an error")
-                    .to_string();
-                ctx.push_error(detail);
-            }
-            // Item-style shape: everything interesting is under "item".
-            "item.completed" | "item.updated" => {
-                if let Some(item) = msg.get("item") {
-                    handle_item(ctx, item, &mut next_id);
-                }
-            }
-            "token_count" => {
-                let (used, context_window) =
-                    token_count_usage(msg.get("info").unwrap_or(&Value::Null));
-                if let Some(used) = used {
-                    ctx.report_usage(ContextUsage {
-                        used_tokens: used,
-                        context_window,
-                        ..Default::default()
-                    });
-                }
-            }
-            _ => {}
-        }
-        ctx.maybe_flush();
+        apply_exec_event(ctx, &mut state, &event);
+        ctx.maybe_flush_at(&keeper, offset, &state);
     }
 
-    let status = child.wait().await?;
-    if !status.success() {
+    let status = keeper.wait().await;
+    if status.code != Some(0) {
         return Err(anyhow!(
-            "codex exited with {status}; see {}",
+            "codex exited with {status:?}; see {}",
             crate::store::data_dir().join("agent-codex.log").display()
         ));
     }
@@ -5054,9 +5251,138 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
         if let Some(card) = plan_card(&ctx.assistant.parts, &ctx.assistant.id) {
             ctx.upsert_part(card);
         }
-        let _ = ctx.flush();
+        ctx.flush_at(&keeper, offset, &state)?;
     }
     Ok(())
+}
+
+fn apply_exec_event(ctx: &mut TurnCtx, state: &mut ExecState, event: &Value) {
+    ctx.mark_delivery(DeliveryState::Accepted);
+    // Legacy events nest under "msg"; item-style events are flat.
+    let msg = event.get("msg").unwrap_or(event);
+    let kind = msg.get("type").and_then(Value::as_str).unwrap_or("");
+
+    // Session/thread id, wherever this version put it.
+    for key in ["session_id", "thread_id", "conversation_id"] {
+        if let Some(sid) = msg
+            .get(key)
+            .or_else(|| event.get(key))
+            .and_then(Value::as_str)
+        {
+            ctx.set_native_session_id(sid);
+        }
+    }
+
+    let mut next_id = |prefix: &str| {
+        state.counter += 1;
+        format!("{prefix}-{}", state.counter)
+    };
+    match kind {
+        "agent_message_delta" => {
+            let delta = msg.get("delta").and_then(Value::as_str).unwrap_or("");
+            let id = state
+                .open_text
+                .get_or_insert_with(|| next_id("text"))
+                .clone();
+            if ctx.assistant.parts.iter().all(|p| p.id != id) {
+                ctx.upsert_part(WirePart::text(id.clone(), ""));
+            }
+            ctx.append_part_text(&id, delta);
+        }
+        "agent_message" => {
+            let text = msg.get("message").and_then(Value::as_str).unwrap_or("");
+            let id = state.open_text.take().unwrap_or_else(|| next_id("text"));
+            ctx.upsert_part(WirePart::text(id, text));
+        }
+        "agent_reasoning_delta" => {
+            let delta = msg.get("delta").and_then(Value::as_str).unwrap_or("");
+            let id = state
+                .open_reasoning
+                .get_or_insert_with(|| next_id("think"))
+                .clone();
+            if ctx.assistant.parts.iter().all(|p| p.id != id) {
+                ctx.upsert_part(WirePart::reasoning(id.clone(), ""));
+            }
+            ctx.append_part_text(&id, delta);
+        }
+        "agent_reasoning" => {
+            let text = msg.get("text").and_then(Value::as_str).unwrap_or("");
+            let id = state
+                .open_reasoning
+                .take()
+                .unwrap_or_else(|| next_id("think"));
+            ctx.upsert_part(WirePart::reasoning(id, text));
+        }
+        "exec_command_begin" => {
+            let id = msg
+                .get("call_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| next_id("cmd"));
+            let command = msg.get("command").map(command_string).unwrap_or_default();
+            ctx.upsert_part(WirePart {
+                id,
+                kind: "tool".into(),
+                text: None,
+                tool: Some("bash".into()),
+                state: Some(WireToolState {
+                    status: "running".into(),
+                    input: Some(serde_json::json!({ "command": command })),
+                    output: None,
+                    error: None,
+                    title: None,
+                }),
+                prompt: None,
+                phase: None,
+                children: Vec::new(),
+                orx: None,
+            });
+        }
+        "exec_command_end" => {
+            let call_id = msg.get("call_id").and_then(Value::as_str).unwrap_or("");
+            let exit_ok = msg
+                .get("exit_code")
+                .and_then(Value::as_i64)
+                .is_none_or(|c| c == 0);
+            let output = msg
+                .get("aggregated_output")
+                .or_else(|| msg.get("stdout"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if let Some(part) = ctx.assistant.parts.iter_mut().find(|p| p.id == call_id) {
+                if let Some(state) = part.state.as_mut() {
+                    state.status = if exit_ok { "completed" } else { "error" }.into();
+                    state.output = Some(output);
+                }
+            }
+        }
+        "error" | "stream_error" | "turn.failed" => {
+            let detail = msg
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("codex reported an error")
+                .to_string();
+            ctx.push_error(detail);
+        }
+        // Item-style shape: everything interesting is under "item".
+        "item.completed" | "item.updated" => {
+            if let Some(item) = msg.get("item") {
+                handle_item(ctx, item, &mut next_id);
+            }
+        }
+        "token_count" => {
+            let (used, context_window) = token_count_usage(msg.get("info").unwrap_or(&Value::Null));
+            if let Some(used) = used {
+                ctx.report_usage(ContextUsage {
+                    used_tokens: used,
+                    context_window,
+                    ..Default::default()
+                });
+            }
+        }
+        _ => {}
+    }
 }
 
 async fn codex_native_session(
@@ -5134,6 +5460,55 @@ fn handle_item(ctx: &mut TurnCtx, item: &Value, next_id: &mut impl FnMut(&str) -
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kept_exec_restores_partial_text_and_drains_output_after_exit() {
+        use tokio::io::AsyncWriteExt;
+        let mut command = crate::process::command("sh");
+        command.args(["-c", r#"printf '%s\n' '{"type":"agent_message_delta","delta":"Hel"}'; read -r go; printf '%s\n' '{"type":"agent_message_delta","delta":"lo"}' '{"type":"agent_message","message":"Hello"}'"#]);
+        let mut child = crate::keep::spawn(crate::keep::Keep {
+            command: &command,
+            io: crate::keep::Io::Pipes { stderr: None },
+            retain: crate::keep::LOSSLESS,
+            owner: Value::Null,
+        })
+        .await
+        .unwrap();
+        let keeper = child.handle();
+        let mut lines = child.take_stdout().unwrap().lines();
+        let (line, offset) = lines.next_line().await.unwrap().unwrap();
+        let mut ctx = TurnCtx::test_stub();
+        let mut state = ExecState::default();
+        apply_exec_event(&mut ctx, &mut state, &serde_json::from_str(&line).unwrap());
+        let saved = serde_json::to_value(&state).unwrap();
+        keeper.ack(offset);
+        keeper.detach();
+        let id = keeper.id().to_string();
+        drop(lines);
+        drop(child);
+        drop(keeper);
+        let mut child = crate::keep::attach(&id).await.unwrap();
+        let keeper = child.handle();
+        child
+            .take_stdin()
+            .unwrap()
+            .write_all(b"go\n")
+            .await
+            .unwrap();
+        assert_eq!(keeper.wait().await.code, Some(0));
+        let mut lines = child.take_stdout().unwrap().lines();
+        lines.skip_to(offset).unwrap();
+        let mut state: ExecState = serde_json::from_value(saved).unwrap();
+        for _ in 0..2 {
+            let (line, _) = lines.next_line().await.unwrap().unwrap();
+            apply_exec_event(&mut ctx, &mut state, &serde_json::from_str(&line).unwrap());
+        }
+        assert_eq!(state.counter, 1);
+        assert_eq!(ctx.assistant.parts.len(), 1);
+        assert_eq!(ctx.assistant.parts[0].text.as_deref(), Some("Hello"));
+        keeper.stop(Duration::from_secs(2)).await.unwrap();
+    }
+
     #[test]
     fn chatgpt_plan_labels_distinguish_pro_tiers() {
         assert_eq!(super::codex_plan_label("plus"), "Plus");
@@ -5154,7 +5529,7 @@ mod tests {
                 printf '%s\n' '{"id":1,"result":{"thread":{"id":"saved-thread"},"model":"saved-model"}}'
                 cat >/dev/null
             "#,
-        );
+        ).await;
         let setup = codex_thread_setup(
             Path::new("/workspace"),
             "project instructions",
@@ -5197,7 +5572,7 @@ mod tests {
     async fn compaction_refuses_a_different_resumed_thread() {
         let client = crate::local::codex::tests::rpc_test_client(
             r#"IFS= read -r request; printf '%s\n' '{"id":1,"result":{"thread":{"id":"different-thread"},"model":"wrong-model"}}'; cat >/dev/null"#,
-        );
+        ).await;
         let outcome = tokio::time::timeout(
             Duration::from_secs(2),
             resume_for_compaction(
@@ -6678,6 +7053,75 @@ requires_openai_auth = false
         assert_eq!(codex_sandbox(None), Some("workspace-write"));
     }
 
+    /// A `codex exec` that prints `lines`, keeping the switches it was given in `args`.
+    #[cfg(unix)]
+    fn fake_exec(dir: &Path, lines: &[&str]) -> std::path::PathBuf {
+        let bin = dir.join("codex");
+        let printed: String = lines
+            .iter()
+            .map(|line| format!("printf '%s\\n' '{line}'\n"))
+            .collect();
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n{printed}",
+            dir.join("args").display()
+        );
+        orx_test_support::write_executable(&bin, script, 0o755).unwrap();
+        bin
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_request_without_tools_switches_them_off_and_refuses_a_turn_that_uses_one() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-codex-no-tools").unwrap();
+        let request = OneShot {
+            profile: None,
+            system: "Look.",
+            prompt: "{}",
+            quality: OneShotQuality::Cheap,
+            model: Some("gpt-6-luna"),
+            timeout: Duration::from_secs(10),
+        };
+        let answer =
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"{\"runs\":{}}"}}"#;
+        let usage = r#"{"type":"turn.completed","usage":{"input_tokens":4000,"cached_input_tokens":0,"output_tokens":90}}"#;
+        let bin = fake_exec(dir.path(), &[answer, usage]);
+        let reply = codex_exec_one_shot(&bin, request, true).await.unwrap();
+        assert_eq!(reply.text, r#"{"runs":{}}"#);
+        assert_eq!(
+            reply
+                .usage
+                .map(|u| (u.input_tokens, u.output_tokens, u.cost_usd)),
+            Some((4000, 90, None))
+        );
+        let args = std::fs::read_to_string(dir.path().join("args")).unwrap();
+        for switch in NO_TOOLS {
+            assert!(args.contains(switch), "{switch} in {args}");
+        }
+
+        let acted = r#"{"type":"item.started","item":{"type":"command_execution","command":"cat ~/.ssh/id_ed25519"}}"#;
+        let bin = fake_exec(dir.path(), &[acted, answer]);
+        let error = codex_exec_one_shot(&bin, request, true).await.unwrap_err();
+        assert!(
+            format!("{error}").contains("started a command_execution"),
+            "{error}"
+        );
+
+        let ignored = r#"{"type":"item.completed","item":{"type":"error","message":"Codex is ignoring 1 unrecognized configuration setting.\n  session-flags: `features.shell_tool` is ignored."}}"#;
+        let bin = fake_exec(dir.path(), &[ignored, answer]);
+        let error = codex_exec_one_shot(&bin, request, true).await.unwrap_err();
+        assert!(
+            format!("{error}").contains("does not know `features.shell_tool`"),
+            "{error}"
+        );
+
+        // A request that may use tools never hears of the switches.
+        let bin = fake_exec(dir.path(), &[answer]);
+        codex_exec_one_shot(&bin, request, false).await.unwrap();
+        assert!(!std::fs::read_to_string(dir.path().join("args"))
+            .unwrap()
+            .contains("shell_tool"));
+    }
+
     #[test]
     fn exec_line_agent_message_reads_both_jsonl_shapes() {
         // Legacy shape: the message nests under "msg".
@@ -6716,13 +7160,20 @@ requires_openai_auth = false
             exec_line_error(
                 r#"{"type":"turn.failed","error":{"message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-x' model is not supported when using Codex with a ChatGPT account.\"}}"}}"#
             )
-            .as_deref(),
+            .map(|error| error.to_string()).as_deref(),
             Some(unsupported)
         );
         assert_eq!(
-            exec_line_error(r#"{"type":"error","message":"stream disconnected"}"#).as_deref(),
+            exec_line_error(r#"{"type":"error","message":"stream disconnected"}"#)
+                .map(|error| error.to_string())
+                .as_deref(),
             Some("stream disconnected")
         );
+        let rejected = exec_line_error(
+            r#"{"type":"turn.failed","error":{"message":"{\"status\":401,\"error\":{\"message\":\"The credentials were refused\"}}"}}"#,
+        )
+        .unwrap();
+        assert!(rejected.is::<super::super::OneShotAuthError>());
         // A metadata warning rides an item, not a turn error.
         assert!(exec_line_error(
             r#"{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata not found"}}"#

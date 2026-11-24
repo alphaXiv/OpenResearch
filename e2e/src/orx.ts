@@ -4,8 +4,9 @@
  * the outside server. @module
  */
 import { spawn, type ChildProcess } from 'node:child_process'
-import { createWriteStream, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
+import { copyFileSync, createWriteStream, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
+import { createServer, type AddressInfo } from 'node:net'
 import { createInterface } from 'node:readline'
 import { expect, type Page } from '@playwright/test'
 import type { Agent } from './agent.ts'
@@ -18,7 +19,28 @@ export const SPEEDUP = 20
 export type Orx = Awaited<ReturnType<typeof startOrx>>
 export type Project = { id: string; open: (page: Page) => Promise<void> }
 
-export async function startOrx({ agent, outside }: { agent: Agent; outside: Outside }) {
+/** Copies the `orx` under test and the `orx-host` beside it, which debug builds extract keepers from. */
+function copyBuild(from: string, to: string) {
+  mkdirSync(to, { recursive: true })
+  for (const name of ['orx', 'orx-host']) copyFileSync(path.join(path.dirname(from), name), path.join(to, name))
+  return path.join(to, 'orx')
+}
+
+async function freePort() {
+  const server = createServer()
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address() as AddressInfo
+  await new Promise((resolve) => server.close(resolve))
+  return port
+}
+
+/**
+ * `claude` replaces the sandbox's signed-out Claude Code with this script, `env` adds to the
+ * server's environment, and `ownBuild` runs from a copy no other server shares, for a test that
+ * replaces the executable. `appWindow` starts the server as the desktop window does, with the test
+ * holding its stdin as the window's lease.
+ */
+export async function startOrx({ agent, outside, claude, env: extra = {}, ownBuild, appWindow }: { agent: Agent; outside: Outside; claude?: string; env?: Record<string, string>; ownBuild?: boolean; appWindow?: boolean }) {
   // Short and outside the checkout: orx keeps Unix sockets under its data directory.
   const root = realpathSync(mkdtempSync('/tmp/orx-e2e-'))
   const home = path.join(root, 'home')
@@ -33,6 +55,7 @@ export async function startOrx({ agent, outside }: { agent: Agent; outside: Outs
     const auth = status ? `[ "$1" = auth ] && echo '${status}'\n` : ''
     writeFileSync(path.join(bin, name), `#!/bin/sh\n[ "$1" = --version ] && echo "${version}" && exit 0\n${auth}exit 1\n`, { mode: 0o755 })
   }
+  if (claude) writeFileSync(path.join(bin, 'claude'), claude, { mode: 0o755 })
   const log = path.join(root, 'orx.log')
   const env = {
     HOME: home,
@@ -52,12 +75,18 @@ export async function startOrx({ agent, outside }: { agent: Agent; outside: Outs
     ORX_TEST_SPEEDUP: String(SPEEDUP),
     ORX_E2E_AGENT: agent.url,
     ORX_E2E_AGENT_LOG: path.join(root, 'agent.log'),
+    ...extra,
   }
 
+  let binary = ownBuild ? copyBuild(ORX, path.join(root, 'builds', '0')) : ORX
+  let builds = 0
   let child: ChildProcess | undefined
   let port = 0
   const start = async () => {
-    const started = spawn(ORX, ['up', '--no-browser', '--port', String(port)], { env, stdio: ['ignore', 'pipe', 'pipe'] })
+    // A window names its port, which a restart into an update keeps; `0` would bind another.
+    if (appWindow && port === 0) port = await freePort()
+    const args = appWindow ? ['up', '--app-window', '--port', String(port)] : ['up', '--no-browser', '--port', String(port)]
+    const started = spawn(binary, args, { env, stdio: [appWindow ? 'pipe' : 'ignore', 'pipe', 'pipe'] })
     child = started
     const output = createWriteStream(log, { flags: 'a' })
     started.stdout!.pipe(output)
@@ -102,6 +131,10 @@ export async function startOrx({ agent, outside }: { agent: Agent; outside: Outs
     url,
     root,
     log,
+    /** The server's process, which a restart into an update execs in place. */
+    pid: () => child?.pid,
+    /** Where the server keeps its settings and update state. */
+    config: path.join(env.XDG_CONFIG_HOME, 'openresearch'),
     agentLog: env.ORX_E2E_AGENT_LOG,
     /** Connects the fake agent and finishes onboarding with it, as the onboarding screens do. */
     async onboard() {
@@ -129,10 +162,25 @@ export async function startOrx({ agent, outside }: { agent: Agent; outside: Outs
       return { id: project.id, open: async (page) => void (await page.goto(`${url}/projects/${project.id}`)) }
     },
     stop,
-    /** Stops `orx up` and starts it again on the same port and data. */
-    async restart(signal: NodeJS.Signals = 'SIGTERM') {
+    /**
+     * Stops `orx up` and starts it again on the same port and data, from `binary` if given,
+     * doing `meanwhile` while it is down.
+     */
+    async restart(signal: NodeJS.Signals = 'SIGTERM', { binary: next, meanwhile }: { binary?: string; meanwhile?: () => Promise<void> } = {}) {
       await stop(signal)
+      if (next) binary = next
+      await meanwhile?.()
       await start()
+    },
+    /**
+     * Copies the running build to a path of its own, then deletes the running build's files as an
+     * update does, and returns the copy's `orx` for `restart`. Needs `ownBuild`.
+     */
+    replaceBuild() {
+      if (!ownBuild) throw new Error('replaceBuild needs a server started with ownBuild')
+      const next = copyBuild(binary, path.join(root, 'builds', String(++builds)))
+      rmSync(path.dirname(binary), { recursive: true })
+      return next
     },
   }
 }

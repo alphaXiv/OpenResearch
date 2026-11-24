@@ -85,6 +85,8 @@ const env = {
   ...process.env,
   ORX_DATA_DIR: path.join(LIVE, 'data'),
   XDG_CONFIG_HOME: path.join(LIVE, 'config'),
+  // Settings every checkout shares, such as where bug reports go.
+  ORX_SHARED_CONFIG_DIR: path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'openresearch'),
   ORX_CACHE_DIR: path.join(DEV, 'cache'),
 }
 
@@ -419,8 +421,8 @@ function exited(child: ChildProcess) {
   return new Promise((resolve) => child.once('exit', resolve))
 }
 
-async function stop(child: ChildProcess) {
-  child.kill('SIGTERM')
+async function stop(child: ChildProcess, signal: NodeJS.Signals = 'SIGTERM') {
+  child.kill(signal)
   const timeout = setTimeout(() => child.kill('SIGKILL'), 10_000)
   await exited(child)
   clearTimeout(timeout)
@@ -656,7 +658,8 @@ async function restart() {
   if (!alive(vite)) await startUi()
   const previous = backend
   backend = null
-  if (previous) await stop(previous)
+  // SIGUSR2 hands the agents and terminals it keeps to the next backend. Windows ends the process outright, which leaves them to it as a crash does.
+  if (previous) await stop(previous, WINDOWS ? 'SIGTERM' : 'SIGUSR2')
   backend = await startBackend()
 
   // The window runs the old binary too.

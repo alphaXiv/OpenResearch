@@ -13,8 +13,8 @@
 //! result happen; the restart then does just the two renames, from the staged
 //! directory. A CLI install is swapped in one go.
 //!
-//! There is no `exec`, so a restarting `orx up` or app spawns the new binary and exits;
-//! the child waits on the parent's process handle before binding the port.
+//! There is no `exec`, so a restarting `orx up` spawns the new binary and exits; the
+//! child waits on the parent's process handle before binding the port.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -44,25 +44,37 @@ pub(crate) async fn fetch_manifest(
 /// Environment a relaunched `orx up` or app reads to wait for the process it replaces.
 const RELAUNCH_WAIT_PID_ENV: &str = "ORX_RELAUNCH_WAIT_PID";
 
-/// Spawn the copy on disk with `args` and `envs`, telling it which process to
-/// wait for, then exit. Returns only when the spawn failed.
-pub(super) fn relaunch(args: Vec<std::ffi::OsString>, envs: &[(&str, String)]) -> std::io::Error {
+/// Spawn the copy on disk with `args`, telling it which process to wait for, then
+/// exit. The successor inherits this process's stdin, which for a desktop window's
+/// server is the window's lease. Returns only when the spawn failed.
+pub(super) fn relaunch(args: Vec<std::ffi::OsString>) -> std::io::Error {
     // The load-time path, which the update swapped a new file under.
     let Ok(exe) = std::env::current_exe() else {
         return std::io::Error::other("could not resolve the running executable");
     };
     let spawned = crate::process::command(exe)
         .args(args)
-        .envs(envs.iter().cloned())
         .env(RELAUNCH_WAIT_PID_ENV, std::process::id().to_string())
+        .stderr(crate::commands::up::successor_stderr())
         .spawn();
     match spawned {
         Ok(child) => {
+            // A desktop window follows its server to the successor by this pid.
+            let named = crate::commands::remote_host::canonical_data_dir().and_then(|data_dir| {
+                crate::commands::remote_host::ServerDescriptor::announce_relaunch(
+                    &data_dir,
+                    Some(child.id()),
+                )
+            });
+            if let Err(error) = named {
+                eprintln!("orx up: could not name the restarted server: {error:#}");
+            }
             // The shell gets its prompt back; say where the server went.
             eprintln!(
                 "orx up: continuing as process {} in this console",
                 child.id()
             );
+            crate::commands::up::flush_stderr();
             std::process::exit(0)
         }
         Err(err) => err,

@@ -205,6 +205,165 @@ fn missing_unknown_and_removed_flags() {
 }
 
 #[test]
+fn a_terminal_notice_stays_pending_until_the_agent_previews_the_log() {
+    let sandbox = Sandbox::new();
+    let run_id = "run-result-notice";
+    sandbox.seed_run(run_id);
+    let db = rusqlite::Connection::open(sandbox.data_dir().join("orx.db")).unwrap();
+    let preview = || {
+        sandbox
+            .command()
+            .env("ORX_CHAT_SESSION_ID", "chat")
+            .args(["logs", run_id])
+            .output()
+            .unwrap()
+    };
+    let delivered = || {
+        db.query_row(
+            "SELECT delivered_at IS NOT NULL FROM run_notices WHERE run_id = ?1",
+            [run_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap()
+    };
+    db.execute(
+        "INSERT INTO run_notices (run_id, chat_session_id, kind, dedupe, body, created_at)
+         VALUES (?1, 'chat', 'terminal', 'terminal', 'finished', 1)",
+        [run_id],
+    )
+    .unwrap();
+
+    let missing = preview();
+    assert!(missing.stdout.is_empty(), "{missing:?}");
+    assert!(!delivered(), "missing log consumed the notice");
+
+    let path = sandbox.write_log(run_id, b"completed\n");
+    let tail = path.with_extension("tail.log");
+    let ranges = serde_json::json!([
+        {"offset":100,"len":10,"file":tail,"ident":"1-2","eof":true}
+    ]);
+    let manifest = path.with_extension("ranges.json");
+    std::fs::write(&manifest, ranges.to_string()).unwrap();
+    assert!(!preview().status.success());
+    assert!(!delivered(), "unreadable kept tail consumed the notice");
+
+    std::fs::write(&tail, b"kept tail\n").unwrap();
+    let kept = preview();
+    assert!(kept.status.success(), "{kept:?}");
+    assert!(lossy_stdout(&kept).contains("kept tail"));
+    assert!(delivered());
+
+    db.execute(
+        "UPDATE run_notices SET delivered_at = NULL WHERE run_id = ?1",
+        [run_id],
+    )
+    .unwrap();
+    std::fs::remove_file(manifest).unwrap();
+    let ordinary = preview();
+    assert!(ordinary.status.success(), "{ordinary:?}");
+    assert!(lossy_stdout(&ordinary).contains("completed"));
+    assert!(delivered());
+}
+
+#[cfg(unix)]
+#[test]
+fn view_check_scopes_absent_matches_to_the_checked_log_prefix() {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let sandbox = Sandbox::new();
+    let run = "run-long-check";
+    sandbox.seed_run(run);
+    let log = sandbox.write_log(run, b"begin 1\n");
+    let mut file = std::fs::OpenOptions::new().write(true).open(log).unwrap();
+    file.seek(SeekFrom::Start(64 << 20)).unwrap();
+    writeln!(file, "\nscore 42").unwrap();
+    let patterns = sandbox.0.join("patterns.json");
+    std::fs::write(&patterns, r#"[{"regex":"^score (?P<score>[0-9]+)$"}]"#).unwrap();
+    let args = [
+        "exp",
+        "view",
+        "check",
+        run,
+        "--pattern",
+        patterns.to_str().unwrap(),
+    ];
+    let mut json_args = args.to_vec();
+    json_args.push("--json");
+    let json = sandbox.run(&json_args);
+    assert!(json.status.success(), "{json:?}");
+    let report: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(
+        report["read"],
+        serde_json::json!({"bytes": 64_u64 << 20, "complete": false})
+    );
+    assert_eq!(report["patterns"][0]["matched"], 0);
+
+    let text = sandbox.run(&args);
+    assert!(text.status.success(), "{text:?}");
+    let text = lossy_stdout(&text);
+    assert!(
+        text.contains("67108864") && text.contains("bytes"),
+        "{text}"
+    );
+    assert!(!text.contains("matched nothing in the run's"), "{text}");
+    assert!(!text.contains("has reported no metrics"), "{text}");
+
+    std::fs::write(
+        &patterns,
+        r#"[{"regex":"^score (?P<score>[0-9]+)$"},{"regex":"^begin (?P<begin>[0-9]+)$"}]"#,
+    )
+    .unwrap();
+    let view = sandbox.0.join("view.xml");
+    std::fs::write(&view, r#"<view><chart y="score"/></view>"#).unwrap();
+    let mut args = args.to_vec();
+    args.extend(["--file", view.to_str().unwrap()]);
+    let refused = sandbox.run(&args);
+    assert!(!refused.status.success(), "{refused:?}");
+    let error = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        error.contains("score") && error.contains("67108864"),
+        "{error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn view_check_counts_carriage_return_redraws_as_log_entries() {
+    let sandbox = Sandbox::new();
+    let run = "run-redraws";
+    sandbox.seed_run(run);
+    let patterns = sandbox.0.join("patterns.json");
+    std::fs::write(&patterns, r#"[{"regex":"^score (?P<score>[0-9]+)$"}]"#).unwrap();
+    let args = [
+        "exp",
+        "view",
+        "check",
+        run,
+        "--pattern",
+        patterns.to_str().unwrap(),
+    ];
+    let mut json_args = args.to_vec();
+    json_args.push("--json");
+    for log in [
+        "score 1\rscore 2\r\n",
+        "score 1\rscore 2\r",
+        "score 1\rscore 2",
+    ] {
+        sandbox.write_log(run, log.as_bytes());
+        let json = sandbox.run(&json_args);
+        assert!(json.status.success(), "{json:?}");
+        let report: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+        assert_eq!(report["lines"], 2, "{log:?}: {report}");
+        assert_eq!(report["patterns"][0]["matched"], 2, "{log:?}");
+        assert_eq!(report["patterns"][0]["first"]["line"], 1, "{log:?}");
+    }
+    let text = sandbox.run(&args);
+    assert!(text.status.success(), "{text:?}");
+    let text = lossy_stdout(&text);
+    assert!(text.contains("matched 2 entries"), "{text}");
+}
+
+#[test]
 fn large_kept_log_previews_tail_and_identifies_both_ranges_and_missing_middle() {
     use std::io::{Seek, SeekFrom, Write};
 
@@ -330,7 +489,7 @@ fn read_only_commands_work_on_a_read_only_store() {
             .command()
             .env("ORX_UP_PORT", &port)
             .env("ORX_UP_AUTH_TOKEN", "token")
-            .args(["exp", "wait", "--timeout", "60"])
+            .args(["exp", "wait", "--timeout", "3"])
             .args(target)
             .output()
             .unwrap();

@@ -32,6 +32,8 @@ use crate::error::{anyhow, Result};
 ///   cancel <id>     terminate the sandbox -> prints {"missing": bool}
 ///   auth            one authenticated call that checks the configured token
 ///   rates           -> the workspace's current prices, `{"<rate name>": "<decimal>"}`
+///   billed <since>  -> what each app cost from unix second `since`, in whole hours,
+///                      `{"<app name>": "<decimal>"}`
 ///
 /// Exit 3 = the `modal` package isn't importable (surfaced as a friendly hint),
 /// 4 = Modal rejected the token, 5 = the token check could not reach Modal,
@@ -193,6 +195,15 @@ def rates():
     rates = modal.Workspace.from_context().billing.rates()
     print(json.dumps({key: str(rates.get(key)) for key in rates}))
 
+def billed(since):
+    modal = _modal()
+    from datetime import datetime, timezone
+    start = datetime.fromtimestamp(int(since), timezone.utc)
+    totals = {}
+    for row in modal.Workspace.from_context().billing.report(start=start, resolution="h"):
+        totals[row.description] = totals.get(row.description, 0) + row.cost
+    print(json.dumps({app: str(cost) for app, cost in totals.items()}))
+
 cmd = sys.argv[1] if len(sys.argv) > 1 else ""
 if cmd == "submit":
     submit()
@@ -206,6 +217,8 @@ elif cmd == "auth":
     auth()
 elif cmd == "rates":
     rates()
+elif cmd == "billed":
+    billed(sys.argv[2])
 else:
     sys.stderr.write("unknown launcher subcommand: %r" % cmd)
     sys.exit(2)
@@ -435,7 +448,8 @@ pub struct ModalJobSpec {
     #[serde(default)]
     pub env: HashMap<String, String>,
     pub timeout_seconds: u64,
-    /// Modal app name to group sandboxes under.
+    /// The Modal app the sandbox runs in: [`run_app`] since Modal bills by app, or the shared
+    /// `openresearch` app of runs launched before.
     pub app: String,
     /// Sandbox tags (or_run / or_experiment / or_project) for observability.
     pub tags: HashMap<String, String>,
@@ -509,13 +523,13 @@ pub async fn inspect_job(sandbox_id: &str) -> Result<Option<JobState>> {
     }))
 }
 
-/// What a sandbox with `spec`'s resources costs per hour, at the workspace's own rates.
-pub async fn hourly_price(spec: &ModalJobSpec) -> Result<crate::store::Quote> {
+/// What a sandbox with `resources` costs per hour, at the workspace's own rates.
+pub async fn hourly_price(resources: &ModalResources) -> Result<crate::store::Quote> {
     let out = launcher_capture(&["rates"], None, Some(Duration::from_secs(60)), None).await?;
     let rates: HashMap<String, String> = serde_json::from_slice(&out)
         .map_err(|e| anyhow!("Unreadable modal rates output: {}", e))?;
     Ok(crate::store::Quote {
-        amount_micros: sandbox_hourly_micros(&rates, spec)?,
+        amount_micros: sandbox_hourly_micros(&rates, resources)?,
         per: crate::store::Per::Hour,
         currency: "USD".into(),
         source: "modal.com".into(),
@@ -523,11 +537,45 @@ pub async fn hourly_price(spec: &ModalJobSpec) -> Result<crate::store::Quote> {
     })
 }
 
+/// The Modal app of the run's own, whose bill is the run's.
+pub fn run_app(run_id: &str) -> String {
+    format!("orx-{run_id}")
+}
+
+/// What Modal billed each app from `since` (unix millis) through the last whole hour, in USD
+/// micros by app name. Modal reports at most seven days back, on Team and Enterprise plans.
+pub async fn billed_by_app(since: i64) -> Result<HashMap<String, u64>> {
+    let since = (since / 1000).to_string();
+    let out = launcher_capture(
+        &["billed", &since],
+        None,
+        Some(Duration::from_secs(120)),
+        None,
+    )
+    .await?;
+    let billed: HashMap<String, String> = serde_json::from_slice(&out)
+        .map_err(|e| anyhow!("Unreadable modal billing output: {}", e))?;
+    billed
+        .into_iter()
+        .map(|(app, cost)| {
+            let dollars = cost
+                .parse::<f64>()
+                .ok()
+                .filter(|dollars| dollars.is_finite() && *dollars >= 0.0)
+                .ok_or_else(|| anyhow!("Modal billed app {app} an unreadable {cost}"))?;
+            Ok((app, (dollars * 1e6).round() as u64))
+        })
+        .collect()
+}
+
 /// What Modal reserves for a sandbox that asks for no CPU or memory.
 const DEFAULT_CPU: f64 = 0.125;
 const DEFAULT_MEMORY_MIB: u64 = 128;
 
-fn sandbox_hourly_micros(rates: &HashMap<String, String>, spec: &ModalJobSpec) -> Result<u64> {
+fn sandbox_hourly_micros(
+    rates: &HashMap<String, String>,
+    resources: &ModalResources,
+) -> Result<u64> {
     let rate = |names: &[&str]| -> Result<f64> {
         names
             .iter()
@@ -536,11 +584,11 @@ fn sandbox_hourly_micros(rates: &HashMap<String, String>, spec: &ModalJobSpec) -
             .filter(|rate| rate.is_finite() && *rate >= 0.0)
             .ok_or_else(|| anyhow!("Modal's rates have no {}", names[0]))
     };
-    let mut dollars = spec.cpu.unwrap_or(DEFAULT_CPU)
+    let mut dollars = resources.cpu.unwrap_or(DEFAULT_CPU)
         * rate(&["cpu_hour_cost_sandbox", "cpu_hour_cost"])?
-        + spec.memory.unwrap_or(DEFAULT_MEMORY_MIB) as f64 / 1024.0
+        + resources.memory.unwrap_or(DEFAULT_MEMORY_MIB) as f64 / 1024.0
             * rate(&["mem_gib_hour_cost_sandbox", "mem_gib_hour_cost"])?;
-    if let Some(gpu) = &spec.gpu {
+    if let Some(gpu) = &resources.gpu {
         let (name, count) = gpu.split_once(':').unwrap_or((gpu, "1"));
         let count: f64 = count
             .trim()
@@ -1251,18 +1299,11 @@ class Sandbox:
         assert!(refused.message.contains("bash: not found"), "{refused}");
     }
 
-    fn priced_spec(gpu: Option<&str>, cpu: Option<f64>, memory: Option<u64>) -> ModalJobSpec {
-        ModalJobSpec {
-            script: String::new(),
-            image: "python:3.12".into(),
+    fn priced(gpu: Option<&str>, cpu: Option<f64>, memory: Option<u64>) -> ModalResources {
+        ModalResources {
             gpu: gpu.map(str::to_string),
             cpu,
             memory,
-            env: HashMap::new(),
-            timeout_seconds: 60,
-            app: "openresearch".into(),
-            tags: HashMap::new(),
-            source_archive: None,
         }
     }
 
@@ -1282,22 +1323,21 @@ class Sandbox:
         .collect();
         // Modal's default reservation: 0.125 cores, 128 MiB.
         let base = 0.125 * 0.5 + 0.125 * 0.25;
-        let micros = |spec| sandbox_hourly_micros(&rates, &spec).unwrap();
-        assert_eq!(micros(priced_spec(None, None, None)), (base * 1e6) as u64);
+        let micros = |resources| sandbox_hourly_micros(&rates, &resources).unwrap();
+        assert_eq!(micros(priced(None, None, None)), (base * 1e6) as u64);
         assert_eq!(
-            micros(priced_spec(Some("H100:2"), None, None)),
+            micros(priced(Some("H100:2"), None, None)),
             ((8.0 + base) * 1e6) as u64
         );
         assert_eq!(
-            micros(priced_spec(Some("A100"), None, None)),
-            micros(priced_spec(Some("A100-40GB"), None, None))
+            micros(priced(Some("A100"), None, None)),
+            micros(priced(Some("A100-40GB"), None, None))
         );
         assert_eq!(
-            micros(priced_spec(Some("A100-80GB!"), Some(8.0), Some(32768))),
+            micros(priced(Some("A100-80GB!"), Some(8.0), Some(32768))),
             ((3.0 + 8.0 * 0.5 + 32.0 * 0.25) * 1e6) as u64
         );
-        let unknown =
-            sandbox_hourly_micros(&rates, &priced_spec(Some("Z9"), None, None)).unwrap_err();
+        let unknown = sandbox_hourly_micros(&rates, &priced(Some("Z9"), None, None)).unwrap_err();
         assert!(
             unknown.to_string().contains("gpu_hour_cost_z9"),
             "{unknown}"
@@ -1331,13 +1371,90 @@ class Workspace:
     def from_context(): return Workspace()
 "#,
         );
-        let quote = hourly_price(&priced_spec(Some("L4"), Some(2.0), Some(4096)))
+        let quote = hourly_price(&priced(Some("L4"), Some(2.0), Some(4096)))
             .await
             .unwrap();
         std::fs::remove_dir_all(dir).unwrap();
         assert_eq!(quote.amount_micros, 800_000 + 283_800 + 96_000);
         assert_eq!(quote.per, crate::store::Per::Hour);
         assert_eq!(quote.currency, "USD");
+    }
+
+    /// A run in its own app is billed once Modal settles its last hour; one in the shared app, or
+    /// whose app the report doesn't name, keeps its estimate.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn a_run_in_its_own_app_is_billed_what_modal_reports() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let Ok(python) =
+            crate::jobs::managed_env::base_python(MODAL_ENV.min_python, MODAL_ENV.label).await
+        else {
+            crate::config::skip_without_tool("no Python 3.10+ on PATH");
+            return;
+        };
+        let modal = fake_modal(
+            python,
+            r#"from decimal import Decimal
+class Row:
+    def __init__(self, app, cost): self.description, self.cost = app, Decimal(cost)
+class Billing:
+    def report(self, start, resolution):
+        assert resolution == "h" and start.tzinfo is not None
+        return [Row("orx-settled", "1.25"), Row("orx-settled", "0.5"), Row("openresearch", "9"),
+                Row("orx-recent", "3")]
+class Workspace:
+    billing = Billing()
+    @staticmethod
+    def from_context(): return Workspace()
+"#,
+        );
+        let data = std::env::temp_dir().join(format!("orx-modal-bill-{}", uuid::Uuid::new_v4()));
+        let store = crate::store::Store::open_at(data.clone()).unwrap();
+        let hour = 3_600_000;
+        let now = 1_794_571_200_000 + hour / 2;
+        let conn = rusqlite::Connection::open(data.join("orx.db")).unwrap();
+        for (id, app, status, ended) in [
+            ("settled", "orx-settled", "done", now - 3 * hour),
+            ("unnamed", "orx-unnamed", "failed", now - 3 * hour),
+            ("recent", "orx-recent", "done", now - hour),
+            ("shared", "openresearch", "done", now - 3 * hour),
+            ("running", "orx-running", "running", now - 3 * hour),
+        ] {
+            conn.execute(
+                "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, launch_spec,
+                                   created_at, updated_at, ended_at)
+                 VALUES (?1, 'e', 'p', ?2, '{}', ?3, ?4, ?4, ?4)",
+                rusqlite::params![
+                    id,
+                    status,
+                    json!({"kind": "modal_job", "options": {"app": app}}).to_string(),
+                    ended
+                ],
+            )
+            .unwrap();
+        }
+
+        crate::local::spend::read_modal_bills(&data, now)
+            .await
+            .unwrap();
+        let billed = |id: &str| -> Option<String> {
+            conn.query_row("SELECT billed_json FROM runs WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(
+            billed("settled").map(|json| serde_json::from_str::<Value>(&json).unwrap()),
+            Some(json!({"micros": 1_750_000, "currency": "USD"}))
+        );
+        for id in ["unnamed", "recent", "shared", "running"] {
+            assert_eq!(billed(id), None, "{id}");
+        }
+        drop((store, conn));
+        std::fs::remove_dir_all(modal).unwrap();
+        std::fs::remove_dir_all(data).unwrap();
     }
 
     #[cfg(not(windows))]

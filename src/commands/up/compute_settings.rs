@@ -1016,8 +1016,16 @@ pub(super) async fn add_remote_host(Json(req): Json<AddSshHostReq>) -> ApiResult
     blocking_api(move || add_saved_host(crate::jobs::ssh::hosts::List::Remotes, &req.command)).await
 }
 
-pub(super) async fn remove_remote_host(Path(host): Path<String>) -> ApiResult {
-    blocking_api(move || remove_saved_host(crate::jobs::ssh::hosts::List::Remotes, &host)).await
+pub(super) async fn remove_remote_host(
+    State(state): State<AppState>,
+    Path(host): Path<String>,
+) -> ApiResult {
+    let saved = host.clone();
+    let removed =
+        blocking_api(move || remove_saved_host(crate::jobs::ssh::hosts::List::Remotes, &saved))
+            .await?;
+    state.remote_sessions.forget(&host).await?;
+    Ok(removed)
 }
 
 pub(super) async fn require_saved_remote(host: &str) -> Result<(), ApiError> {
@@ -1543,7 +1551,7 @@ pub(super) fn compute_settings_json(ssh: SshReadiness) -> Value {
     };
     // Presence of the credentials file only — whether the token still works is
     // the expanded row's (network) question.
-    let or_logged_in = crate::config::credentials_present();
+    let or_logged_in = crate::config::credentials_present().unwrap_or(false);
 
     // Same spellings as the expanded rows' SOURCE_LABELS/MODAL_TOKEN_LABELS
     // in the UI — the collapsed head stays visible above the open row, so the
@@ -1674,14 +1682,22 @@ pub(super) struct ComputeSettingsQuery {
     project_id: Option<String>,
 }
 
+/// The machine's compute targets and default, plus the project's own default when one is named.
 pub(super) async fn compute_settings(Query(query): Query<ComputeSettingsQuery>) -> ApiResult {
     let ssh = openresearch_ssh_readiness().await;
-    let _project_id = query.project_id;
     // fs/env probes only, but keep them off the async runtime anyway.
-    let payload =
-        tokio::task::spawn_blocking(move || -> Result<Value> { Ok(compute_settings_json(ssh)) })
-            .await
-            .map_err(|e| ApiError::from(anyhow!("compute settings task failed: {e}")))??;
+    let payload = tokio::task::spawn_blocking(move || -> Result<Value> {
+        let mut payload = compute_settings_json(ssh);
+        if let Some(project) = query.project_id {
+            let own = Store::open()?.project_settings(&project)?;
+            payload["projectDefault"] = json!(own.compute);
+            payload["projectSlurm"] = json!(own.slurm);
+            payload["projectK8sNamespace"] = json!(own.k8s_namespace);
+        }
+        Ok(payload)
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("compute settings task failed: {e}")))??;
     Ok(Json(payload))
 }
 
@@ -1691,14 +1707,12 @@ pub(super) struct SetComputeDefaultReq {
     /// `None`/absent clears the default (and its flavor with it).
     backend: Option<String>,
     flavor: Option<String>,
-    project_id: Option<String>,
 }
 
-/// Persist the default compute target. An *unconfigured* backend is allowed
+/// Persist the machine's default compute target. An *unconfigured* backend is allowed
 /// (config state fluctuates outside orx; the UI warns instead) — only unknown
 /// backends and meaningless flavors are rejected.
 pub(super) async fn set_compute_default(Json(req): Json<SetComputeDefaultReq>) -> ApiResult {
-    let _project_id = req.project_id;
     let backend = req
         .backend
         .map(|b| b.trim().to_string())
@@ -1862,7 +1876,20 @@ fn cli_result(result: ApiResult) -> Result<Value> {
 }
 
 pub(crate) async fn status() -> Result<Value> {
-    cli_result(compute_settings(Query(ComputeSettingsQuery { project_id: None })).await)
+    let project = crate::local::resolve::current_project(&Store::open_for_reading()?)?;
+    status_for(project.as_ref()).await
+}
+
+/// The compute status, naming the project whose default it reports.
+async fn status_for(project: Option<&crate::local::model::LocalProject>) -> Result<Value> {
+    let query = ComputeSettingsQuery {
+        project_id: project.map(|project| project.id.clone()),
+    };
+    let mut value = cli_result(compute_settings(Query(query)).await)?;
+    if let Some(project) = project {
+        value["project"] = json!({"id": project.id, "name": project.name});
+    }
+    Ok(value)
 }
 
 pub(crate) async fn show(backend: &str) -> Result<Value> {
@@ -1898,15 +1925,32 @@ pub(crate) async fn show(backend: &str) -> Result<Value> {
     Ok(value)
 }
 
-pub(crate) async fn default(backend: Option<String>, flavor: Option<String>) -> Result<Value> {
-    cli_result(
-        set_compute_default(Json(SetComputeDefaultReq {
-            backend,
-            flavor,
-            project_id: None,
-        }))
-        .await,
-    )
+/// Sets or clears the current project's default, or the machine's with `machine` or outside a project.
+pub(crate) async fn default(
+    backend: Option<String>,
+    flavor: Option<String>,
+    machine: bool,
+) -> Result<Value> {
+    let project = if machine {
+        None
+    } else {
+        crate::local::resolve::current_project(&Store::open_for_reading()?)?
+    };
+    let Some(project) = project else {
+        return cli_result(
+            set_compute_default(Json(SetComputeDefaultReq { backend, flavor })).await,
+        );
+    };
+    let target = backend
+        .map(|backend| {
+            super::project_settings::compute_default(crate::store::ComputeDefault {
+                backend,
+                flavor,
+            })
+        })
+        .transpose()?;
+    Store::open()?.update_project_settings(&project.id, |settings| settings.compute = target)?;
+    status_for(Some(&project)).await
 }
 
 pub(crate) async fn configure(backend: &str, body: Value) -> Result<Value> {

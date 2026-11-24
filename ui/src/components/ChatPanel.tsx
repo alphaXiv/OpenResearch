@@ -1,3 +1,4 @@
+import type { LogSeek } from "../logWindow";
 import { useMachines } from "../machineSelection";
 import { downloadFile } from "../download";
 import { flushSync } from "react-dom";
@@ -31,16 +32,17 @@ import { chatSearchRanges } from "../chatSearch";
 import { ComposerProjectPicker } from "./ComposerProjectPicker";
 import { LibraryPicker } from "./LibraryPicker";
 import { ProjectInfoCard } from "./ProjectInfoCard";
-import { NoProjectGroupHeader, PendingProjectMove, ProjectProposalCard, projectLabel, projectProposal, useCreateProject, type ProjectProposal } from "./NoProject";
+import { PendingProjectMove, ProjectProposalCard, projectLabel, projectProposal, useCreateProject, type ProjectProposal } from "./NoProject";
 import { mutCreateScratchProject } from "../queries/projects";
+import { mutSetChatLitSources } from "../queries/settings";
 import { ProjectIconTile } from "./ProjectIcon";
-import { SessionHoverCard } from "./SessionHoverCard";
+import { CARD_FADE_MS, SessionHoverCard } from "./SessionHoverCard";
 import { AgentMessageCard } from "./AgentMessageCard";
 import { DelegateCard } from "./DelegateCard";
 import { EnvRequestCard } from "./EnvRequestCard";
-import { delegateStatus, delegatesOf, type DelegateStatus } from "../delegates";
+import { delegateAncestors, delegateModelLabel, delegateStatus, delegatesOf, type DelegateStatus } from "../delegates";
 import { taskLocation } from "../workspaceState";
-import { DONE_PREVIEW_HEIGHT, fitSidebarRows, sidebarGroup, sidebarRowHeight, type SidebarRow } from "../sidebarLayout";
+import { DONE_PREVIEW_HEIGHT, UNNAMED_GROUP, fitSidebarRows, sidebarGroup, sidebarRowHeight, type RailSection, type SidebarRow } from "../sidebarLayout";
 import { useVirtualizer, defaultRangeExtractor, elementScroll, measureElement as measureVirtualElement, type Range as VirtualRange } from "@tanstack/react-virtual";
 import { markLiveUpdate } from "../queries/live";
 import {
@@ -81,7 +83,7 @@ import {
   paperToken,
 } from "../fileMentions";
 import { m } from "../paraglide/messages.js";
-import { formatForDisplay, matchesKeyboardEvent, useHotkey } from "@tanstack/react-hotkeys";
+import { matchesKeyboardEvent, useHotkey } from "@tanstack/react-hotkeys";
 import { appHotkeys } from "../hotkeys";
 import { copyToClipboard } from "../clipboard";
 import { readClipboardImage } from "../clipboardImage";
@@ -107,6 +109,7 @@ import {
   FileText,
   FlaskConical,
   FolderPlus,
+  Plus,
   SquarePen,
   CircleCheck,
   Globe,
@@ -124,7 +127,6 @@ import {
   NotebookText,
   Paperclip,
   Pencil,
-  Plus,
   ScrollText,
   Search,
   SlidersHorizontal,
@@ -137,7 +139,6 @@ import {
 } from "lucide-react";
 
 import { BrandMark } from "./Wordmark";
-import { HarnessLogo, ModelMark } from "./HarnessLogo";
 import { chatStatus, chatStatusWorking, type ChatStatus } from "../chatStatus";
 import {
   type ChatSessionPatch,
@@ -167,7 +168,7 @@ import {
   type OrxSource,
   type Autonomy,
   type ChatSession,
-  type ChatActiveRun,
+  type SidebarChatCursor,
   type CitedMessage,
   type ChatSearchHit,
   type Harness,
@@ -175,6 +176,7 @@ import {
   type Project,
   type PromptAnswer,
   type RuntimeInfo,
+  type Run,
   type NativeChat,
   type SkillInfo,
   type StarterPrompt,
@@ -213,6 +215,9 @@ import {
 } from "../chatRecovery";
 import {
   attachmentToken,
+  isPictureType,
+  PICTURE_FILE,
+  withoutAttachmentTokens,
   citedAttachments,
   composerStashContent,
   mergeFailedComposer,
@@ -234,15 +239,23 @@ import {
 } from "../orxCommand";
 import { LitSourceLogo, parseOrxLit, paperUrl } from "./LitSourceLogo";
 import { FileScopeContext } from "./FileReference";
+import { FILE_CARD_CLASS, FileCardContent } from "./FileTypeIcon";
 import { FigureReveal, PaperShelf, pluralMessage, ReportCard, RunCard, SourceStrip, type ShelfPaper } from "./ResearchCards";
 import { discoveredPapers, linkedPapers, paperKey, type CitedPaper, type PaperMeta } from "../researchActivity";
-import { LitSourcesList } from "./LitSourcesPicker";
+import { ChatLitSources, useChatLitSources } from "./LitSourcesPicker";
+import type { LitSource } from "./LitSourceLogo";
 import { ChatImageScope, Md } from "./Md";
+import { ImageMenu } from "./ImageMenu";
 import { ChatLinksContext, type ChatLinks } from "./ChatLinks";
 import { CITED_ID, messageRef } from "../agentMessages";
 import { PlanStrip } from "./PlanStrip";
 import { useComposerFocus } from "./useComposerFocus";
-import { BackgroundTaskBanner, ExperimentRunBanner } from "./ExperimentRunBanner";
+import { RunBanner } from "./run/RunBanner";
+import { BackgroundTaskBanner } from "./BackgroundTaskBanner";
+import { cardSentence, runModel, sessionLeadRun, sessionRunMark } from "../runMonitor/model";
+import { Mark } from "./run/Mark";
+import { Sentence } from "./run/Sentence";
+import type { ShownRun } from "../runMonitor/types";
 import { SettingsHeader, harnessSetupPath, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
 import { MentionMenu, type MentionMatch } from "./MentionMenu";
@@ -926,7 +939,7 @@ const PROMPT_ACTIONS_CLASS_NAME = "prompt-actions flex flex-wrap gap-2";
 
 const NO_MESSAGES: ChatMessage[] = [];
 const EMPTY_SESSIONS: ChatSession[] = [];
-const EMPTY_RUNS: ChatActiveRun[] = [];
+const EMPTY_RUNS: ShownRun[] = [];
 type DelegateRow = { session: ChatSession; status: DelegateStatus };
 const EMPTY_DELEGATES: DelegateRow[] = [];
 const EMPTY_RECOVERY_OVERRIDES = {};
@@ -966,6 +979,8 @@ const GUIDE_LABELS: Record<string, [done: () => string, progress: () => string]>
   "orx-lit-review": [m.activity_guide_lit_review, m.activity_guide_lit_review_progress],
   "orx-logs": [m.activity_guide_logs, m.activity_guide_logs_progress],
   "orx-paper": [m.activity_guide_paper, m.activity_guide_paper_progress],
+  "orx-project-admin": [m.activity_guide_project, m.activity_guide_project_progress],
+  "orx-python-env": [m.activity_guide_python, m.activity_guide_python_progress],
   "orx-reports": [m.activity_guide_reports, m.activity_guide_reports_progress],
   "orx-results": [m.activity_guide_results, m.activity_guide_results_progress],
 };
@@ -1796,7 +1811,16 @@ function computeToolActivity(part: ChatPart): ToolActivity {
           litCall: litCall ?? undefined,
         };
       }
-      if (commandInvokesOrx(command, "exp\\s+run")) {
+      const runSegments = orxCommandSegments(command, "exp\\s+run");
+      if (runSegments.length > 0 && runSegments.every((segment) => orxArgv(segment.raw)?.includes("--estimate"))) {
+        return {
+          kind: "run",
+          label: m.activity_estimated_run(),
+          progressLabel: m.activity_estimating_run(),
+          litCall: litCall ?? undefined,
+        };
+      }
+      if (runSegments.length > 0) {
         return {
           kind: "run",
           label: m.chat_panel_started_an_experiment_run(),
@@ -2822,10 +2846,12 @@ function TurnStatusRow({
     : reportedCause && Object.hasOwn(FAILURE_LABEL, reportedCause) ? reportedCause
     : isModelAccessLimitPart(part) ? "model_unavailable" : usageLimited ? "usage_limit" : temporaryApiError ? "network" : undefined;
   const agent = input && failure?.agent(input);
-  const label = cause ? FAILURE_LABEL[cause](agent && (agent.profile?.name ?? harnessDisplayName(agent))) : m.chat_turn_incomplete();
+  const errorMessage = cleanToolError(part.state?.error || "");
+  const errorHeadline = errorMessage.split("\n", 1)[0].trim();
+  const label = cause ? FAILURE_LABEL[cause](agent && (agent.profile?.name ?? harnessDisplayName(agent)))
+    : errorHeadline || m.chat_turn_incomplete();
   const Icon = cause === "network" ? WifiOff : cause === "overloaded" ? Hourglass : cause === "sign_in" ? LogIn : cause === "usage_limit" ? Gauge : TriangleAlert;
   const quiet = cause === "network" || cause === "overloaded";
-  const errorMessage = cleanToolError(part.state?.error || "");
   const fixLabel = cause && FIX_LABEL[cause];
   const fix = fixLabel && input && failure?.fix(cause, input);
   // A usage-limited turn waits out nothing the button enforces: the provider,
@@ -2949,7 +2975,7 @@ function ToolRow({
       ) : (
         <ToolActivityIcon activity={activity} className="text-muted" />
       )}
-      <span className={`${TOOL_LINE_CLASS_NAME} ${failed ? "text-accent-red" : quiet ? "text-muted" : "text-subtext"}`}>
+      <span className={`${TOOL_LINE_CLASS_NAME} ${failed ? "text-accent-red group-hover/detail:text-text" : quiet ? "text-muted" : "text-subtext"}`}>
         <ToolActivityLabel
           activity={activity}
           onOpenFile={onOpenFile}
@@ -2974,15 +3000,18 @@ function ToolRow({
 
   return (
     <div data-part-id={part.id} className="tool-row tool-row-error flex flex-col min-w-0">
-      <div className="flex items-start gap-2 w-fit max-w-full py-1 px-1 min-w-0 rounded-sm">
+      <div
+        className="group/detail flex items-start gap-2 w-fit max-w-full py-1 px-1 min-w-0 rounded-sm cursor-pointer hover:bg-surface"
+        onClick={toggleUnlessControl(() => { expansionState?.set(key, !detailOpen); setDetailOpen(!detailOpen); })}
+      >
         {line}
         <button
           type="button"
-          className="tool-row-detail-toggle inline-flex h-6 shrink-0 items-center justify-center p-0.5 rounded-sm cursor-pointer hover:bg-surface"
+          data-row-toggle
+          className="tool-row-detail-toggle inline-flex h-6 shrink-0 items-center justify-center p-0.5 rounded-sm cursor-pointer"
           aria-expanded={detailOpen}
           aria-controls={detailId}
           aria-label={detailOpen ? m.a11y_hide_error_details({ activity: activity.label }) : m.a11y_show_error_details({ activity: activity.label })}
-          onClick={() => { expansionState?.set(key, !detailOpen); setDetailOpen(!detailOpen); }}
         >
           <ChevronRight size={16} className={`text-accent-red transition-transform duration-120 ease-standard ${detailOpen ? "rotate-90" : ""}`} />
         </button>
@@ -2996,6 +3025,15 @@ function ToolRow({
       )}
     </div>
   );
+}
+
+/** Toggles the row on click, unless a nested link or button without `data-row-toggle` was hit. */
+function toggleUnlessControl(toggle: () => void) {
+  return (event: React.MouseEvent<HTMLElement>) => {
+    const control = (event.target as Element).closest("a, button, [role='button']");
+    if (control && !control.hasAttribute("data-row-toggle")) return;
+    toggle();
+  };
 }
 
 /** Consecutive calls render as one Codex-style activity group: a readable
@@ -3124,7 +3162,10 @@ function ToolGroup({
 
   return (
     <div className="tool-group my-3.5 mx-0">
-      <div className={`tool-group-summary flex items-start gap-2 w-fit max-w-full py-1 px-1 text-base leading-6 text-start ${quiet && !pendingActivity ? "text-muted" : "text-subtext"}`}>
+      <div
+        className={`tool-group-summary flex items-start gap-2 w-fit max-w-full py-1 px-1 text-base leading-6 text-start cursor-pointer ${quiet && !pendingActivity ? "text-muted" : "text-subtext"}`}
+        onClick={toggleUnlessControl(toggle)}
+      >
         <ToolActivityIcon activity={iconActivity} className={shimmering ? "tool-running-shimmer-icon" : "text-muted"} />
         {pendingActivity ? (
           <span
@@ -3145,7 +3186,7 @@ function ToolGroup({
           <button
             type="button"
             className="tool-group-label min-w-0 whitespace-normal break-words cursor-pointer text-start"
-            onClick={toggle}
+            data-row-toggle
             aria-expanded={open}
           >
             {summaryLabel}
@@ -3154,7 +3195,7 @@ function ToolGroup({
         <button
           type="button"
           className="tool-group-chevron-button inline-flex h-6 shrink-0 items-center justify-center p-px cursor-pointer rounded-sm"
-          onClick={toggle}
+          data-row-toggle
           aria-expanded={open}
           aria-label={open ? m.chat_collapse_tool_activity() : m.chat_expand_tool_activity()}
         >
@@ -3444,15 +3485,16 @@ function PromptCard({
   const { id: elementId } = useContext(WorkspaceDomContext);
   const p = part.prompt;
   const [submitting, setSubmitting] = useState(false);
+  const allowRef = useRef<HTMLButtonElement>(null);
   if (!p) return null;
   // Read-only host (no onRespond): actions disabled or hidden, card visible.
   const done = !onRespond || submitting;
 
   const respond = async (answer: Omit<PromptAnswer, "promptId">) => {
-    if (!onRespond || submitting) return;
+    if (!onRespond || submitting) return false;
     setSubmitting(true);
     try {
-      await onRespond({ promptId: part.id, ...answer });
+      return await onRespond({ promptId: part.id, ...answer });
     } finally {
       setSubmitting(false);
     }
@@ -3624,9 +3666,15 @@ function PromptCard({
                 {m.chat_panel_deny()}
               </Button>
               <Button
+                ref={allowRef}
                 size="small"
                 variant="primary"
-                onClick={() => respond({ approve: true })}
+                // A declined confirmation remounts this button after its dialog let focus go.
+                onClick={() => void respond({ approve: true }).then((delivered) => {
+                  if (!delivered) requestAnimationFrame(() => {
+                    if (document.activeElement === document.body) allowRef.current?.focus();
+                  });
+                })}
               >
                 {m.chat_panel_allow()}
               </Button>
@@ -3658,8 +3706,8 @@ function messageHasVisibleContent(m: ChatMessage, activePermissionId?: string | 
  * path — composer keystrokes re-render ChatPanel itself, and the transcript
  * memo stops those from touching the rows at all. */
 /** Resolve an `image` (attachment) part into what the transcript renders: a
- * source URL, whether it's a PDF (file chip vs inline image), and a name. */
-function attachmentPartView(p: ChatPart, chatAttachmentUrl: (name: string) => string): { src: string; isPdf: boolean; name: string } {
+ * source URL, whether it's an image (inline image vs file chip), and a name. */
+function attachmentPartView(p: ChatPart, chatAttachmentUrl: (name: string) => string): { src: string; isImage: boolean; name: string } {
   const raw = p.text ?? "";
   const src = raw.startsWith("data:") ? raw : chatAttachmentUrl(raw);
   // Server file names embed the original after a `__` marker; optimistic parts
@@ -3670,9 +3718,10 @@ function attachmentPartView(p: ChatPart, chatAttachmentUrl: (name: string) => st
       ? raw.slice(raw.indexOf("__") + 2)
       : raw;
   const name = p.name || derived || "attachment";
-  const isPdf =
-    raw.startsWith("data:application/pdf") || /\.pdf$/i.test(name) || /\.pdf$/i.test(raw);
-  return { src, isPdf, name };
+  const isImage = raw.startsWith("data:")
+    ? isPictureType(raw.slice("data:".length, raw.indexOf(";")))
+    : PICTURE_FILE.test(raw);
+  return { src, isImage, name };
 }
 
 /** Where a chat moved to another agent, its model named as the picker names it. */
@@ -3890,8 +3939,10 @@ export const Message = memo(function Message({
     const attachments = message.parts
       .filter((p) => p.type === "image" && p.text)
       .map((part) => attachmentPartView(part, chatAttachmentUrl));
-    const images = attachments.filter((a) => !a.isPdf);
-    const files = attachments.filter((a) => a.isPdf);
+    // The agent reads where each attachment sits; the bubble shows the attachments themselves instead.
+    const shownText = attachments.length > 0 ? withoutAttachmentTokens(text) : text;
+    const images = attachments.filter((a) => a.isImage);
+    const files = attachments.filter((a) => !a.isImage);
     const annotations: ComposerAnnotation[] = message.parts
       .filter((part) => part.type === "annotation" && part.text)
       .map((part) => ({
@@ -3957,22 +4008,23 @@ export const Message = memo(function Message({
         )}
         <div dir="auto" className={`msg-user max-w-full ${USER_MESSAGE_BUBBLE_CLASS_NAME} [&_.skill-chip]:align-baseline [&_.context-pill]:border-border [&_.context-pill]:bg-highlight [&_.context-pill:hover]:bg-border`}>
           {replies?.questionById.has(message.id) && <div className="mb-1 truncate text-subtext">{replies.questionById.get(message.id)}</div>}
-          <MessageWithChips text={text} isCommand={isCommand} />
+          {shownText && <MessageWithChips text={shownText} isCommand={isCommand} />}
           {images.length > 0 && (
-            <div className="msg-images flex flex-wrap gap-1.5 mt-2 [&_img]:max-w-55 [&_img]:max-h-40 [&_img]:border [&_img]:border-border-variant [&_img]:rounded-xs [&_img]:block">
+            <div className="msg-images flex flex-wrap gap-1.5 mt-2 first:mt-0 [&_img]:max-w-55 [&_img]:max-h-40 [&_img]:border [&_img]:border-border-variant [&_img]:rounded-xs [&_img]:block">
               {images.map((a, i) => (
-                <a key={i} href={a.src} target="_blank" rel="noreferrer">
-                  <img src={a.src} alt={m.chat_attachment_alt()} />
-                </a>
+                <ImageMenu key={i} src={a.src} name={a.name}>
+                  <a href={a.src} target="_blank" rel="noreferrer">
+                    <img src={a.src} alt={a.name} />
+                  </a>
+                </ImageMenu>
               ))}
             </div>
           )}
           {files.length > 0 && (
-            <div className="msg-files flex flex-wrap gap-1.5 mt-2">
+            <div className="msg-files flex flex-wrap gap-1.5 mt-2 first:mt-0">
               {files.map((a, i) => (
-                <a key={i} className="msg-file inline-flex items-center gap-1.5 max-w-60 py-1.5 px-2.5 border border-border-variant rounded-sm text-text no-underline [&:hover]:border-border-hover-strong [&_span]:overflow-hidden [&_span]:text-ellipsis [&_span]:whitespace-nowrap" href={a.src} target="_blank" rel="noreferrer">
-                  <FileText size={16} />
-                  <span>{a.name}</span>
+                <a key={i} className={`msg-file no-underline [&:hover]:border-border-hover-strong ${FILE_CARD_CLASS}`} title={a.name} href={a.src} target="_blank" rel="noreferrer">
+                  <FileCardContent name={a.name} />
                 </a>
               ))}
             </div>
@@ -4001,7 +4053,10 @@ export const Message = memo(function Message({
   }
   const responses = responseMessages ?? [message];
   const localErrors = responses.filter((turn) => turn.id.startsWith(`${LOCAL_PREFIX}senderr-`));
-  const responseTurns = responses.filter((turn) => !turn.id.startsWith(`${LOCAL_PREFIX}senderr-`)).map(splitResponseTurn);
+  const sent = responses.filter((turn) => !turn.id.startsWith(`${LOCAL_PREFIX}senderr-`));
+  const responseTurns = sent.map(splitResponseTurn);
+  let latestResponse = sent.length - 1;
+  while (latestResponse > 0 && !startsTurn(sent[latestResponse])) latestResponse--;
   const turns = responseTurns.map((turn) => turn.message);
   const response = splitResponseParts(turns, predictTextTail, replies);
   const predictingAnswer = predictTextTail && response.answerMessageId === message.id;
@@ -4027,7 +4082,7 @@ export const Message = memo(function Message({
         onOpenSubagent,
         predictTextTail,
       }} />}
-      {responseTurns.map(({ message: turn, turnStatus, usageLimit, temporaryApiError }) => turnStatus && (
+      {responseTurns.map(({ message: turn, turnStatus, usageLimit, temporaryApiError }, index) => turnStatus && (
         <TurnStatusRow
           key={turn.id}
           part={turnStatus}
@@ -4035,8 +4090,8 @@ export const Message = memo(function Message({
           temporaryApiError={temporaryApiError}
           busy={busy}
           recovering={recoveringTurnId === turnStatus.state?.input?.turnId}
-          onRecover={onRecover}
-          failure={failure}
+          onRecover={index === latestResponse ? onRecover : undefined}
+          failure={index === latestResponse ? failure : undefined}
         />
       ))}
       {localErrors.map((turn) => (
@@ -4250,6 +4305,17 @@ function AssistantTurn({ messages, response, options }: {
       </div>
     </>
   );
+}
+
+const TURN_MARKER_TOOLS = new Set(["provider_switch", "compacted"]);
+
+/** Whether `message` belongs to a turn that takes an earlier failed turn's place: shell
+ * exchanges, local send errors, agent switches, compactions and standalone approvals start none. */
+function startsTurn(message: ChatMessage) {
+  if (message.id.startsWith(LOCAL_PREFIX)) return false;
+  if (message.role === "user") return !shellExchangePart(message);
+  return !message.parts.every((part) => (part.tool && TURN_MARKER_TOOLS.has(part.tool))
+    || (part.type === "prompt" && part.prompt?.kind === "permission"));
 }
 
 function shellExchangePart(message: ChatMessage): ChatPart | null {
@@ -4876,6 +4942,9 @@ const Transcript = memo(function Transcript({
     },
     [messages, activePermissionId],
   );
+  // A later agent turn takes a failed turn's place; shell exchanges and local send errors start none.
+  let latestTurnRow = visibleMessages.length - 1;
+  while (latestTurnRow > 0 && !visibleMessages[latestTurnRow].some(startsTurn)) latestTurnRow--;
   // Each delegate sits under the turn that started it: the last row begun before it was.
   const delegatesByRow = useMemo(() => {
     const rows = new Map<number, DelegateRow[]>();
@@ -4890,8 +4959,10 @@ const Transcript = memo(function Transcript({
     return rows;
   }, [visibleMessages, delegates]);
   const proposalsByRow = useMemo(() => new Map(visibleMessages.flatMap((group, row) => {
-    const proposals = group.flatMap((message) => message.parts.flatMap((part) =>
-      part.type === "tool" ? toolActivity(part).projectProposal ?? [] : []));
+    const proposals = group.flatMap((message) => message.parts.flatMap((part) => {
+      const proposal = part.type === "tool" ? toolActivity(part).projectProposal : undefined;
+      return proposal ? [{ id: part.id, proposal }] : [];
+    }));
     return proposals.length ? [[row, proposals] as const] : [];
   })), [visibleMessages]);
   // forkPositions indexes only non-local ids, so a local bearer would page as 0/1.
@@ -5099,7 +5170,8 @@ const Transcript = memo(function Transcript({
   useLayoutEffect(() => {
     const scroll = scrollRef.current;
     const row = focusedRow ? scroll?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(focusedRow)}"]`) : null;
-    if (!scroll || !row || row.contains(document.activeElement)) return;
+    // Focus in a row's portaled menu or viewer still marks the row, which keeps it mounted, but stays where it is.
+    if (!scroll || !row || row.contains(document.activeElement) || !scroll.contains(document.activeElement)) return;
     row.focus({ preventScroll: true });
     const viewport = scroll.getBoundingClientRect();
     const bounds = row.getBoundingClientRect();
@@ -5155,6 +5227,7 @@ const Transcript = memo(function Transcript({
         // A session owns one turn slot, so one recovery disables every status
         // card until its durable admission resolves.
         const recoveryDisabled = busy || recoveringTurnId !== null;
+        const latest = item.index === latestTurnRow;
         return (
           <div
             key={rowId}
@@ -5167,7 +5240,7 @@ const Transcript = memo(function Transcript({
             data-message-id={rowId}
             data-search-target={isTarget || undefined}
             ref={virtualizer.measureElement}
-            className={`absolute left-0 w-full pb-4 isolate outline-none before:-z-10 before:pointer-events-none before:absolute before:-inset-x-2 before:-top-2 before:bottom-2 before:rounded-lg before:bg-highlight before:transition-opacity before:duration-700 motion-reduce:before:transition-none after:pointer-events-none after:absolute after:-inset-x-2 after:-top-2 after:bottom-2 after:rounded-lg focus-visible:after:outline-2 focus-visible:after:outline-focus ${rowId === markedRowId ? "before:opacity-60" : "before:opacity-0"}`}
+            className={`absolute left-0 w-full isolate outline-none before:-z-10 before:pointer-events-none before:absolute before:-inset-x-2 before:-top-2 before:bottom-2 before:rounded-lg before:bg-highlight before:transition-opacity before:duration-700 motion-reduce:before:transition-none after:pointer-events-none after:absolute after:-inset-x-2 after:-top-2 after:bottom-2 after:rounded-lg focus-visible:after:outline-2 focus-visible:after:outline-focus ${rowId === markedRowId ? "before:opacity-60" : "before:opacity-0"}`}
             onClickCapture={(event) => {
               if (!(event.target instanceof Element) || !event.target.closest("[data-work-toggle]")) return;
               stickToBottom.current = false;
@@ -5180,6 +5253,8 @@ const Transcript = memo(function Transcript({
               if (!event.currentTarget.contains(event.relatedTarget)) setFocusedRow((current) => current === rowId ? null : current);
             }}
           >
+          {/* Bleeds to the pane edges: WebKit anchors a press beside an absolutely positioned row at the feed's first character. */}
+          <div className="-mx-[100vw] px-[100vw] pb-4">
           {/* NVDA leaves article names unspoken by default, so a hidden heading names the author. A reply nests under its prompt. */}
           {group[0].role === "user"
             ? <h5 id={headingId} className="sr-only select-none">{userLabel}</h5>
@@ -5213,8 +5288,8 @@ const Transcript = memo(function Transcript({
             onOpenSubagent={onOpenSubagent}
             busy={recoveryDisabled}
             recoveringTurnId={recoveringTurnId}
-            onRecover={onRecover}
-            failure={failure}
+            onRecover={latest ? onRecover : undefined}
+            failure={latest ? failure : undefined}
             skills={skills}
             predictTextTail={busy && m === activeMessage && m.role === "assistant"}
           />
@@ -5228,11 +5303,12 @@ const Transcript = memo(function Transcript({
           )}
           {proposalsByRow.has(item.index) && (
             <div className="mt-3 flex flex-col gap-2">
-              {proposalsByRow.get(item.index)?.map((proposal, index) => (
-                <ProjectProposalCard key={index} proposal={proposal} proposedAt={visibleMessages[item.index][0].createdAt} project={project} session={session} />
+              {proposalsByRow.get(item.index)?.map(({ id, proposal }) => (
+                <ProjectProposalCard key={id} id={id} proposal={proposal} proposedAt={visibleMessages[item.index][0].createdAt} project={project} session={session} />
               ))}
             </div>
           )}
+          </div>
           </div>
         );
       })}
@@ -5245,8 +5321,12 @@ const Transcript = memo(function Transcript({
 
 type SessionFilter = "active" | "archived" | "all";
 
-const SIDEBAR_GROUPINGS = ["projects", "list", "inbox"] as const;
+const SIDEBAR_GROUPINGS = ["projects", "inbox"] as const;
 type SidebarGrouping = (typeof SIDEBAR_GROUPINGS)[number];
+
+const WORKING_PLACES = ["above", "below", "bottom"] as const;
+/** Where the one-list rail puts Working: before the inbox, right after it, or held at the rail's foot with Done. */
+type WorkingPlace = (typeof WORKING_PLACES)[number];
 
 /** Whether the rail's current filter shows a session in this archived state. */
 const matchesFilter = (filter: SessionFilter, archived: boolean) =>
@@ -5259,26 +5339,30 @@ const SESSION_FILTERS: { id: SessionFilter; label: () => string; railLabel: () =
   { id: "all", label: m.chat_panel_all, railLabel: m.chat_all_sessions },
 ];
 
-/** Filter control beside the "Recents" label: Active (default) / Archived / All. */
-function SessionFilterMenu({
+/** The rail's view options: grouping, then the project filter or where Working sits. */
+function SidebarViewMenu({
   value,
   onChange,
   grouping,
   onGroupingChange,
+  workingPlace,
+  onWorkingPlaceChange,
 }: {
   value: SessionFilter;
   onChange: (next: SessionFilter) => void;
   grouping: SidebarGrouping;
   onGroupingChange: (next: SidebarGrouping) => void;
+  workingPlace: WorkingPlace;
+  onWorkingPlaceChange: (next: WorkingPlace) => void;
 }) {
   const { open, setOpen, ref } = usePopover();
   return (
     <div className="rail-filter relative inline-flex" ref={ref}>
-      <Tooltip interactive content={m.chat_panel_filter_sessions()}>
+      <Tooltip interactive content={m.sidebar_customize_view()}>
         <IconButton size="small"
           className="rail-filter-btn text-subtext"
-          active={grouping !== "inbox" && value !== "active"}
-          aria-label={m.chat_panel_filter_sessions()}
+          active={grouping === "projects" && value !== "active"}
+          aria-label={m.sidebar_customize_view()}
           onClick={() => setOpen((v) => !v)}
         >
           <SlidersHorizontal size={16} className="text-subtext" />
@@ -5289,12 +5373,25 @@ function SessionFilterMenu({
           <div className={MENU_LABEL}>{m.sidebar_group_by()}</div>
           {SIDEBAR_GROUPINGS.map((mode) => (
             <MenuItem key={mode} onClick={() => { onGroupingChange(mode); setOpen(false); }}>
-              <span>{mode === "projects" ? m.projects_home_projects() : mode === "list" ? m.sidebar_one_list() : m.sidebar_inbox()}</span>
+              <span>{mode === "projects" ? m.projects_home_projects() : m.sidebar_one_list()}</span>
               {grouping === mode && <Check size={14} />}
             </MenuItem>
           ))}
-          {grouping !== "inbox" && <>
-            <div className={MENU_SEPARATOR} />
+          <div className={MENU_SEPARATOR} />
+          {grouping === "inbox" ? <>
+            <div className={MENU_LABEL}>{m.sidebar_working_section()}</div>
+            {WORKING_PLACES.map((place) => {
+              const item = (
+                <MenuItem key={place} onClick={() => { onWorkingPlaceChange(place); setOpen(false); }}>
+                  <span>{place === "above" ? m.sidebar_working_above() : place === "below" ? m.sidebar_working_below() : m.sidebar_working_bottom()}</span>
+                  {workingPlace === place && <Check size={14} />}
+                </MenuItem>
+              );
+              return place === "bottom"
+                ? <Tooltip key={place} interactive side="end" content={m.sidebar_working_bottom_hint()} className="flex w-full rounded-sm [&>*]:flex-1">{item}</Tooltip>
+                : item;
+            })}
+          </> : <>
             <div className={MENU_LABEL}>{m.sidebar_filter()}</div>
             {SESSION_FILTERS.map((f) => (
               <MenuItem
@@ -5320,6 +5417,23 @@ function SessionFilterMenu({
 /** How long the reveal flag stays set: the 700ms sweep plus slack. After this
  * a remount (scrolling the rail, switching sessions) shows a static title. */
 const TITLE_REVEAL_CLEAR_MS = 1000;
+/** How long a session card holds for a pointer that has stopped on its way across the rows beside its own. */
+const CARD_AIM_MS = 150;
+
+type Point = { x: number; y: number };
+
+/** Shared by the sidebar's rows: until when a card opens at once, and the pointer on its way to an open one. */
+interface CardHover {
+  warmUntil: number;
+  aim: { owner: string; until: number; stop: () => void } | null;
+}
+
+/** Whether `p` lies in the triangle `a`, `b`, `c`. */
+function inTriangle(p: Point, a: Point, b: Point, c: Point): boolean {
+  const side = (u: Point, v: Point) => (v.x - u.x) * (p.y - u.y) - (v.y - u.y) * (p.x - u.x);
+  const signs = [side(a, b), side(b, c), side(c, a)];
+  return !(signs.some((sign) => sign < 0) && signs.some((sign) => sign > 0));
+}
 
 /** A session title that fades in behind a left-to-right mask when a
  * harness-generated one replaces the first-line placeholder. `animate` is false
@@ -5389,11 +5503,13 @@ function SessionRow({
   busy,
   waiting,
   runs,
+  leadRun = null,
   variant,
   revealTitle,
   onOpen,
   onRename,
   onSetArchived,
+  onMarkBelowDone,
   onMoveToProject,
   onDelete,
   onProjectSettings,
@@ -5402,7 +5518,7 @@ function SessionRow({
   project,
   projectName,
   harnessLogo,
-  cardWarmUntil,
+  cardHover,
 }: {
   session: ChatSession;
   project: Project;
@@ -5411,8 +5527,10 @@ function SessionRow({
   busy: boolean;
   /** An actionable question or held approval needs the user's attention. */
   waiting: boolean;
-  /** The chat's experiment runs in flight. */
-  runs: readonly ChatActiveRun[];
+  /** The chat's runs above its composer: live, flagged, or ended and not yet answered. */
+  runs: readonly ShownRun[];
+  /** The run an inbox card gives its middle line to. */
+  leadRun?: ShownRun | null;
   /** `inbox`: title and agent, then project and what the chat is doing. `done`: one line, restored from its hover button. */
   variant: "list" | "inbox" | "done";
   /** Nonce set while this row's freshly auto-generated title should play its
@@ -5422,6 +5540,8 @@ function SessionRow({
   onOpen: () => void;
   onRename: (title: string) => void;
   onSetArchived: (archived: boolean) => void;
+  /** Marks done the inbox chats listed below this one; only an inbox row in the inbox offers it. */
+  onMarkBelowDone?: () => void;
   /** Makes the chat a project of its own; labelled for a chat without one. */
   onMoveToProject?: { label: string; run: () => void };
   onDelete: () => void;
@@ -5430,48 +5550,119 @@ function SessionRow({
   modelName: string | null;
   projectName?: string;
   harnessLogo?: string;
-  cardWarmUntil: React.RefObject<number>;
+  cardHover: React.RefObject<CardHover>;
 }) {
+  const workspace = useWorkspace();
   const ref = useRef<HTMLDivElement>(null);
   const inbox = variant === "inbox";
   const plain = variant === "list";
   /** Where the row's menu opens: the cursor for a right-click, the kebab for a click. */
   const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
   const open = menuAt !== null;
-  const experimentRunning = runs.length > 0;
+  const runMark = sessionRunMark(runs, session.id);
+  const runFlag = runMark === "waiting" || runMark === "flagged";
+  const lead = inbox && leadRun && runModel({ item: leadRun, monitor: null, shown: false, agent: m.chat_the_agent(), now: Date.now(), nextRetryMs: null });
   const title = session.title?.trim() || m.chat_untitled();
-  const sessionDescription = `${title} · ${harnessLabel(session.harness, session.harnessName)}${modelName ? ` · ${modelName}` : ""}`;
+  const attention = runMark === "waiting" ? m.chat_run_needs_attention() : runMark === "flagged" ? m.chat_run_flagged() : waiting ? m.chat_panel_waiting_for_your_input() : null;
+  const sessionDescription = `${title} · ${harnessLabel(session.harness, session.harnessName)}${modelName ? ` · ${modelName}` : ""}${attention ? ` · ${attention}` : ""}`;
   const [editing, setEditing] = useState(false);
   // Seeded by startEditing() before the input mounts; "" is just a placeholder.
   const [draft, setDraft] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const titleRef = useRef<HTMLSpanElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
   const cardId = useId();
   const [anchor, setAnchor] = useState<DOMRect | null>(null);
+  /** How the card moves: fading in, appearing at once as the pointer slides over from a neighbour's, or fading out. */
+  const [cardMotion, setCardMotion] = useState<"enter" | "warm" | "leave">("enter");
+  const cardShown = anchor !== null && cardMotion !== "leave";
   const openTimer = useRef<number | undefined>(undefined);
   const closeTimer = useRef<number | undefined>(undefined);
   const pointerInside = useRef(false);
   const dismissed = useRef(false);
+
+  useLayoutEffect(() => {
+    const element = titleRef.current;
+    if (!element) return;
+
+    const measure = () => element.toggleAttribute("data-overflow", element.scrollWidth > element.clientWidth);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    if (element.firstElementChild) observer.observe(element.firstElementChild);
+    return () => observer.disconnect();
+  }, [title, editing, variant]);
 
   function closeCard() {
     window.clearTimeout(openTimer.current);
     window.clearTimeout(closeTimer.current);
     setAnchor(null);
   }
-  function showCard() {
-    if (!editing && !open && !dismissed.current) setAnchor(ref.current?.getBoundingClientRect() ?? null);
+  function showCard(motion: "enter" | "warm" = "enter") {
+    if (editing || open || dismissed.current) return;
+    window.clearTimeout(closeTimer.current);
+    setCardMotion(motion);
+    setAnchor(ref.current?.getBoundingClientRect() ?? null);
   }
-  function scheduleClose() {
+  function fadeCard() {
+    window.clearTimeout(openTimer.current);
+    window.clearTimeout(closeTimer.current);
+    setCardMotion("leave");
+    closeTimer.current = window.setTimeout(() => setAnchor(null), CARD_FADE_MS);
+  }
+  /** Whether keyboard focus is on the row or in its card, which holds the card open whatever the pointer does. */
+  function keyboardHeld() {
+    const focused = document.activeElement;
+    return Boolean(focused?.matches(":focus-visible") && (focused === ref.current || cardRef.current?.contains(focused)));
+  }
+  /** Fades the card once the pointer has had time to cross onto it, unless the keyboard holds it open. */
+  function scheduleClose(grace = 150) {
     window.clearTimeout(openTimer.current);
     window.clearTimeout(closeTimer.current);
     closeTimer.current = window.setTimeout(() => {
-      const focused = document.activeElement;
-      if (!pointerInside.current && focused !== ref.current && !cardRef.current?.contains(focused)) setAnchor(null);
-    }, 150);
+      if (!pointerInside.current && !keyboardHeld()) fadeCard();
+    }, grace);
+  }
+  /**
+   * Holds the card while the pointer stays in the triangle between where it left the row and the card's near edge,
+   * so a diagonal path over the rows beside this one reaches the card instead of opening theirs.
+   */
+  function aimAt(from: Point, card: DOMRect) {
+    const edge: [Point, Point] = from.x <= card.left ? [{ x: card.left, y: card.top }, { x: card.left, y: card.bottom }]
+      : from.x >= card.right ? [{ x: card.right, y: card.top }, { x: card.right, y: card.bottom }]
+      : from.y <= card.top ? [{ x: card.left, y: card.top }, { x: card.right, y: card.top }]
+      : [{ x: card.left, y: card.bottom }, { x: card.right, y: card.bottom }];
+    const aim = {
+      owner: session.id,
+      until: 0,
+      stop: () => {
+        document.removeEventListener("mousemove", move);
+        if (cardHover.current.aim === aim) cardHover.current.aim = null;
+      },
+    };
+    const hold = () => {
+      aim.until = Date.now() + CARD_AIM_MS;
+      scheduleClose(CARD_AIM_MS);
+    };
+    const move = (event: MouseEvent) => {
+      if (inTriangle({ x: event.clientX, y: event.clientY }, from, ...edge)) return hold();
+      aim.stop();
+      if (keyboardHeld()) return;
+      if (event.target instanceof Element && event.target.closest(".session-row")) closeCard();
+      else fadeCard();
+    };
+    cardHover.current.aim?.stop();
+    cardHover.current.aim = aim;
+    document.addEventListener("mousemove", move);
+    hold();
+  }
+  function stopAim() {
+    if (cardHover.current.aim?.owner === session.id) cardHover.current.aim.stop();
   }
   useEffect(() => () => {
     window.clearTimeout(openTimer.current);
     window.clearTimeout(closeTimer.current);
+    stopAim();
   }, []);
   useEffect(() => {
     if (!anchor) return;
@@ -5513,6 +5704,12 @@ function SessionRow({
     }
   }, [editing]);
 
+  const flagMark = runFlag && !editing && (
+    <Tooltip content={runMark === "waiting" ? m.chat_run_needs_attention() : m.chat_run_flagged()} className="shrink-0 text-ink-amber">
+      <TriangleAlert size={14} aria-hidden="true" />
+    </Tooltip>
+  );
+
   const titleInput = (
     <input
       ref={inputRef}
@@ -5546,33 +5743,46 @@ function SessionRow({
       tabIndex={0}
       data-sidebar-keyboard-row
       aria-label={sessionDescription}
-      aria-describedby={anchor ? cardId : undefined}
+      aria-describedby={cardShown ? cardId : undefined}
+      // The card is a portal inside this row, so React reports the pointer entering and leaving the two as one.
       onMouseEnter={() => {
+        stopAim();
         pointerInside.current = true;
         dismissed.current = false;
         window.clearTimeout(closeTimer.current);
         if (!editing && !open) {
-          if (Date.now() < cardWarmUntil.current) showCard();
+          // Read what the card shows while the pointer settles, so it opens whole instead of growing as it loads.
+          const { queryClient, queries } = workspace;
+          void queryClient.prefetchQuery(queries.getSessionExperimentsQuery(session.id));
+          for (const { run } of runs) if (run.monitor) void queryClient.prefetchQuery(queries.getRunMonitorQuery(run.id));
+          // While the pointer crosses this row on its way to another's card, this one waits for it to settle.
+          const settle = () => {
+            const wait = (cardHover.current.aim?.until ?? 0) - Date.now();
+            if (wait > 0) openTimer.current = window.setTimeout(settle, wait);
+            else showCard("warm");
+          };
+          if (cardHover.current.aim) settle();
+          else if (Date.now() < cardHover.current.warmUntil) showCard("warm");
           else openTimer.current = window.setTimeout(showCard, 350);
         }
       }}
       onMouseLeave={(event) => {
-        if (anchor) cardWarmUntil.current = Date.now() + 500;
+        const card = cardShown && cardRef.current?.getBoundingClientRect();
+        if (cardShown) cardHover.current.warmUntil = Date.now() + 500;
         pointerInside.current = false;
         dismissed.current = false;
-        if (event.relatedTarget instanceof Element && event.relatedTarget.closest(".session-row")) closeCard();
+        if (card) aimAt({ x: event.clientX, y: event.clientY }, card);
         else scheduleClose();
       }}
       onFocus={(event) => {
-        if (event.target === event.currentTarget && !editing && !open) {
-          showCard();
-        }
+        // A click focuses the row too; only the keyboard's focus opens the card.
+        if (event.target === event.currentTarget && event.currentTarget.matches(":focus-visible")) showCard();
       }}
       onBlur={(event) => {
         if (!ref.current?.contains(event.relatedTarget) && !cardRef.current?.contains(event.relatedTarget)) dismissed.current = false;
         scheduleClose();
       }}
-      className={`session-row relative flex items-center gap-2 w-full ${inbox ? "inbox h-12.5" : variant === "done" ? "h-8" : "h-8.5"} text-start px-2.25 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:size-6 [&_.session-menu-btn]:-mx-1 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-within]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&.card-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-within)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-accent-teal [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-accent-blue [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:absolute [&_.session-title-input]:inset-0 [&_.session-title-input]:size-full [&_.session-title-input]:py-0 [&_.session-title-input]:ps-0 [&_.session-title-input]:pe-[9px] [&_.session-title-input]:indent-[9px] [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-focus-border [&_.session-title-input]:rounded-md [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden [&_.session-done-btn]:hidden [&:hover_.session-done-btn]:inline-flex [&:focus-visible_.session-done-btn]:inline-flex [&_.session-done-btn:focus-visible]:inline-flex [&_.session-done-btn:focus-within]:inline-flex [&:has(.session-done-btn:focus-within)_.session-logo]:hidden [&.card-open_.session-done-btn]:inline-flex [&:has(.session-done-btn):hover_.session-logo]:hidden [&:has(.session-done-btn):focus-visible_.session-logo]:hidden [&:has(.session-done-btn:focus-visible)_.session-logo]:hidden [&.card-open:has(.session-done-btn)_.session-logo]:hidden [&.editing_.session-done-btn]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""} ${anchor ? "card-open" : ""}  ${
+      className={`session-row relative flex items-center gap-2 w-full ${inbox ? `inbox ${lead ? "h-17.5" : "h-12.5"}` : variant === "done" ? "h-8" : "h-8.5"} text-start px-2.25 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title[data-overflow]]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:size-6 [&_.session-menu-btn]:-mx-1 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-within]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&.card-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-within)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-accent-teal [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-accent-blue [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:absolute [&_.session-title-input]:inset-0 [&_.session-title-input]:size-full [&_.session-title-input]:py-0 [&_.session-title-input]:ps-0 [&_.session-title-input]:pe-[9px] [&_.session-title-input]:indent-[9px] [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-focus-border [&_.session-title-input]:rounded-md [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden [&_.session-done-btn]:hidden [&:hover_.session-done-btn]:inline-flex [&:focus-visible_.session-done-btn]:inline-flex [&_.session-done-btn:focus-visible]:inline-flex [&_.session-done-btn:focus-within]:inline-flex [&:has(.session-done-btn:focus-within)_.session-logo]:hidden [&.card-open_.session-done-btn]:inline-flex [&:has(.session-done-btn):hover_.session-logo]:hidden [&:has(.session-done-btn):focus-visible_.session-logo]:hidden [&:has(.session-done-btn:focus-visible)_.session-logo]:hidden [&.card-open:has(.session-done-btn)_.session-logo]:hidden [&.editing_.session-done-btn]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""} ${cardShown ? "card-open" : ""}  ${
         editing ? "editing" : ""
         }`}
       onContextMenu={(e) => {
@@ -5594,7 +5804,7 @@ function SessionRow({
         // rename input are descendants, and preventDefault here would cancel
         // their activation.
         if (e.target !== e.currentTarget) return;
-        if (e.key === "Tab" && !e.shiftKey && anchor && cardRef.current) {
+        if (e.key === "Tab" && !e.shiftKey && cardShown && cardRef.current) {
           e.preventDefault();
           cardRef.current.focus();
         } else if (e.key === "Enter" || e.key === " ") {
@@ -5610,10 +5820,11 @@ function SessionRow({
       {variant === "done" ? <>
         <ProjectIconTile project={project} size="sm" />
         {editing ? titleInput : (
-          <span className={`session-title ${unread ? "text-title-unread" : "text-title-read"}`} onDoubleClick={startEditing}>
-            <TitleReveal key={revealTitle ?? "static"} title={title} animate={revealTitle !== undefined} />
+          <span ref={titleRef} className={`session-title ${runFlag ? "text-ink-amber" : unread ? "text-title-unread" : "text-title-read"}`} onDoubleClick={startEditing}>
+            <span className="inline-block align-top"><TitleReveal key={revealTitle ?? "static"} title={title} animate={revealTitle !== undefined} /></span>
           </span>
         )}
+        {flagMark}
         {!editing && <span className="session-logo shrink-0 text-xs tabular-nums text-muted">{timeAgo(session.updatedAt)}</span>}
         {!editing && (
           <Tooltip content={m.chat_inbox_restore()} className="session-done-btn -my-1 -me-1 shrink-0">
@@ -5634,15 +5845,11 @@ function SessionRow({
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <div className="flex items-center gap-2">
             {editing ? titleInput : (
-              <span className={`session-title ${unread || waiting ? "text-title-unread" : "text-title-read"}`} onDoubleClick={startEditing}>
-                <TitleReveal key={revealTitle ?? "static"} title={title} animate={revealTitle !== undefined} />
+              <span ref={titleRef} className={`session-title ${runFlag ? "text-ink-amber" : unread || waiting ? "text-title-unread" : "text-title-read"}`} onDoubleClick={startEditing}>
+                <span className="inline-block align-top"><TitleReveal key={revealTitle ?? "static"} title={title} animate={revealTitle !== undefined} /></span>
               </span>
             )}
-            <span className="session-logo inline-flex w-4 shrink-0 items-center justify-center">
-              {session.model
-                ? <ModelMark model={{ id: session.model, displayName: modelName ?? undefined }} harness={session.harness} size={14} />
-                : <HarnessLogo harness={session.harness} logo={harnessLogo} size={14} />}
-            </span>
+            {flagMark}
             {!session.archived && !editing && (
               <button
                 className="session-done-btn -my-1 -me-1 h-6 shrink-0 items-center gap-1 rounded-sm px-1.5 text-xs text-subtext hover:bg-panel hover:text-text"
@@ -5658,30 +5865,40 @@ function SessionRow({
               </button>
             )}
           </div>
-          <div className="flex items-center gap-2 text-xs text-subtext">
+          {lead && (
+            <div className={`flex h-4 min-w-0 items-center gap-1.5 text-xs ${lead.tone === "flag" ? "text-ink-amber" : "text-ink-subtext"}`}>
+              {lead.tone !== "flag" && <span className="flex w-4 shrink-0 justify-center"><Mark tone={lead.tone} live={lead.live} label={lead.status} /></span>}
+              <span dir="auto" className="truncate"><Sentence text={cardSentence(lead)} tone={lead.tone} /></span>
+            </div>
+          )}
+          <div className={`${lead ? "mt-0.5" : ""} flex items-center gap-2 text-xs text-subtext`}>
             <span className="flex min-w-0 flex-1 items-center gap-1.5">
               <ProjectIconTile project={project} size="sm" />
-              {!project.scratch && <span className="truncate">{projectName}</span>}
+              {!project.unnamed && <span className="truncate">{projectName}</span>}
             </span>
             <InboxStatus status={chatStatus(session, busy, waiting, runs)} unread={unread} />
           </div>
         </div>
-      ) : (
-        <span className="session-title" onDoubleClick={startEditing}>
-          <TitleReveal
-            key={revealTitle ?? "static"}
-            title={title}
-            animate={revealTitle !== undefined}
-          />
+      ) : <>
+        {project.unnamed && <ProjectIconTile project={project} size="sm" />}
+        <span ref={titleRef} className={`session-title ${attention ? "text-ink-amber" : ""}`} onDoubleClick={startEditing}>
+          <span className="inline-block align-top">
+            <TitleReveal
+              key={revealTitle ?? "static"}
+              title={title}
+              animate={revealTitle !== undefined}
+            />
+          </span>
         </span>
-      )}
-      {plain && experimentRunning && !editing && (
+      </>}
+      {plain && runMark === "running" && !editing && (
         <Tooltip content={m.chat_experiment_running()} className="shrink-0 text-accent-green">
           <FlaskConical size={14} className="motion-safe:animate-[or-experiment-pulse_3s_ease-in-out_infinite]" aria-label={m.chat_experiment_running()} />
         </Tooltip>
       )}
+      {plain && flagMark}
       {plain && waiting && !editing && (
-        <Tooltip content={m.chat_panel_waiting_for_your_input()} className="shrink-0 text-accent-amber">
+        <Tooltip content={m.chat_panel_waiting_for_your_input()} className="shrink-0 text-ink-amber">
           <HelpCircle size={14} aria-hidden="true" />
         </Tooltip>
       )}
@@ -5709,15 +5926,14 @@ function SessionRow({
       {anchor && !open && !editing && (
         <SessionHoverCard
           session={session}
+          runs={runs}
+          motion={cardMotion}
           modelName={modelName}
-          projectName={projectName}
           harnessLogo={harnessLogo}
           anchor={anchor}
           cardId={cardId}
           cardRef={cardRef}
           container={ref.current?.closest(".mobile-rail-dialog") ?? document.body}
-          onEnter={() => { pointerInside.current = true; window.clearTimeout(closeTimer.current); }}
-          onLeave={() => { cardWarmUntil.current = Date.now() + 500; pointerInside.current = false; scheduleClose(); }}
           onOpenExperiment={(projectId, experimentId) => { closeCard(); onOpenExperiment(projectId, experimentId); }}
           onReturnToRow={() => ref.current?.focus()}
           onContinue={() => {
@@ -5738,24 +5954,26 @@ function SessionRow({
           onClose={() => setMenuAt(null)}
           onRename={startEditing}
           onSetArchived={() => onSetArchived(!session.archived)}
+          onMarkBelowDone={onMarkBelowDone}
           onMoveToProject={onMoveToProject}
-          onProjectSettings={project.scratch ? undefined : onProjectSettings}
+          onProjectSettings={project.unnamed ? undefined : onProjectSettings}
           onDelete={onDelete}
         />
       )}
-      <EscapeScope enabled={!!anchor && !editing && !open} exclusive={false} onEscape={() => { dismissed.current = true; if (cardRef.current?.contains(document.activeElement)) ref.current?.focus(); closeCard(); }} />
+      <EscapeScope enabled={cardShown && !editing && !open} exclusive={false} onEscape={() => { dismissed.current = true; if (cardRef.current?.contains(document.activeElement)) ref.current?.focus(); fadeCard(); }} />
     </div>
   );
 }
 
 /** A chat's actions, opened at a point: the cursor, or below the row's kebab. */
-function SessionMenu({ at, label, archiveLabel, onClose, onRename, onSetArchived, onMoveToProject, onProjectSettings, onDelete }: {
+function SessionMenu({ at, label, archiveLabel, onClose, onRename, onSetArchived, onMarkBelowDone, onMoveToProject, onProjectSettings, onDelete }: {
   at: { x: number; y: number };
   label: string;
   archiveLabel: string;
   onClose: () => void;
   onRename: () => void;
   onSetArchived: () => void;
+  onMarkBelowDone?: () => void;
   onMoveToProject?: { label: string; run: () => void };
   /** Absent for a chat without a project, which has no settings of its own. */
   onProjectSettings?: () => void;
@@ -5783,6 +6001,7 @@ function SessionMenu({ at, label, archiveLabel, onClose, onRename, onSetArchived
             >
               <Menu.Item nativeButton render={item} onClick={onRename}>{m.chat_panel_rename()}</Menu.Item>
               <Menu.Item nativeButton render={item} onClick={onSetArchived}>{archiveLabel}</Menu.Item>
+              {onMarkBelowDone && <Menu.Item nativeButton render={item} onClick={onMarkBelowDone}>{m.chat_inbox_mark_below_done()}</Menu.Item>}
               {onMoveToProject && <Menu.Item nativeButton render={item} onClick={onMoveToProject.run}>{onMoveToProject.label}</Menu.Item>}
               {onProjectSettings && <Menu.Item nativeButton render={item} onClick={onProjectSettings}>{m.sidebar_project_settings()}</Menu.Item>}
               <Menu.Separator className="my-1 border-t border-border" />
@@ -5804,12 +6023,16 @@ interface SidebarActions {
   openSession: (session: ChatSession, project: Project) => void;
   openExperiment: (session: ChatSession, projectId: string, experimentId: string) => void;
   rename: (session: ChatSession, title: string) => void;
-  setArchived: (session: ChatSession, archived: boolean) => void;
+  setArchived: (session: ChatSession, archived: boolean, working: boolean) => void;
+  markBelowDone: (session: ChatSession) => void;
+  markIdleDone: () => Promise<void>;
   moveToProject: (session: ChatSession, project: Project) => void;
   remove: (session: ChatSession) => void;
 }
 
 const RAIL_MOVE_MS = 380;
+/** Whether a rail layout holds chats yet, rather than only its loading or empty state. */
+const railSettled = (layout: Map<string, { row: SidebarRow }>) => [...layout.values()].some(({ row }) => "session" in row);
 const RAIL_FADE_MS = 180;
 /** Eases in gently, then settles on a long tail. */
 const RAIL_CURVE = [0.47, 0.44, 0, 1] as const;
@@ -5855,13 +6078,17 @@ const SidebarProjectCard = memo(function SidebarProjectCard({
 const SidebarSessionRow = memo(function SidebarSessionRow({
   actions,
   project,
+  markBelowDone,
   ...row
-}: Omit<React.ComponentProps<typeof SessionRow>, "onOpen" | "onOpenExperiment" | "onRename" | "onSetArchived" | "onMoveToProject" | "onDelete" | "onProjectSettings"> & {
+}: Omit<React.ComponentProps<typeof SessionRow>, "onOpen" | "onOpenExperiment" | "onRename" | "onSetArchived" | "onMarkBelowDone" | "onMoveToProject" | "onDelete" | "onProjectSettings"> & {
   actions: React.RefObject<SidebarActions>;
   project: Project;
+  /** Whether the row sits in the inbox section, whose menu can mark the chats below it done. */
+  markBelowDone: boolean;
 }) {
   useLocale();
   const { session } = row;
+  const working = row.variant !== "list" && chatStatusWorking(chatStatus(session, row.busy, row.waiting, row.runs));
   return (
     <SessionRow
       {...row}
@@ -5869,7 +6096,8 @@ const SidebarSessionRow = memo(function SidebarSessionRow({
       onOpen={() => actions.current.openSession(session, project)}
       onOpenExperiment={(projectId, experimentId) => actions.current.openExperiment(session, projectId, experimentId)}
       onRename={(title) => actions.current.rename(session, title)}
-      onSetArchived={(archived) => actions.current.setArchived(session, archived)}
+      onSetArchived={(archived) => actions.current.setArchived(session, archived, working)}
+      onMarkBelowDone={markBelowDone ? () => actions.current.markBelowDone(session) : undefined}
       onMoveToProject={session.pendingProject ? undefined : {
         label: project.scratch ? m.create_project_menu() : m.create_project_move_menu(),
         run: () => actions.current.moveToProject(session, project),
@@ -5901,6 +6129,29 @@ const STARTER_TONES = [
 const STARTER_GRID_CLASS =
   "mt-7 grid w-full max-w-readable grid-cols-1 gap-3 sm:grid-cols-2";
 
+/** An empty picture or PDF would fail the agent's read, and can break its session. */
+const isEmptyMedia = (file: File) => file.size === 0 && (isPictureType(file.type) || file.type === "application/pdf");
+
+/** A file as a data URL; a picture is also decoded, so its chip shows at full size the moment it mounts. */
+function readAttachment(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const { result } = reader;
+      if (typeof result !== "string") return reject(new Error(`unexpected read result for ${file.name}`));
+      // An empty file reads as a bare `data:`; the send path needs the comma before its (empty) base64.
+      if (!result.includes(",")) return resolve(`data:${file.type || "application/octet-stream"};base64,`);
+      if (!isPictureType(file.type)) return resolve(result);
+      const preview = new Image();
+      preview.src = result;
+      // A failed decode still attaches; the chip shows whatever the browser can.
+      preview.decode().catch(() => {}).finally(() => resolve(result));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error(`could not read ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
 export function ChatPanel({
   projectId,
   projectName,
@@ -5915,11 +6166,12 @@ export function ChatPanel({
   onCloseMobileRail,
   contentInert = false,
   onShowRail,
-  onNewProject,
+  onImportProject,
   mainView,
   onSelectMainView,
   onOpenFile,
   onOpenRun,
+  onOpenRunPage,
   runExperimentName,
   chatInfo,
   onOpenMessage,
@@ -5963,7 +6215,8 @@ export function ChatPanel({
   contentInert?: boolean;
   /** Reopen the rail (from the chat header's sidebar icon). */
   onShowRail: () => void;
-  onNewProject?: () => void;
+  /** Opens the form to start the project from a paper, a folder or an .orx file, keeping the unsent `draft`. */
+  onImportProject?: (draft: string) => void;
   /** Run a harness setup command (`path` is its setup route) in the right panel's terminal tab. */
   onRunSetup?: (command: string, path: string) => void;
   /** Settings sections replace chat; Artifacts remains a right-panel tool. */
@@ -5980,9 +6233,10 @@ export function ChatPanel({
     ref: string | undefined,
     intent: TabOpenIntent,
   ) => void;
-  /** Open a run's logs in the right pane (agent-emitted `<run>` evidence chips).
+  /** Open a run's logs in the right pane (agent-emitted `<run>` evidence chips), at `seek` when given.
    * Run ids are globally unique, so no session context is needed. */
-  onOpenRun?: OpenTranscriptTarget;
+  onOpenRun?: (runId: string, intent: TabOpenIntent, seek?: LogSeek) => void;
+  onOpenRunPage?: (run: Run, intent: TabOpenIntent) => void;
   /** Resolve a run to the experiment name shown on tool activity links. */
   runExperimentName?: (runId: string) => string;
   /** A chat in this project, or undefined for one elsewhere. */
@@ -6022,7 +6276,8 @@ export function ChatPanel({
   onActiveSessionChange: (sessionId: string | null, options?: { replace?: boolean; projectId?: string }) => void;
   /** Database-backed selection used to seed new chat sessions. */
   preferredAgent: ModelSelection | null;
-  onStartHarnessDraft?: () => void;
+  /** Opens the main draft to start `agent`, which it starts with over the project's. */
+  onStartHarnessDraft?: (agent: ModelSelection) => void;
   onPreferredAgentChange: (selection: ModelSelection) => Promise<void>;
   preferredAutonomy: Autonomy;
   onPreferredAutonomyChange: (autonomy: Autonomy) => void;
@@ -6047,7 +6302,8 @@ export function ChatPanel({
     listProjectActivityQuery,
     listChatSessionsQuery,
     listSidebarChatSessionsQuery,
-    listChatActiveRunsQuery,
+    readSidebarChatPage,
+    listChatShownRunsQuery,
     getHarnessesQuery,
     getUiStateQuery,
     getSkillsQuery,
@@ -6073,12 +6329,23 @@ export function ChatPanel({
 
   const navigate = useNavigate();
   const createProject = useCreateProject();
-  const { data: sidebarProjects = [] } = useQuery({ ...listProjectsQuery(), enabled: !embedded });
-  const latestProject = sidebarProjects.reduce<Project | undefined>((latest, project) => project.scratch || (latest && project.updatedAt <= latest.updatedAt) ? latest : project, undefined);
+  const { data: sidebarProjects = [], isSuccess: projectsLoaded } = useQuery({ ...listProjectsQuery(), enabled: !embedded });
   const { data: projectActivity = [] } = useQuery({ ...listProjectActivityQuery(), enabled: !embedded });
-  const [sidebarGrouping, setSidebarGrouping] = useState<SidebarGrouping>(() => {
-    try { return SIDEBAR_GROUPINGS.find((mode) => mode === localStorage.getItem("sidebar-grouping")) ?? "projects"; }
-    catch { return "projects"; }
+  // Null until chosen: the inbox for someone new, the project list they knew for someone who used orx before it.
+  const [storedGrouping] = useState<string | null>(() => {
+    try {
+      const stored = localStorage.getItem("sidebar-grouping");
+      // Someone already on the inbox needs no introduction to it.
+      if (stored && stored !== "projects" && !localStorage.getItem("sidebar-inbox-intro")) localStorage.setItem("sidebar-inbox-intro", "seen");
+      return stored;
+    } catch { return "inbox"; }
+  });
+  const [sidebarGrouping, setSidebarGrouping] = useState<SidebarGrouping>(() =>
+    storedGrouping === null ? "projects" : SIDEBAR_GROUPINGS.find((mode) => mode === storedGrouping) ?? "inbox");
+  const [groupingChosen, setGroupingChosen] = useState(storedGrouping !== null);
+  const [workingPlace, setWorkingPlace] = useState<WorkingPlace>(() => {
+    try { return WORKING_PLACES.find((place) => place === localStorage.getItem("sidebar-working-place")) ?? "above"; }
+    catch { return "above"; }
   });
   const [collapsedInbox, setCollapsedInbox] = useState<string[]>(() => {
     try {
@@ -6104,7 +6371,7 @@ export function ChatPanel({
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>("active");
   const [sidebarExpandedAll, setSidebarExpandedAll] = useState(false);
   const railBodyRef = useRef<HTMLDivElement>(null);
-  const cardWarmUntil = useRef(0);
+  const cardHover = useRef<CardHover>({ warmUntil: 0, aim: null });
   const [railHeight, setRailHeight] = useState(0);
   const [focusedSidebarRow, setFocusedSidebarRow] = useState<string | null>(null);
   const [chatLimits, setChatLimits] = useState<Record<string, number>>({});
@@ -6121,26 +6388,20 @@ export function ChatPanel({
   const recentActivity = new Map(projectActivity.map((activity) => [activity.projectId, activity.lastActivityAt]));
   const byRecency = (a: Project, b: Project) => Math.max(recentActivity.get(b.id) ?? 0, b.updatedAt) - Math.max(recentActivity.get(a.id) ?? 0, a.updatedAt);
   const currentProject = sidebarProjects.find((project) => project.id === projectId);
-  // Each chat without a project has a scratch project of its own; the newest one stands for the group.
+  // A project nobody named holds one chat, so it lists as a plain chat above the projects, newest first.
   const chatCounts = new Map(projectActivity.map((activity) => [activity.projectId, activity.totalAgents]));
-  const scratchProjects = sidebarProjects.filter((project) => project.scratch && (project.id === projectId || chatCounts.get(project.id))).sort(byRecency);
-  const scratchGroup = currentProject?.scratch ? currentProject : scratchProjects[0];
-  // Chats without a project stay on top, so opening one never reshuffles the projects below.
-  const sortedProjects = [
-    ...(scratchGroup ? [scratchGroup] : []),
-    ...sidebarProjects.filter((project) => !project.scratch)
-      .sort((a, b) => Number(pinnedProjects.includes(b.id)) - Number(pinnedProjects.includes(a.id)) || byRecency(a, b)),
-  ];
+  const unnamedProjects = sidebarProjects.filter((project) => project.unnamed && (project.id === projectId || chatCounts.get(project.id))).sort(byRecency);
+  const sortedProjects = sidebarProjects.filter((project) => !project.unnamed)
+    .sort((a, b) => Number(pinnedProjects.includes(b.id)) - Number(pinnedProjects.includes(a.id)) || byRecency(a, b));
   const candidateLimit = sidebarGrouping !== "projects" || sidebarExpanded ? sortedProjects.length : Math.max(1, Math.ceil(railHeight / 36));
   let shownProjects = sortedProjects.slice(0, candidateLimit);
-  const shownCurrent = currentProject?.scratch ? scratchGroup : currentProject;
-  if (shownCurrent && !shownProjects.includes(shownCurrent)) {
-    shownProjects = [...shownProjects.slice(0, candidateLimit - 1), shownCurrent];
+  if (currentProject && !currentProject.unnamed && !shownProjects.includes(currentProject)) {
+    shownProjects = [...shownProjects.slice(0, candidateLimit - 1), currentProject];
   }
-  const scratchLimit = chatLimits.scratch ?? 6;
-  const queriedScratch = scratchProjects.slice(0, scratchLimit);
-  if (currentProject?.scratch && !queriedScratch.includes(currentProject)) queriedScratch.push(currentProject);
-  const queriedProjects = sidebarGrouping === "projects" ? shownProjects.flatMap((project) => project.scratch ? queriedScratch : [project]) : [];
+  const unnamedLimit = chatLimits[UNNAMED_GROUP] ?? 6;
+  const shownUnnamed = unnamedProjects.slice(0, unnamedLimit);
+  if (currentProject?.unnamed && !shownUnnamed.includes(currentProject)) shownUnnamed.push(currentProject);
+  const queriedProjects = sidebarGrouping === "projects" ? [...shownUnnamed, ...shownProjects] : [];
   const projectSessionsQueries = useQueries({
     queries: queriedProjects.map((project) => ({
       ...listChatSessionsQuery(project.id),
@@ -6148,9 +6409,18 @@ export function ChatPanel({
     })),
   });
   const flatSessions = useInfiniteQuery({
-    ...listSidebarChatSessionsQuery(sidebarGrouping === "inbox" ? "active" : sessionFilter),
+    ...listSidebarChatSessionsQuery("active"),
     enabled: !embedded && sidebarGrouping !== "projects",
   });
+  useEffect(() => {
+    if (groupingChosen || !projectsLoaded) return;
+    // A project older than a day was made before this choice existed; onboarding's, and its demo seeded hours back, are newer.
+    const returning = sidebarProjects.some((project) => project.createdAt < Date.now() - 24 * 60 * 60 * 1000);
+    const grouping = returning ? "projects" : "inbox";
+    try { localStorage.setItem("sidebar-grouping", grouping); } catch {}
+    setSidebarGrouping(grouping);
+    setGroupingChosen(true);
+  }, [groupingChosen, projectsLoaded, sidebarProjects]);
   const doneExpanded = sidebarGrouping === "inbox" && !collapsedInbox.includes("done");
   // Done is a place to look something up, not a view to stay in: opening a chat or clicking away closes it.
   const closeDone = useCallback(() => setCollapsedInbox((collapsed) => {
@@ -6168,10 +6438,13 @@ export function ChatPanel({
     document.addEventListener("pointerdown", away, true);
     return () => document.removeEventListener("pointerdown", away, true);
   }, [doneExpanded, closeDone]);
+  const sidebarTotals = flatSessions.data?.pages[0]?.totals;
   const doneSessions = useInfiniteQuery({
     ...listSidebarChatSessionsQuery("archived"),
-    enabled: !embedded && doneExpanded,
+    // Folded, Done loads only for its count, which a server sending `totals` already gives.
+    enabled: !embedded && sidebarGrouping === "inbox" && (doneExpanded || flatSessions.isSuccess && !sidebarTotals),
   });
+  const prefetchDone = () => void queryClient.prefetchInfiniteQuery(listSidebarChatSessionsQuery("archived"));
   const sessionsOptions = useMemo(() => listChatSessionsQuery(projectId), [projectId]);
   const { data: sessions = EMPTY_SESSIONS, isSuccess: sessionsLoaded } = useQuery(sessionsOptions);
   const setSessions = useCallback((value: React.SetStateAction<ChatSession[]>) => {
@@ -6303,25 +6576,35 @@ export function ChatPanel({
   const planModeOverrideRef = useRef<boolean | null>(null);
   const queuedPlanOverrideSeen = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { data: activeRuns = EMPTY_RUNS } = useQuery(listChatActiveRunsQuery());
+  const shownRuns = useQuery(listChatShownRunsQuery()).data?.runs ?? EMPTY_RUNS;
+  // A run that leaves the shown list ended and was answered; the sidebar's own record of each chat's last run catches up.
+  const shownRunIds = useRef(new Set<string>());
+  useEffect(() => {
+    const ids = new Set(shownRuns.map((item) => `${item.sessionId} ${item.run.id}`));
+    const left = [...shownRunIds.current].some((id) => !ids.has(id));
+    shownRunIds.current = ids;
+    if (left) void queryClient.invalidateQueries({ queryKey: listSidebarChatSessionsQuery("active").queryKey });
+  }, [shownRuns]);
   const runsBySession = useMemo(() => {
-    const bySession = new Map<string, ChatActiveRun[]>();
-    for (const item of activeRuns) bySession.set(item.sessionId, [...bySession.get(item.sessionId) ?? [], item]);
+    const bySession = new Map<string, ShownRun[]>();
+    for (const item of shownRuns) bySession.set(item.sessionId, [...bySession.get(item.sessionId) ?? [], item]);
     return bySession;
-  }, [activeRuns]);
+  }, [shownRuns]);
   const [state, dispatch, historyQuery] = useChatState(projectId, mainView === "chat" ? activeId : null);
   const { data: harnesses = EMPTY_HARNESSES } = useQuery(getHarnessesQuery());
   const modelName = useModelName();
   const [selection, setSelection] = useState<ModelSelection | null>(preferredAgent);
   useEffect(() => setSelection(preferredAgent), [preferredAgent]);
+  // A new draft starts from the agent it was given, whatever an open chat was switched to.
+  useEffect(() => { if (activeId === null) setSelection(preferredAgent); }, [activeId]);
   // Unsent composer tweaks (model/mode/reasoning) for the *open* session — the
   // session's harness is fixed, so these override only its mutable settings and
   // are applied (and persisted server-side) on the next send. Cleared when the
   // active session changes. Distinct from `selection`, which is the sticky
   // global preference that seeds *new* sessions.
   const [sessionOverride, setSessionOverride] = useState<Partial<ModelSelection>>({});
-  const [sideDraftAutonomy, setSideDraftAutonomy] = useState<Autonomy | null>(null);
-  useEffect(() => setSideDraftAutonomy(null), [sideParentSessionId]);
+  const [draftAutonomy, setDraftAutonomy] = useState<Autonomy | null>(null);
+  useEffect(() => setDraftAutonomy(null), [sideParentSessionId, projectId]);
   const [recoveryOverrides, setRecoveryOverrides] = useState<
     Partial<ModelSelection> & { planMode?: boolean }
   >(EMPTY_RECOVERY_OVERRIDES);
@@ -6379,6 +6662,7 @@ export function ChatPanel({
   const stickToBottom = useRef(true);
   const programmaticScroll = useRef<number | null>(null);
   const lastTranscriptTop = useRef(0);
+  const lastTranscriptSize = useRef("");
   const [transcriptAtBottom, setTranscriptAtBottom] = useState(true);
   const composerRef = useRef<ComposerEditorHandle>(null);
   useEffect(() => {
@@ -6391,6 +6675,10 @@ export function ChatPanel({
   const connection = useRemoteConnection();
   const resumeCancelRef = useRef<(() => void) | null>(null);
   const dataSources = usePopover();
+  const [litDraft, setLitDraft] = useState<{ projectId: string; disabled: LitSource[] | null }>({ projectId, disabled: null });
+  const draftLitSources = litDraft.projectId === projectId ? litDraft.disabled : null;
+  const litSources = useChatLitSources(projectId, activeId, sideParentSessionId ?? null, draftLitSources, (disabled) => setLitDraft({ projectId, disabled }));
+  const sourcesLabel = litSources.sources?.differs ? m.lit_sources_changed_label() : m.chat_panel_data_sources();
   const addTranscriptSelection = useCallback((selection: Pick<SelectionAction, "text" | "range">) => {
     setAnnotations((current) => [
       ...current,
@@ -6441,8 +6729,7 @@ export function ChatPanel({
   }
 
   /** Queue files (upload button, clipboard paste, or drag-drop) as composer
-   * attachments — images and PDFs, which the harness reads off disk by path —
-   * cited in the draft at the caret. */
+   * attachments, which the harness reads off disk by path, cited in the draft at the caret. */
   function addFiles(
     files: File[],
     target?: { scope: typeof composerScopeRef.current; stashKey: string },
@@ -6457,9 +6744,13 @@ export function ChatPanel({
     let total = cited.attachments.reduce((n, a) => n + a.size, 0);
     const scope = target?.scope ?? composerScopeRef.current;
     const attachmentStashKey = target?.stashKey ?? stashKey;
+    const accepted: File[] = [];
     for (const file of files) {
-      if (!/^(image\/(png|jpeg|gif|webp)|application\/pdf)$/.test(file.type)) continue;
-      if (noImageInputError && file.type.startsWith("image/")) {
+      if (isEmptyMedia(file)) {
+        setAttachError(m.chat_attachment_empty({ name: ltr(file.name) }));
+        continue;
+      }
+      if (noImageInputError && isPictureType(file.type)) {
         setImageRefusedFor(selectedModel?.id ?? null);
         continue;
       }
@@ -6472,17 +6763,25 @@ export function ChatPanel({
         continue;
       }
       total += file.size;
-      const reader = new FileReader();
-      reader.onload = () => {
-        if (!isCurrentScope(sessionsOptions.queryKey)) return;
+      accepted.push(file);
+    }
+    // Read together, inserted in drop order once all are ready, so decoding images can't reorder them.
+    void Promise.allSettled(accepted.map(readAttachment)).then((results) => {
+      if (!isCurrentScope(sessionsOptions.queryKey)) return;
+      results.forEach((result, index) => {
+        const file = accepted[index];
+        if (result.status === "rejected") {
+          setAttachError(m.chat_attachment_unreadable({ name: ltr(file.name) }));
+          return;
+        }
         const attachment = {
           id: nextAttachmentId(),
-          dataUrl: reader.result as string,
-          mediaType: file.type,
+          dataUrl: result.value,
+          mediaType: file.type || "application/octet-stream",
           name: file.name,
           size: file.size,
         };
-        // The decode is async — if the composer moved on, the file belongs to
+        // The read is async — if the composer moved on, the file belongs to
         // the scope it was pasted into, not whatever chat is now showing.
         if (composerMountedRef.current && composerScopeRef.current.projectId === scope.projectId && composerScopeRef.current.activeId === scope.activeId && composerScopeRef.current.mainView === scope.mainView) {
           setAttachments((cur) => [...cur, attachment]);
@@ -6495,23 +6794,89 @@ export function ChatPanel({
           draft: [stash.draft, attachmentToken(attachment)].filter(Boolean).join(" "),
           attachments: [...stash.attachments, attachment],
         });
-      };
-      reader.readAsDataURL(file);
-    }
+      });
+    });
   }
+
+  /** Attach a drop's files; a folder can't be read as one, so it gets its own message. */
+  function addDropped(transfer: DataTransfer) {
+    const files: File[] = [];
+    const folders: string[] = [];
+    for (const item of Array.from(transfer.items)) {
+      if (item.kind !== "file") continue;
+      // Not every webview implements entries; without one, a folder fails its read and says so.
+      const entry = typeof item.webkitGetAsEntry === "function" ? item.webkitGetAsEntry() : null;
+      const file = item.getAsFile();
+      if (entry?.isDirectory) folders.push(entry.name);
+      else if (file) files.push(file);
+    }
+    addFiles(files);
+    // After addFiles, so a size refusal from the same drop isn't hidden behind it.
+    if (folders.length > 0) setAttachError((current) => current ?? m.chat_attachment_folder({ name: ltr(folders[0]) }));
+  }
+
+  const dropFiles = useRef<(transfer: DataTransfer) => void>(() => {});
+  dropFiles.current = addDropped;
+  const acceptsDrops = useRef<() => boolean>(() => false);
+  acceptsDrops.current = () =>
+    !asking && connection === null && !contentInert && composerRef.current !== null
+    // A modal's backdrop has no dialog role, so check for an open modal rather than the target.
+    && document.querySelector('[role=dialog][aria-modal="true"], [role=alertdialog]') === null;
+  const [draggingFiles, setDraggingFiles] = useState(false);
+  // A file dropped in this panel, or for the main chat anywhere outside a side chat or dialog, joins its composer.
+  useEffect(() => {
+    let depth = 0;
+    const carriesFiles = (e: DragEvent) => Boolean(e.dataTransfer?.types.includes("Files"));
+    const claims = (e: DragEvent) => {
+      if (!carriesFiles(e) || !acceptsDrops.current()) return false;
+      const target = e.target instanceof Element ? e.target : null;
+      if (target?.closest("[role=dialog], [role=alertdialog]")) return false;
+      return (target?.closest("[data-side-chat]") != null) === embedded;
+    };
+    const dragenter = (e: DragEvent) => {
+      if (carriesFiles(e)) depth += 1;
+    };
+    const dragleave = (e: DragEvent) => {
+      if (!carriesFiles(e)) return;
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) setDraggingFiles(false);
+    };
+    const dragover = (e: DragEvent) => {
+      const claimed = claims(e);
+      setDraggingFiles(claimed);
+      if (!claimed || !e.dataTransfer) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+    };
+    const drop = (e: DragEvent) => {
+      depth = 0;
+      setDraggingFiles(false);
+      if (!e.dataTransfer || e.defaultPrevented || !claims(e)) return;
+      e.preventDefault();
+      dropFiles.current(e.dataTransfer);
+    };
+    window.addEventListener("dragenter", dragenter);
+    window.addEventListener("dragleave", dragleave);
+    // On the document, so these run before the window-wide guard in main.tsx.
+    document.addEventListener("dragover", dragover);
+    document.addEventListener("drop", drop);
+    return () => {
+      window.removeEventListener("dragenter", dragenter);
+      window.removeEventListener("dragleave", dragleave);
+      document.removeEventListener("dragover", dragover);
+      document.removeEventListener("drop", drop);
+    };
+  }, [embedded]);
 
   function onComposerPaste(e: ClipboardEvent) {
     const data = e.clipboardData;
     if (!data) return;
     const files = Array.from(data.items)
-      .filter(
-        (item) =>
-          item.kind === "file" &&
-          (item.type.startsWith("image/") || item.type === "application/pdf"),
-      )
+      .filter((item) => item.kind === "file")
       .map((item) => item.getAsFile())
       .filter((f): f is File => f !== null);
-    const usable = files.filter((file) => file.size > 0);
+    // An empty picture or PDF is the clipboard's placeholder for one `readClipboardImage` can fetch.
+    const usable = files.filter((file) => !isEmptyMedia(file));
     if (usable.length > 0) {
       e.preventDefault();
       addFiles(usable);
@@ -6672,7 +7037,7 @@ export function ChatPanel({
     ? m.chat_model_no_image_input({ model: ltr(harnessModelLabel(selectedModel)) })
     : null;
   const imageInputBlocked =
-    !!noImageInputError && cited.attachments.some((a) => a.mediaType.startsWith("image/"));
+    !!noImageInputError && cited.attachments.some((a) => isPictureType(a.mediaType));
   const imageRefused = !!selectedModel && imageRefusedFor === selectedModel.id;
   const imageInputError = imageInputBlocked || imageRefused ? noImageInputError : null;
   useEffect(() => setImageRefusedFor(null), [selectedModel?.id]);
@@ -6760,10 +7125,11 @@ export function ChatPanel({
     };
     setSelection(next);
     void onPreferredAgentChange(next).catch(() => {});
-    if (onStartHarnessDraft) onStartHarnessDraft();
+    if (onStartHarnessDraft) onStartHarnessDraft(next);
     else onActiveSessionChangeRef.current(null, { projectId });
   }
-  const setPermissionMode = (id: string) => {
+  const setPermissionMode = (id: string) => withFullAccess(id === "bypassPermissions", () => applyPermissionMode(id));
+  const applyPermissionMode = (id: string) => {
     // Plan is session-scoped. Claude exposes it in the permission dropdown,
     // but it must not become the saved default for future sessions.
     if (id === "plan" && activeHarness?.id === "claude-code") {
@@ -6797,12 +7163,31 @@ export function ChatPanel({
         setSettingsError(m.chat_update_permissions_failed());
       });
   };
+  /** Runs `then` once Claude may bypass permissions: as root that first needs the user's confirmation, kept per machine. */
+  const withFullAccess = (bypass: boolean, then: () => void, cancel?: () => void) => {
+    if (!bypass || activeHarness?.id !== "claude-code" || !activeHarness.fullAccessNeedsRootConsent) return then();
+    workspace.dialogs.showConfirmDialog({
+      title: m.chat_root_bypass_title(),
+      description: m.chat_root_bypass_description(),
+      confirmLabel: m.chat_root_bypass_confirm(),
+      destructive: true,
+      onCancel: () => cancel?.(),
+      onConfirm: async () => {
+        await workspace.api.allowClaudeRootFullAccess();
+        setScopedQueryData(getHarnessesQuery().queryKey, (current) =>
+          current?.map((harness) => harness.id === "claude-code" ? { ...harness, fullAccessNeedsRootConsent: false } : harness));
+        then();
+      },
+    });
+  };
+  const withFullAccessRef = useRef(withFullAccess);
+  withFullAccessRef.current = withFullAccess;
   const setReasoningLevel = (id: string) => selectModel({ reasoningLevel: id });
   const setAutonomy = (autonomy: Autonomy) => {
     if (autonomy !== (openSession?.autonomy ?? preferredAutonomy)) invalidatePendingRetry();
     if (!openSession) {
-      if (sideParentSessionId) setSideDraftAutonomy(autonomy);
-      else onPreferredAutonomyChange(autonomy);
+      setDraftAutonomy(autonomy);
+      if (!sideParentSessionId) onPreferredAutonomyChange(autonomy);
       return;
     }
     const mutation = ++settingsMutationSeq.current;
@@ -6894,7 +7279,7 @@ export function ChatPanel({
         if (embedded) {
           const parent = openSession?.sideParentSessionId ?? sideParentSessionId;
           if (parent) onOpenSideChat?.(parent, "");
-        } else startNewTask();
+        } else startChatIn(projectId);
         return false;
       case "resume":
         showCustomDialog({
@@ -7144,7 +7529,7 @@ export function ChatPanel({
   useEffect(() => onChatEvent((event) => {
     if (event.type === "reconnected") void syncSessionList(true);
     if (event.type === "runsChanged") {
-      void queryClient.invalidateQueries({ queryKey: listChatActiveRunsQuery().queryKey });
+      void queryClient.invalidateQueries({ queryKey: listChatShownRunsQuery().queryKey });
     }
   }), [syncSessionList]);
 
@@ -7221,6 +7606,7 @@ export function ChatPanel({
     part.type === "prompt" && part.prompt?.kind === "question" && !part.prompt.resolved && (!part.prompt.nativeId || busy),
   )), [messages, busy]);
   const activeSession = openSession;
+  const ancestors = embedded || !onOpenDelegate ? [] : delegateAncestors(sessions, activeSession);
   // Once the user writes in a delegate, whether it still reports to its parent is theirs to decide.
   const steeringDelegate = Boolean(activeSession?.delegate?.notifies) && (draft.trim() !== ""
     || messages.some((message) => message.parts.some((part) =>
@@ -7405,6 +7791,11 @@ export function ChatPanel({
   const historyError = !historyQuery.data ? historyQuery.error : null;
   // A chat without a project has no project to suggest a start from.
   const starterVisible = mainView === "chat" && !embedded && !threadMounted && !contentLoading && !contentError && !historyLoading && !historyError && !currentProject?.scratch;
+  // A new project stays one after the user names it, until it has a chat or they open another; any other empty project is an ordinary one.
+  const newProjectId = useRef<string | undefined>(undefined);
+  if (currentProject?.unnamed) newProjectId.current = currentProject.id;
+  else if (activeId || newProjectId.current !== currentProject?.id) newProjectId.current = undefined;
+  const draftProject = !embedded && !activeId && !launching && currentProject?.scratch && newProjectId.current === currentProject.id && (sessionsLoaded ? sessions.length === 0 : currentProject.unnamed) ? currentProject : undefined;
   const starterQuery = useQuery({
     ...getProjectStarterPromptsQuery(projectId, starterHarness ?? "claude-code", starterModel, getLocale(), composerSelection?.profile ?? null),
     enabled: starterVisible && starterHarness !== null,
@@ -7447,10 +7838,14 @@ export function ChatPanel({
     // Wheels, keys, focus moves and screen readers scroll unannounced; only the virtualizer's own scrolls are recorded.
     const programmatic = programmaticScroll.current !== null && Math.abs(el.scrollTop - programmaticScroll.current) <= 1;
     const movedUp = el.scrollTop < lastTranscriptTop.current;
+    // Chromium can reset the offset while the pane resizes; that is no user scroll, and the resize re-pins.
+    const size = `${el.clientWidth}x${el.clientHeight}`;
+    const resized = lastTranscriptSize.current !== "" && size !== lastTranscriptSize.current;
     programmaticScroll.current = null;
     lastTranscriptTop.current = el.scrollTop;
+    lastTranscriptSize.current = size;
     // Trackpads scroll a pixel at a time, so any upward scroll lets go before the next resize re-pins it.
-    if (!programmatic) stickToBottom.current = distance <= 1 || (atBottom && !movedUp);
+    if (!programmatic && !resized) stickToBottom.current = distance <= 1 || (atBottom && !movedUp);
     setTranscriptAtBottom(atBottom);
   }, []);
   const pinTranscriptToBottom = useCallback(() => {
@@ -7879,7 +8274,7 @@ export function ChatPanel({
     const scope = composerScopeRef.current;
     const visit = projectVisitRef.current;
     let session = sideParentSessionId
-      ? await mutOpenSideChat.runAsHeadlessPromise(workspace, sideParentSessionId, {})
+      ? await mutOpenSideChat.runAsHeadlessPromise(workspace, sideParentSessionId, selection, {})
       : await mutCreateChatSession.runAsHeadlessPromise(workspace, projectId, selection.harness, {
         profile: selection.profile,
         model: selection.model,
@@ -7887,10 +8282,17 @@ export function ChatPanel({
         permissionMode: selection.permissionMode,
         planMode,
         reasoningLevel: selection.reasoningLevel,
-        autonomy: preferredAutonomy,
+        // Unset, the server takes the project's autonomy, which may not have loaded here yet.
+        autonomy: draftAutonomy ?? undefined,
+        disabledLitSources: draftLitSources ?? undefined,
       }, {});
-    if (sideParentSessionId && sideDraftAutonomy !== null && session.autonomy !== sideDraftAutonomy) {
-      session = await patchSession(session, { autonomy: sideDraftAutonomy });
+    setLitDraft({ projectId, disabled: null });
+    setDraftAutonomy(null);
+    if (sideParentSessionId && draftAutonomy !== null && session.autonomy !== draftAutonomy) {
+      session = await patchSession(session, { autonomy: draftAutonomy });
+    }
+    if (sideParentSessionId && draftLitSources !== null) {
+      await mutSetChatLitSources.runAsHeadlessPromise(workspace, session.id, draftLitSources, {});
     }
     // A chat without a project can land in a scratch project of its own.
     const here = session.projectId === projectId;
@@ -8109,13 +8511,26 @@ export function ChatPanel({
   /** Deliver a card answer; resolves `false` when delivery failed (so a
    * caller can e.g. restore a consumed draft). Stable per session so the
    * memoized Message rows don't re-render on unrelated state changes. */
+  const allMessagesRef = useRef(allMessages);
+  allMessagesRef.current = allMessages;
   const respond = useCallback(
     (answer: PromptAnswer): Promise<boolean> => {
       if (!activeId) return Promise.resolve(false);
-      return mutRespondChat.runAsHeadlessPromise(workspace, { id: activeId, projectId }, answer, {}).then(() => true, (error: unknown) => {
+      const deliver = () => mutRespondChat.runAsHeadlessPromise(workspace, { id: activeId, projectId }, answer, {}).then(() => true, (error: unknown) => {
         showAlert(error instanceof Error ? error.message : String(error), "error");
         return false;
       });
+      // An end-turn Claude approval resumes under bypass permissions.
+      const endTurnApproval = () => {
+        const prompt = allMessagesRef.current
+          .map((message) => findPartById(message.parts, answer.promptId))
+          .find(Boolean)?.prompt;
+        return prompt?.kind === "permission" && !prompt.nativeId;
+      };
+      const bypass = answer.approve === true
+        && (answer.resumeMode === "bypassPermissions" || (!answer.resumeMode && endTurnApproval()));
+      return new Promise((resolve) =>
+        withFullAccessRef.current(bypass, () => void deliver().then(resolve), () => resolve(false)));
     },
     [workspace, activeId, projectId],
   );
@@ -8196,8 +8611,21 @@ export function ChatPanel({
     seenTitles.current.delete(sessionId);
   }
 
-  function setArchived(session: ChatSession, archived: boolean) {
-    mutPatchChatSession.run(workspace, session, { archived });
+  function setArchived(session: ChatSession, archived: boolean, working: boolean) {
+    if (!archived || !working) {
+      mutPatchChatSession.run(workspace, session, { archived });
+      return;
+    }
+    showConfirmDialog({
+      title: m.chat_inbox_stop_done_title(),
+      description: m.chat_inbox_stop_done_description(),
+      confirmLabel: m.chat_inbox_stop_done_confirm(),
+      destructive: true,
+      onCancel: "close",
+      onConfirm: async () => {
+        await mutPatchChatSession.runAsHeadlessPromise(workspace, session, "stop-and-archive", {});
+      },
+    });
   }
 
   function stopNotifyingParent(session: ChatSession) {
@@ -8210,13 +8638,13 @@ export function ChatPanel({
 
   function removeSession(session: ChatSession) {
     const title = session.title?.trim() || m.chat_untitled();
-    const scratch = sidebarProjects.find((project) => project.id === session.projectId)?.scratch;
+    const unnamed = sidebarProjects.find((project) => project.id === session.projectId)?.unnamed;
     const siblings = queryClient.getQueryData(listChatSessionsQuery(session.projectId).queryKey)?.filter((row) => row.id !== session.id && !row.sideParentSessionId);
-    // The last chat without a project takes its scratch project with it.
-    const lastOfScratch = scratch && !siblings?.length;
+    // The last chat of an unnamed project takes the project with it.
+    const lastOfUnnamed = unnamed && !siblings?.length;
     showConfirmDialog({
       title: m.chat_panel_delete(),
-      description: lastOfScratch
+      description: lastOfUnnamed
         ? m.chat_delete_scratch_session_confirm({ title: autoDir(title) })
         : m.chat_delete_session_confirm({ title: autoDir(title) }),
       confirmLabel: m.chat_panel_delete(),
@@ -8224,10 +8652,10 @@ export function ChatPanel({
       onCancel: "close",
       onConfirm: () => {
         const active = session.id === activeId;
-        if (active && !lastOfScratch) onActiveSessionChangeRef.current(null, { replace: true });
+        if (active && !lastOfUnnamed) onActiveSessionChangeRef.current(null, { replace: true });
         mutDeleteChatSession.runWithOptions(workspace, session, { onSuccessData: () => {
           forgetSession(session.id);
-          if (!lastOfScratch) return;
+          if (!lastOfUnnamed) return;
           setScopedQueryData(listProjectsQuery().queryKey, (rows) => rows?.filter((row) => row.id !== session.projectId));
           removeCachedProject(session.projectId);
           if (active) void navigate({ to: "/projects", replace: true });
@@ -8236,7 +8664,6 @@ export function ChatPanel({
     });
   }
 
-  const queueChord = formatForDisplay("Mod+Enter");
   const startProjectTask = useCallback(() => {
     setSessionFilter("active");
     requestNewChatFocus(projectId);
@@ -8253,20 +8680,24 @@ export function ChatPanel({
       showAlert(error instanceof Error ? error.message : String(error), "error");
     }
   }, [onActiveSessionChange]);
+  /** A new chat in `target`; an unnamed project holds one chat, so it gets a new project instead. */
+  const startChatIn = useCallback((target: string) => {
+    if (sidebarProjects.find((project) => project.id === target)?.unnamed) return void startScratchChat();
+    setSessionFilter("active");
+    requestNewChatFocus(target);
+    onActiveSessionChange(null, { projectId: target });
+  }, [onActiveSessionChange, sidebarProjects, startScratchChat]);
+  /** The sidebar's New chat goes where work happened last. */
   const startNewTask = useCallback(async () => {
     try {
       const activity = await queryClient.fetchQuery({ ...listProjectActivityQuery(), staleTime: 0 });
       const latest = activity.reduce<(typeof activity)[number] | undefined>((current, item) =>
         !current || item.lastActivityAt > current.lastActivityAt ? item : current, undefined);
-      const targetProject = latest?.projectId ?? projectId;
-      if (sidebarProjects.find((project) => project.id === targetProject)?.scratch) return void startScratchChat();
-      setSessionFilter("active");
-      requestNewChatFocus(targetProject);
-      onActiveSessionChange(null, { projectId: targetProject });
+      startChatIn(latest?.projectId ?? projectId);
     } catch (error) {
       showAlert(error instanceof Error ? error.message : String(error), "error");
     }
-  }, [projectId, onActiveSessionChange, sidebarProjects, startScratchChat]);
+  }, [projectId, startChatIn]);
 
   const openSpawnedSession = useCallback(
     async (sessionId: string) => {
@@ -8287,7 +8718,7 @@ export function ChatPanel({
 
   const newTask = () => {
     if (commandRegion() === "right" && document.querySelector(".right-pane [data-side-chat]")) return;
-    startNewTask();
+    startChatIn(projectId);
   };
   useHotkey(appHotkeys["task.new"], newTask, { enabled: !embedded, requireReset: true, conflictBehavior: "allow" });
   useHotkey(appHotkeys["chat.find"], openFind, { enabled: mainView === "chat" && !contentInert && (embedded ? searchRegion === "right" : searchRegion !== "right"), requireReset: true, ignoreInputs: false, capture: true, conflictBehavior: "allow" });
@@ -8297,12 +8728,23 @@ export function ChatPanel({
     ? hasPendingInput(messages, busy) : session.awaitingInput === true;
   const sessionBusy = (project: Project, session: ChatSession) => project.id === projectId ? state.busySessions.has(session.id) : session.busy;
   const sidebarRows: SidebarRow[] = [];
+  const projectSessions = (project: Project) => project.id === projectId ? sessions : projectSessionsQueries[queriedProjects.indexOf(project)].data ?? EMPTY_SESSIONS;
+  if (sidebarGrouping === "projects") {
+    shownUnnamed
+      .flatMap((project) => projectSessions(project).map((session) => ({ project, session })))
+      .filter(({ session }) => !session.sideParentSessionId && !session.delegate && (matchesFilter(sessionFilter, session.archived) || session.id === activeId))
+      .sort((a, b) => b.session.updatedAt - a.session.updatedAt)
+      .forEach(({ project, session }) => sidebarRows.push({ kind: "chat", project, session }));
+    if (unnamedProjects.length > 6) sidebarRows.push({ kind: "more", project: unnamedProjects[0] });
+    shownUnnamed.forEach((project) => {
+      const query = projectSessionsQueries[queriedProjects.indexOf(project)];
+      if (query.error && !projectSessions(project).length) sidebarRows.push({ kind: "status", project, pending: false, error: true, retry: () => void query.refetch() });
+    });
+  }
   if (sidebarGrouping === "projects") shownProjects.forEach((project) => {
     const group = sidebarGroup(project);
-    const members = project.scratch ? queriedScratch : [project];
-    const queries = members.map((member) => projectSessionsQueries[queriedProjects.indexOf(member)]);
-    const projectOf = new Map(members.map((member) => [member.id, member]));
-    const matching = members.flatMap((member, index) => member.id === projectId ? sessions : queries[index].data ?? EMPTY_SESSIONS)
+    const query = projectSessionsQueries[queriedProjects.indexOf(project)];
+    const matching = projectSessions(project)
       .filter((session) => !session.sideParentSessionId && !session.delegate && (matchesFilter(sessionFilter, session.archived) || session.id === activeId))
       .sort((a, b) => b.updatedAt - a.updatedAt);
     const chatLimit = chatLimits[group] ?? 6;
@@ -8310,15 +8752,64 @@ export function ChatPanel({
     const selected = matching.find((session) => session.id === activeId);
     if (selected && !visible.some((session) => session.id === activeId)) visible = [...visible.slice(0, chatLimit - 1), selected];
     const collapsed = collapsedProjects.includes(group);
-    const rowProject = (session: ChatSession) => projectOf.get(session.projectId) ?? project;
-    sidebarRows.push({ kind: "project", project, collapsed, busy: collapsed && matching.some((session) => sessionBusy(rowProject(session), session) && !sessionWaiting(session)) });
+    sidebarRows.push({ kind: "project", project, collapsed, busy: collapsed && matching.some((session) => sessionBusy(project, session) && !sessionWaiting(session)) });
     if (collapsed) return;
-    visible.forEach((session) => sidebarRows.push({ kind: "chat", project: rowProject(session), session }));
-    if (matching.length > 6 || (project.scratch && scratchProjects.length > 6)) sidebarRows.push({ kind: "more", project });
-    const pending = queries.some((query) => query.isPending);
-    const error = queries.some((query) => query.error);
-    if (!visible.length) sidebarRows.push({ kind: "status", project, pending, error, retry: () => { for (const query of queries) void query.refetch(); } });
+    visible.forEach((session) => sidebarRows.push({ kind: "chat", project, session }));
+    if (matching.length > 6) sidebarRows.push({ kind: "more", project });
+    if (!visible.length) sidebarRows.push({ kind: "status", project, pending: query.isPending, error: Boolean(query.error), retry: () => void query.refetch() });
   });
+  const atWork = ({ project, session }: { project: Project; session: ChatSession }) =>
+    chatStatusWorking(chatStatus(session, sessionBusy(project, session), sessionWaiting(session), runsBySession.get(session.id) ?? EMPTY_RUNS));
+  /** Every open chat not at work, read whole from the server in the inbox's order; throws when a page can't be read. */
+  const inboxChats = async () => {
+    const read: ChatSession[] = [];
+    let next: SidebarChatCursor | null = null;
+    do {
+      const page = await readSidebarChatPage("active", next, new AbortController().signal);
+      read.push(...page.sessions);
+      next = page.next;
+    } while (next);
+    const fetched = new Set(read.map((session) => session.id));
+    return listedChats(read, false).filter((chat) => fetched.has(chat.session.id) && !atWork(chat)).map(({ session }) => session);
+  };
+  const markBelowDone = async (session: ChatSession) => {
+    const chats = await inboxChats().catch((error: unknown) => {
+      showAlert(m.chat_inbox_mark_below_failed({ error: ltr(error instanceof Error ? error.message : String(error)) }), "error");
+      return null;
+    });
+    const at = chats?.findIndex((chat) => chat.id === session.id) ?? -1;
+    if (at >= 0) chats!.slice(at + 1).forEach((chat) => setArchived(chat, true, false));
+  };
+  const idleChats = async () => {
+    const cutoff = Date.now() - 3 * 24 * 60 * 60 * 1000;
+    return (await inboxChats()).filter((chat) => chat.updatedAt < cutoff);
+  };
+  const cleanupScanning = useRef(false);
+  // The first time the inbox shows, chats left alone for days can go straight to Done.
+  const offerInboxCleanup = async () => {
+    if (cleanupScanning.current) return;
+    try {
+      if (localStorage.getItem("sidebar-inbox-intro") === "seen") return;
+      // Pending until a scan succeeds, so a failed one is tried again on the next switch.
+      localStorage.setItem("sidebar-inbox-intro", "pending");
+    } catch { return; }
+    // Best-effort: a scan that fails asks again on the next switch.
+    cleanupScanning.current = true;
+    const stale = await idleChats().catch(() => null).finally(() => { cleanupScanning.current = false; });
+    if (!stale) return;
+    try { localStorage.setItem("sidebar-inbox-intro", "seen"); } catch {}
+    if (!stale.length) return;
+    const count = fmtNumber(stale.length);
+    showConfirmDialog({
+      title: m.sidebar_inbox_intro_title(),
+      description: pluralMessage(stale.length, m.sidebar_inbox_intro_body_one, m.sidebar_inbox_intro_body_other)({ count }),
+      confirmLabel: m.sidebar_inbox_intro_confirm({ count }),
+      cancelLabel: m.sidebar_inbox_intro_keep(),
+      onCancel: "close",
+      // Read again from the newest render: a chat that resumed while the dialog was open stays put.
+      onConfirm: () => sidebarActions.current.markIdleDone(),
+    });
+  };
   const listedChats = (listed: readonly ChatSession[], archived: boolean | null) => {
     const byId = new Map(listed.map((session) => [session.id, session]));
     const selected = sessions.find((session) => session.id === activeId);
@@ -8335,28 +8826,40 @@ export function ChatPanel({
         retry: () => { void (query.isFetchNextPageError ? query.fetchNextPage() : query.refetch()); } });
     }
   };
-  // Rows past this index belong to Working and Done; paging the open chats only needs to keep up with the rows above it.
+  // Rows before this index hold at the rail's top while it is short; the rest, at least Done, hold at its foot.
   let inboxEnd = 0;
-  const flatListed = flatSessions.data?.pages.flatMap((page) => page.sessions) ?? EMPTY_SESSIONS;
-  if (sidebarGrouping === "list") {
-    listedChats(flatListed, null).forEach(({ project, session }) => sidebarRows.push({ kind: "chat", project, session }));
-    pushListStatus(flatSessions, !sidebarRows.length);
-  } else if (sidebarGrouping === "inbox") {
-    const open = listedChats(flatListed, false);
-    const working = open.filter(({ project, session }) =>
-      chatStatusWorking(chatStatus(session, sessionBusy(project, session), sessionWaiting(session), runsBySession.get(session.id) ?? EMPTY_RUNS)));
+  // Paging the open chats only needs to keep up with the rows above this index.
+  let openEnd = 0;
+  if (sidebarGrouping === "inbox") {
+    const open = listedChats(flatSessions.data?.pages.flatMap((page) => page.sessions) ?? EMPTY_SESSIONS, false);
+    const working = open.filter(atWork);
     // Newest first by creation, so streaming updates don't reshuffle what's running.
     working.sort((a, b) => b.session.createdAt - a.session.createdAt);
-    open.filter((chat) => !working.includes(chat)).forEach(({ project, session }) => sidebarRows.push({ kind: "inbox", project, session }));
-    pushListStatus(flatSessions, !open.length);
-    inboxEnd = sidebarRows.length;
+    const waiting = open.filter((chat) => !working.includes(chat));
 
-    const workingCollapsed = collapsedInbox.includes("working");
-    if (working.length) {
-      sidebarRows.push({ kind: "section", section: "working", collapsed: workingCollapsed, count: working.length });
-      if (!workingCollapsed) working.forEach(({ project, session }) => sidebarRows.push({ kind: "inbox", project, session }));
-    }
-    sidebarRows.push({ kind: "section", section: "done", collapsed: !doneExpanded, count: 0 });
+    const pushSection = (section: "inbox" | "working", chats: typeof open, count = chats.length) => {
+      const collapsed = collapsedInbox.includes(section);
+      sidebarRows.push({ kind: "section", section, collapsed, count });
+      if (!collapsed) chats.forEach(({ project, session }) => sidebarRows.push({ kind: "inbox", section, project, session, run: sessionLeadRun(runsBySession.get(session.id) ?? EMPTY_RUNS, session.id, session.lastRun) }));
+      return collapsed;
+    };
+    const pushWorking = () => { if (working.length) pushSection("working", working); };
+    const pushWaiting = () => {
+      // The loaded pages reach only as far as the rail has scrolled; the server counts the rest.
+      const openTotal = flatSessions.data?.pages[0]?.total;
+      const count = openTotal === undefined ? waiting.length : Math.max(waiting.length, openTotal - working.length);
+      if (!pushSection("inbox", waiting, count)) pushListStatus(flatSessions, !open.length);
+      openEnd = sidebarRows.length;
+    };
+
+    if (workingPlace === "above") pushWorking();
+    pushWaiting();
+    if (workingPlace === "below") pushWorking();
+    inboxEnd = sidebarRows.length;
+    if (workingPlace === "bottom") pushWorking();
+    const archived = doneSessions.data?.pages;
+    const doneCount = sidebarTotals?.archived ?? archived?.[0]?.total ?? archived?.flatMap((page) => page.sessions).length ?? 0;
+    sidebarRows.push({ kind: "section", section: "done", collapsed: !doneExpanded, count: doneCount });
     const doneStart = sidebarRows.length;
     if (doneExpanded) {
       const done = listedChats(doneSessions.data?.pages.flatMap((page) => page.sessions) ?? EMPTY_SESSIONS, true);
@@ -8424,7 +8927,8 @@ export function ChatPanel({
     railReturns.current.set(key, ghost.top);
     railFlight.current.set(key, now + RAIL_MOVE_MS);
   }
-  if (railSameList) {
+  // The first rows to load appear in place, so nothing they replace is left to fade out.
+  if (railSameList && railSettled(railCommitted.current!.layout)) {
     const viewTop = sidebarVirtualizer.scrollOffset ?? 0;
     for (const [key, was] of railCommitted.current?.layout ?? []) {
       const onScreen = was.top < viewTop + railHeight && was.top + sidebarRowHeight(was.row) > viewTop;
@@ -8438,7 +8942,7 @@ export function ChatPanel({
   const sidebarVirtualItems = sidebarVirtualizer.getVirtualItems();
 
   // A section just opened scrolls into view far enough to show its first rows.
-  const railReveal = useRef<"working" | "done" | null>(null);
+  const railReveal = useRef<RailSection | null>(null);
   // Where each row was last drawn at rest, from the top of the rail's viewport.
   const railRest = useRef(new Map<string, number>());
   useLayoutEffect(() => {
@@ -8475,8 +8979,7 @@ export function ChatPanel({
     const before = railRest.current;
     railRest.current = new Map(rows.map(({ key, at }) => [key, at]));
 
-    const settled = (layout: typeof railLayout) => [...layout.values()].some(({ row }) => "session" in row);
-    if (!previous || previous.grouping !== sidebarGrouping || previous.layout === railLayout || !settled(previous.layout)) return;
+    if (!previous || previous.grouping !== sidebarGrouping || previous.layout === railLayout || !railSettled(previous.layout)) return;
     const changed = previous.layout.size !== railLayout.size || [...railLayout].some(([key, { top }]) => previous.layout.get(key)?.top !== top);
     if (!changed) return;
     if (railReducedMotion) return;
@@ -8489,9 +8992,11 @@ export function ChatPanel({
       const returning = railReturns.current.get(key);
       const was = returning !== undefined ? returning - previous.scrollTop : before.get(key) ?? (known === undefined ? undefined : known - previous.scrollTop);
       if (was === undefined) {
-        el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: RAIL_FADE_MS, delay, easing: "ease-out", fill: "backwards" });
+        el.animate([{ opacity: 0 }, { opacity: 1 }], { id: "rail-arrive", duration: RAIL_FADE_MS, delay, easing: "ease-out", fill: "backwards" });
         continue;
       }
+      // A row still fading in lands where it now belongs rather than flying there.
+      if (el.getAnimations().some((animation) => animation.id === "rail-arrive")) continue;
       // Start from where the row is drawn now, so a move that interrupts another doesn't jump.
       moves.push({ el, key, at, offset: was + drawn - at, from: returning ?? known });
     }
@@ -8500,8 +9005,9 @@ export function ChatPanel({
     const heightOf = (key: string) => sidebarRowHeight(railLayout.get(key)!.row);
     const offsets = new Map(moves.map(({ key, offset }) => [key, offset]));
     for (const { el, key, at, offset, from } of moves) {
-      if (Math.abs(offset) < 0.5) continue;
+      // A move this one interrupts would otherwise keep sliding the row from where it was headed before.
       el.getAnimations().forEach((animation) => animation.cancel());
+      if (Math.abs(offset) < 0.5) continue;
       el.animate([{ transform: `translateY(${offset}px)` }, { transform: "none" }], move);
 
       // A row passing several others goes behind them: faint where it overlaps them, whole in the gap it lands in.
@@ -8558,15 +9064,15 @@ export function ChatPanel({
   });
   // The visible range, not the rendered rows: pinned headers are always rendered.
   const lastVisibleIndex = sidebarVirtualizer.range?.endIndex ?? -1;
-  const listEnd = sidebarGrouping === "inbox" ? inboxEnd : sidebarRows.length;
   useEffect(() => {
     if (!railOpen || embedded || sidebarGrouping === "projects") return;
     const page = (query: typeof flatSessions, end: number) => {
       if (lastVisibleIndex >= end - 6 && query.hasNextPage && !query.isFetching && !query.isError) void query.fetchNextPage();
     };
-    page(flatSessions, listEnd);
-    if (sidebarGrouping === "inbox" && doneExpanded) page(doneSessions, sidebarRows.length);
-  }, [sidebarGrouping, railOpen, embedded, lastVisibleIndex, listEnd, flatSessions, doneExpanded, doneSessions, sidebarRows.length]);
+    // A folded inbox never grows, so paging it would only read every page.
+    if (sidebarGrouping !== "inbox" || !collapsedInbox.includes("inbox")) page(flatSessions, openEnd);
+    if (doneExpanded) page(doneSessions, sidebarRows.length);
+  }, [sidebarGrouping, railOpen, embedded, lastVisibleIndex, openEnd, flatSessions, collapsedInbox, doneExpanded, doneSessions, sidebarRows.length]);
   const sidebarActions = useRef<SidebarActions>(null!);
   sidebarActions.current = {
     toggleProjectCollapsed: (project) => {
@@ -8583,7 +9089,7 @@ export function ChatPanel({
     projectRemoved: (project) => { if (project.id === projectId) void navigate({ to: "/projects" }); },
     openProjectSettings: (project) => void navigate({ href: `/projects/${encodeURIComponent(project.id)}/settings/project` }),
     newProjectChat: (project) => {
-      if (project.scratch) void startScratchChat();
+      if (project.unnamed) void startScratchChat();
       else if (project.id === projectId) startProjectTask();
       else void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: project.id } });
     },
@@ -8612,16 +9118,18 @@ export function ChatPanel({
     },
     rename,
     setArchived,
+    markBelowDone: (session) => void markBelowDone(session),
+    markIdleDone: async () => (await idleChats()).forEach((chat) => setArchived(chat, true, false)),
     moveToProject: (s, project) => createProject(project, s),
     remove: (s) => void removeSession(s),
   };
   const openRuntimeDetails = useCallback(() => onSelectMainView("openresearch"), [onSelectMainView]);
   const openSettings = useCallback(() => onSelectMainView("settings"), [onSelectMainView]);
 
-  /** How far above the rail's foot a section header pins: Working sits on Done's header. */
-  const railStickyBottom = (section: "working" | "done") => {
-    const done = section === "working" ? sidebarRows.find((row) => row.kind === "section" && row.section === "done") : undefined;
-    return done ? sidebarRowHeight(done) : 0;
+  /** How far above the rail's foot a section header pins: on the headers of the sections after it. */
+  const railStickyBottom = (section: RailSection) => {
+    const start = sidebarRows.findIndex((row) => row.kind === "section" && row.section === section);
+    return sidebarRows.slice(start + 1).reduce((height, row) => height + (row.kind === "section" ? sidebarRowHeight(row) : 0), 0);
   };
   const railGap = inboxPinned ? sidebarVirtualizer.measurementsCache[inboxEnd]?.size ?? 0 : 0;
 
@@ -8714,17 +9222,20 @@ export function ChatPanel({
         <div key={sidebarRowKey(row)} data-index={index} className="relative" style={{ height: sidebarRowHeight(row) }}
           onFocusCapture={() => setFocusedSidebarRow(sidebarRowKey(row))}>
           <button data-sidebar-keyboard-row aria-expanded={!row.collapsed} onClick={toggle}
+            onPointerEnter={row.section === "done" ? prefetchDone : undefined} onFocus={row.section === "done" ? prefetchDone : undefined}
             className="group/section flex h-full w-full items-end gap-1 rounded-md px-2.25 pb-1.5 text-start text-sm font-medium text-subtext hover:text-text">
-            <span>{row.section === "working" ? m.chat_inbox_working() : m.chat_inbox_done()}</span>
-            {row.section === "working" && row.collapsed && <span className="tabular-nums text-muted">{fmtNumber(row.count)}</span>}
+            <span>{row.section === "inbox" ? m.sidebar_inbox() : row.section === "working" ? m.chat_inbox_working() : m.chat_inbox_done()}</span>
+            {row.section === "done"
+              ? row.count > 0 && <span className={`tabular-nums text-muted ${row.collapsed ? "hidden group-hover/section:inline group-focus-visible/section:inline" : ""}`}>{fmtNumber(row.count)}</span>
+              : row.collapsed && <span className="tabular-nums text-muted">{fmtNumber(row.count)}</span>}
             <ChevronRight size={14} aria-hidden="true"
-              className={`mb-px shrink-0 text-muted transition-transform duration-120 ease-standard motion-reduce:transition-none ${row.collapsed ? "" : "rotate-90"}`} />
-            <span aria-hidden="true" className="mb-2.5 ms-1.5 h-px flex-1 bg-border-variant" />
+              className={`mb-0.5 shrink-0 text-muted transition-transform duration-120 ease-standard motion-reduce:transition-none ${row.collapsed ? "" : "rotate-90"}`} />
+            <span aria-hidden="true" className="mb-2.25 ms-1.5 h-px flex-1 bg-border-variant" />
           </button>
         </div>
       );
     }
-    const sessionRow = (project: Project, s: ChatSession, variant: "list" | "inbox" | "done") => {
+    const sessionRow = (project: Project, s: ChatSession, variant: "list" | "inbox" | "done", leadRun: ShownRun | null, markBelowDone: boolean) => {
       const sessionHarness = sessionAcpHarness(s, selectionHarness(harnesses, s));
       const sessionModel = sessionHarness?.models.find((model) => model.id === s.model);
       return (
@@ -8733,7 +9244,7 @@ export function ChatPanel({
           actions={sidebarActions}
           project={project}
           session={s}
-          cardWarmUntil={cardWarmUntil}
+          cardHover={cardHover}
           projectName={sidebarGrouping !== "projects" ? projectLabel(project) : undefined}
           harnessLogo={sessionHarness?.logo}
           modelName={modelName(s) ?? (sessionModel ? harnessModelLabel(sessionModel) : s.model)}
@@ -8742,6 +9253,8 @@ export function ChatPanel({
           busy={sessionBusy(project, s)}
           waiting={sessionWaiting(s)}
           runs={runsBySession.get(s.id) ?? EMPTY_RUNS}
+          leadRun={leadRun}
+          markBelowDone={markBelowDone}
           variant={variant}
           revealTitle={titleReveals.get(s.id)}
         />
@@ -8760,16 +9273,7 @@ export function ChatPanel({
         className="relative"
         style={{ height: sidebarRowHeight(row) }}
       >
-        {row.kind === "project" && project.scratch ? (
-          <div className="group h-9 flex items-end gap-1 rounded-md px-2.25 text-text">
-            <NoProjectGroupHeader
-              collapsed={row.collapsed}
-              busy={row.busy}
-              onToggleCollapsed={() => sidebarActions.current.toggleProjectCollapsed(project)}
-              onNewChat={() => sidebarActions.current.newProjectChat(project)}
-            />
-          </div>
-        ) : row.kind === "project" ? (
+        {row.kind === "project" ? (
           <div className="group h-9 flex items-end gap-1 rounded-md px-2.25 text-text">
             <SidebarProjectCard
               actions={sidebarActions}
@@ -8781,8 +9285,8 @@ export function ChatPanel({
             />
           </div>
         ) : s ? (
-          <div className={sidebarGrouping === "projects" ? "ms-5.5" : undefined}>
-            {sessionRow(project, s, row.kind === "inbox" ? "inbox" : row.kind === "done" ? "done" : "list")}
+          <div className={sidebarGrouping === "projects" && !project.unnamed ? "ms-5.5" : undefined}>
+            {sessionRow(project, s, row.kind === "inbox" ? "inbox" : row.kind === "done" ? "done" : "list", row.kind === "inbox" ? row.run : null, row.kind === "inbox" && row.section === "inbox")}
           </div>
         ) : row.kind === "more" ? (
           <Button variant="ghost" size="small" className="ms-5.5 font-normal text-subtext" aria-expanded={sidebarGroup(project) in chatLimits} onClick={() => {
@@ -8814,31 +9318,31 @@ export function ChatPanel({
         onPointerDown={onResizeRail}
       />}
       {railHeader}
-      <div className="rail-section-head flex items-center justify-between shrink-0 pt-3.5 pe-2 pb-0 ps-3.25">
-        <div className="rail-section-label p-0 text-sm font-medium text-subtext">
-          {sidebarGrouping === "projects" ? m.projects_home_projects() : sidebarGrouping === "list" ? m.chat_all_sessions() : m.sidebar_inbox()}
+      <div data-titlebar-drag className="rail-section-head @container flex items-center justify-between gap-2 shrink-0 pt-0 pe-2 pb-0.5 ps-3.25 select-none mac-titlebar:-mt-1">
+        <div className="rail-section-label min-w-0 truncate p-0 text-sm font-medium text-subtext">
+          {sidebarGrouping === "projects" ? m.projects_home_projects() : m.sidebar_chats()}
         </div>
-        <div className="rail-section-actions flex items-center gap-1">
-          {sidebarGrouping === "list" && <Tooltip interactive content={m.chat_panel_new_chat()} className="rounded-sm">
-            <IconButton size="small" className="text-subtext" aria-label={m.chat_panel_new_chat()} onClick={startNewTask}>
-              <Plus size={16} aria-hidden="true" />
-            </IconButton>
-          </Tooltip>}
-          {sidebarGrouping === "inbox" ? latestProject && <Tooltip interactive content={m.chat_panel_new_chat()} className="rounded-sm">
-            <IconButton size="small" className="text-subtext" aria-label={`${m.chat_panel_new_chat()} · ${latestProject.name}`} onClick={() => sidebarActions.current.newProjectChat(latestProject)}>
-              <SquarePen size={16} className="text-subtext" />
-            </IconButton>
-          </Tooltip> : onNewProject && <Tooltip interactive content={m.projects_home_new_project()} className="rounded-sm">
-            <IconButton size="small" className="text-subtext" aria-label={m.projects_home_new_project()} onClick={onNewProject}>
+        <div className="rail-section-actions flex shrink-0 items-center gap-1">
+          {sidebarGrouping === "projects" && <Tooltip interactive content={m.projects_home_new_project()} className="rounded-sm">
+            <IconButton size="small" className="text-subtext" aria-label={m.projects_home_new_project()} onClick={() => void startScratchChat()}>
               <FolderPlus size={16} className="text-subtext" />
             </IconButton>
           </Tooltip>}
-          <SessionFilterMenu value={sessionFilter} onChange={setSessionFilter} grouping={sidebarGrouping} onGroupingChange={(grouping) => {
+          <Button variant="ghost" size="small" className="px-2 font-normal text-subtext hover:text-text" aria-label={m.chat_panel_new_chat()} onClick={startNewTask}>
+            <SquarePen size={14} aria-hidden="true" />
+            {/* Beside the new project button, a rail at its narrowest has room for the icon only. */}
+            <span className={sidebarGrouping === "projects" ? "@max-[14.5rem]:hidden" : undefined}>{m.chat_panel_new_chat()}</span>
+          </Button>
+          <SidebarViewMenu value={sessionFilter} onChange={setSessionFilter} grouping={sidebarGrouping} onGroupingChange={(grouping) => {
             setSidebarGrouping(grouping);
+            if (grouping === "inbox") void offerInboxCleanup();
             try { localStorage.setItem("sidebar-grouping", grouping); } catch {}
             setSidebarExpandedAll(false);
             setChatLimits({});
             if (railBodyRef.current) railBodyRef.current.scrollTop = 0;
+          }} workingPlace={workingPlace} onWorkingPlaceChange={(place) => {
+            setWorkingPlace(place);
+            try { localStorage.setItem("sidebar-working-place", place); } catch {}
           }} />
         </div>
       </div>
@@ -8935,13 +9439,22 @@ export function ChatPanel({
   const railReopen = (!railOpen || mobileRail) && !embedded && (
     <SidebarToggle open={false} onClick={onShowRail} className="ms-2.5 max-md:ms-1 mac-titlebar:invisible mac-titlebar:ms-titlebar-inset" />
   );
+  // With the sidebar closed, New chat follows its toggle.
+  const railClosedControls = railReopen && (
+    <div className="flex items-center gap-1">
+      {railReopen}
+      <Tooltip interactive content={m.chat_panel_new_chat()} className="rounded-md">
+        <IconButton aria-label={m.chat_panel_new_chat()} onClick={startNewTask}><SquarePen size={16} /></IconButton>
+      </Tooltip>
+    </div>
+  );
 
   if (mainView !== "chat") {
     return (
       <>
         {displayedRail}
         <section inert={contentInert} className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
-          {mainView === "project" && (!railOpen || mobileRail) && <div className="mac-titlebar-spacer flex h-12 mac-titlebar:h-titlebar shrink-0 items-center">{railReopen}</div>}
+          {mainView === "project" && (!railOpen || mobileRail) && <div className="mac-titlebar-spacer flex h-12 mac-titlebar:h-titlebar shrink-0 items-center">{railClosedControls}</div>}
           {mainView !== "project" && <SettingsHeader active={mainView} onSelect={onSelectMainView} leading={railReopen} />}
           {/* Keyed per view so no tab inherits the chat thread's or another tab's scroll offset. */}
           <div key={mainView} className="settings-view-scroll flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]">
@@ -8959,11 +9472,32 @@ export function ChatPanel({
       <section inert={contentInert} data-side-chat={embedded || undefined} className="chat-pane relative flex-1 min-w-0 flex flex-col bg-background min-h-0">
         {/* Header — session title on the left, end-pane view switchers on the
           right, fading into the chat below (sessions live in the rail). */}
-        <div className={railOpen && !mobileRail || embedded ? "contents" : "chat-heading-row grid shrink-0 grid-cols-[2.625rem_minmax(0,1fr)_2.625rem] mac-titlebar:grid-cols-titlebar-chat items-center"}>
-          {railReopen}
+        <div className={railOpen && !mobileRail || embedded ? "contents" : "chat-heading-row grid shrink-0 grid-cols-[4.875rem_minmax(0,1fr)_4.875rem] mac-titlebar:grid-cols-titlebar-chat items-center"}>
+          {railClosedControls}
           <div className={headerClass}>
           <div className="flex min-w-0 flex-1 items-center gap-2">
             {activeSession && <>
+              {ancestors.length > 0 && (
+                <nav aria-label={m.chat_parent_chats()} className="-me-1 flex min-w-0 shrink items-center gap-1">
+                  {ancestors.map((ancestor) => {
+                    const label = ancestor.title?.trim() || (ancestor.delegate ? delegateModelLabel(ancestor, modelName) : m.chat_untitled());
+                    return (
+                      <Fragment key={ancestor.id}>
+                        <button
+                          type="button"
+                          dir="auto"
+                          className="min-w-8 max-w-48 cursor-pointer truncate rounded-sm text-base text-subtext transition-colors duration-120 ease-standard hover:text-text focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2"
+                          title={label}
+                          onClick={() => onOpenDelegate?.(ancestor.id)}
+                        >
+                          {label}
+                        </button>
+                        <ChevronRight size={14} className="shrink-0 text-muted rtl:rotate-180" aria-hidden="true" />
+                      </Fragment>
+                    );
+                  })}
+                </nav>
+              )}
               {activeSession.title?.trim() ? (
                 <PaperTitle variant="header" className="flex-initial" title={activeSession.title.trim()}>
                   <TitleReveal
@@ -9009,7 +9543,7 @@ export function ChatPanel({
             <p>{historyError.message}</p>
             <Button onClick={() => void historyQuery.refetch()}>{m.app_retry()}</Button>
           </div>
-        ) : (contentLoading || historyLoading) && !launching ? (
+        ) : (historyLoading || (contentLoading && activeId)) && !launching ? (
           <div className="chat-loading flex-1 min-h-0 overflow-hidden [scrollbar-gutter:stable_both-edges]" role="status" aria-label={m.chat_panel_loading_conversation()} aria-busy="true">
             <div aria-hidden="true" className="mx-auto flex h-full w-full max-w-readable flex-col gap-6 px-4 pb-8 pt-4 motion-safe:animate-pulse">
               <div className="ms-auto h-14 w-3/5 shrink-0 rounded-lg bg-panel" />
@@ -9118,8 +9652,8 @@ export function ChatPanel({
               transcriptSelection.dismiss();
             }}
           >
-            {/* Clips the launch rise at the composer, since a transform still extends the scroll range. */}
-            <div className="min-h-full overflow-y-clip">
+            {/* Clips the rows' bleed, and the launch rise at the composer, since a transform still extends the scroll range. */}
+            <div className="min-h-full overflow-hidden supports-[overflow:clip]:overflow-clip">
             <div className="chat-thread-inner max-w-readable my-0 mx-auto pt-4 px-4 pb-8 flex flex-col gap-4" ref={threadInnerRef}>
               <ChatImageScope projectId={projectId} sessionId={activeId}>
                 <ChatLinksContext value={chatLinks}>
@@ -9162,7 +9696,6 @@ export function ChatPanel({
                   onLeaveFeed={leaveTranscriptFeed}
                 />
                 </ChatLinksContext>
-              </ChatImageScope>
               {busy && awaitingInput && (
                 <div className="flex items-center gap-2 text-subtext text-sm pt-0.5 px-0 pb-2 italic">{m.chat_panel_waiting_for_your_input()}</div>
               )}
@@ -9191,6 +9724,7 @@ export function ChatPanel({
                   <span role="status" className="tool-running-shimmer -mt-3 ms-auto px-1 text-xs">{m.chat_steering()}</span>
                 </div>
               )}
+              </ChatImageScope>
             </div>
             </div>
           </div>
@@ -9233,13 +9767,16 @@ export function ChatPanel({
               </IconButton>
             </Tooltip>
           )}
-          <ExperimentRunBanner
-            key={activeId}
-            runs={activeRuns.filter((item) => item.sessionId === activeId)}
-            onOpenRun={onOpenRun}
-            onOpenExperiment={onOpenExperiment}
-          />
-          {!busy && <BackgroundTaskBanner background={activeSession?.background} />}
+          {activeId && (
+            <RunBanner
+              key={activeId}
+              sessionId={activeId}
+              agent={assistantLabel}
+              onOpenRun={onOpenRun}
+              onOpenRunPage={onOpenRunPage}
+            />
+          )}
+          {!busy && activeId && <BackgroundTaskBanner sessionId={activeId} background={activeSession?.background} />}
           {/* Inside the composer so the composer's popovers (mode/model pickers,
             z 50 within this stacking context) layer above the strip — as a
             sibling, the composer's own z-index: 4 capped them below it. */}
@@ -9353,15 +9890,18 @@ export function ChatPanel({
               </Tooltip>
             </div>
           )}
-          {!embedded && !activeId && !launching && onNewProject && (
+          {!embedded && !activeId && !launching && onImportProject && (
             <ComposerProjectPicker
               projects={sidebarProjects}
               activity={projectActivity}
               projectId={projectId}
               projectName={projectName}
-              onNewProject={onNewProject}
-              onNoProject={() => void startScratchChat()}
+              draftProject={draftProject}
+              onNewProject={() => void startScratchChat()}
+              onImport={() => onImportProject(draft)}
+              onOpenSettings={(project) => sidebarActions.current.openProjectSettings(project)}
               onSelect={(id) => {
+                requestNewChatFocus(id);
                 if (id !== projectId) void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: id } });
               }}
             />
@@ -9369,6 +9909,12 @@ export function ChatPanel({
           <RemoteConnectionStrip />
           <div inert={connection !== null} className={`composer-frame flex flex-col min-h-0 rounded-xl bg-surface${connection ? " opacity-60" : ""}`} data-onboarding="composer">
             <div className={`composer-box relative flex flex-col min-h-0 rounded-xl border ${bashMode && !asking ? "border-accent-amber" : "border-border"} bg-background shadow-control-subtle`}>
+              {draggingFiles && !asking && (
+                <div aria-hidden="true" className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-xl border-2 border-dashed border-accent-blue-border bg-background/85 text-accent-blue-strong">
+                  <Plus size={18} />
+                  <span className="text-sm font-medium">{m.chat_drop_to_attach()}</span>
+                </div>
+              )}
               {unconfirmedSend !== null && (
                 <div id={unconfirmedSendId} role="alert" className="flex items-start gap-2 pt-2 px-3 text-sm text-text">
                   <span className="flex-1" dir="auto">{m.chat_send_unconfirmed({ error: ltr(unconfirmedSend) })}</span>
@@ -9477,15 +10023,15 @@ export function ChatPanel({
                         : questions.part?.prompt?.options?.length
                           ? m.chat_question_custom_response()
                           : m.chat_question_your_answer()
-                      : steering && activeHarness
-                      ? m.chat_steer_placeholder({ harness: ltr(activeHarness.name), shortcut: ltr(queueChord) })
-                      : composerSelection
-                        ? activeHarness?.agentReady
-                          ? m.chat_message_harness({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
-                          : composerSignIn
-                            ? m.add_agent_sign_in_title({ name: autoDir(agentName ?? activeHarness?.name ?? "") })
-                            : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
-                        : m.chat_ask_agent_placeholder()
+                      : composerSelection && !activeHarness?.agentReady
+                        ? composerSignIn
+                          ? m.add_agent_sign_in_title({ name: autoDir(agentName ?? activeHarness?.name ?? "") })
+                          : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
+                        : draftProject
+                          ? m.chat_new_project_placeholder()
+                          : activeId
+                            ? m.chat_followup_placeholder()
+                            : m.chat_new_chat_placeholder()
                   }
                   plain={bashMode && !asking}
                   readOnly={questions.busy}
@@ -9493,7 +10039,7 @@ export function ChatPanel({
                   projectId={projectId}
                   draftKey={questions.part ? `question:${questions.part.id}` : stashKey}
                   resizeKey={embedded ? "orx:composer-height:side" : "orx:composer-height"}
-                  onFiles={asking ? () => {} : addFiles}
+                  onFiles={asking ? () => {} : addDropped}
                   onPaste={asking ? () => {} : onComposerPaste}
                   onChange={(v, cursor, typed) => {
                     if (asking) {
@@ -9584,7 +10130,6 @@ export function ChatPanel({
                   <input
                     ref={fileInputRef}
                     type="file"
-                    accept="application/pdf,image/png,image/jpeg,image/gif,image/webp"
                     multiple
                     hidden
                     onChange={(e) => {
@@ -9593,11 +10138,11 @@ export function ChatPanel({
                     }}
                   />
                   {!asking && (
-                    <Tooltip interactive content={m.chat_panel_attach_a_pdf_or_image()}>
+                    <Tooltip interactive content={m.chat_panel_attach_files()}>
                       <IconButton
                         type="button"
                         className="composer-attach"
-                        aria-label={m.chat_panel_attach_a_pdf_or_image()}
+                        aria-label={m.chat_panel_attach_files()}
                         onClick={() => fileInputRef.current?.click()}
                       >
                         <Paperclip size={16} />
@@ -9652,23 +10197,25 @@ export function ChatPanel({
             </div>
             <div className="composer-actions flex min-w-0 items-center gap-1 px-1.5 py-1">
               <div className="option-picker relative inline-flex shrink-0" ref={dataSources.ref}>
-                <Tooltip interactive content={m.chat_panel_data_sources()}>
+                <Tooltip interactive content={sourcesLabel}>
                   <IconButton
                     type="button"
                     size="small"
                     className={`composer-bare ${BAR_BUTTON}`}
-                    aria-label={m.chat_panel_data_sources()}
+                    aria-label={sourcesLabel}
                     aria-haspopup="dialog"
                     aria-expanded={dataSources.open}
                     onClick={() => dataSources.setOpen((open) => !open)}
                   >
-                    <LibraryBig size={16} />
+                    <span className="relative inline-flex">
+                      <LibraryBig size={16} />
+                      {litSources.sources?.differs && <span aria-hidden="true" className="absolute -end-1 -top-1 size-1.5 rounded-full bg-accent-blue" />}
+                    </span>
                   </IconButton>
                 </Tooltip>
                 {dataSources.open && (
                   <div className="composer-sources-menu absolute bottom-[calc(100%_+_8px)] start-0 z-50 flex min-w-55 flex-col gap-1 rounded-lg border border-border bg-background p-2 shadow-dropdown">
-                    <span className="px-1 text-sm font-medium text-muted">{m.chat_panel_data_sources()}</span>
-                    <LitSourcesList />
+                    <ChatLitSources {...litSources} />
                   </div>
                 )}
               </div>
@@ -9768,10 +10315,10 @@ export function ChatPanel({
                   reasoningChoices={activeHarness?.agentReady ? reasoning.choices : []}
                   defaultReasoningId={reasoning.defaultId}
                   onSelectReasoning={setReasoningLevel}
-                  autonomy={openSession?.autonomy ?? sideDraftAutonomy ?? preferredAutonomy}
+                  autonomy={openSession?.autonomy ?? draftAutonomy ?? preferredAutonomy}
                   onSelectAutonomy={setAutonomy}
                   disabled={switchingAgent}
-                  lockHarness={busy || switchingAgent || (!openSession && !!sideParentSessionId)}
+                  lockHarness={busy || switchingAgent}
                   openRequest={modelPickerRequest}
                   canNudge={!embedded && !contentInert}
                   nativeOptions={openSession?.harness.startsWith("acp:") ? acpOptions.filter((option) => option.category !== "model") : []}

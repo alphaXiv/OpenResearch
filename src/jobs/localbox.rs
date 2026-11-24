@@ -323,9 +323,12 @@ pub struct LocalHardware {
     pub hostname: String,
     pub os: &'static str,
     pub arch: &'static str,
-    /// CPU brand string on macOS (e.g. "Apple M2 Pro"); NVIDIA-less Linux
-    /// boxes just show cores/RAM.
+    /// The CPU's brand string, e.g. "Apple M2 Pro".
     pub chip: Option<String>,
+    /// The OS and its version, e.g. "macOS 15.2" or "Ubuntu 24.04.1 LTS".
+    pub os_name: Option<String>,
+    /// The computer's model, e.g. "MacBook Pro".
+    pub model: Option<String>,
     pub cpu_count: usize,
     pub mem_bytes: Option<u64>,
     pub gpus: Vec<Gpu>,
@@ -369,11 +372,9 @@ pub fn hardware_info() -> LocalHardware {
         hostname: cmd("hostname", &[]).unwrap_or_else(|| "unknown".to_string()),
         os: std::env::consts::OS,
         arch: std::env::consts::ARCH,
-        chip: if cfg!(target_os = "macos") {
-            cmd("sysctl", &["-n", "machdep.cpu.brand_string"])
-        } else {
-            None
-        },
+        chip: chip(&cmd),
+        os_name: os_name(&cmd),
+        model: model(&cmd),
         cpu_count: std::thread::available_parallelism().map_or(0, |n| n.get()),
         mem_bytes,
         gpus: cmd(
@@ -386,6 +387,99 @@ pub fn hardware_info() -> LocalHardware {
         .map(|out| parse_nvidia_smi_csv(&out))
         .unwrap_or_default(),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn chip(cmd: &dyn Fn(&str, &[&str]) -> Option<String>) -> Option<String> {
+    cmd("sysctl", &["-n", "machdep.cpu.brand_string"])
+}
+
+#[cfg(target_os = "macos")]
+fn os_name(cmd: &dyn Fn(&str, &[&str]) -> Option<String>) -> Option<String> {
+    cmd("sw_vers", &["-productVersion"]).map(|version| format!("macOS {version}"))
+}
+
+/// Apple silicon names itself, as `"product-name" = <"MacBook Pro (14-inch, Nov 2024)">`;
+/// the size and year are left off.
+#[cfg(target_os = "macos")]
+fn model(cmd: &dyn Fn(&str, &[&str]) -> Option<String>) -> Option<String> {
+    let out = cmd(
+        "ioreg",
+        &["-rd1", "-c", "IOPlatformDevice", "-k", "product-name"],
+    )?;
+    let name = out
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("\"product-name\" = <\""))?
+        .trim_end_matches("\">");
+    let name = name.split_once(" (").map_or(name, |(name, _)| name);
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn chip(_: &dyn Fn(&str, &[&str]) -> Option<String>) -> Option<String> {
+    let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+    cpuinfo
+        .lines()
+        .find_map(|line| line.strip_prefix("model name")?.split_once(':'))
+        .map(|(_, name)| name.trim().to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn os_name(_: &dyn Fn(&str, &[&str]) -> Option<String>) -> Option<String> {
+    let release = std::fs::read_to_string("/etc/os-release").ok()?;
+    release
+        .lines()
+        .find_map(|line| line.strip_prefix("PRETTY_NAME="))
+        .map(|name| name.trim_matches('"').to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn model(_: &dyn Fn(&str, &[&str]) -> Option<String>) -> Option<String> {
+    std::fs::read_to_string("/sys/devices/virtual/dmi/id/product_name")
+        .ok()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+}
+
+#[cfg(windows)]
+fn chip(_: &dyn Fn(&str, &[&str]) -> Option<String>) -> Option<String> {
+    windows_machine_string(
+        r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
+        "ProcessorNameString",
+    )
+}
+
+/// Windows 11 still names itself "Windows 10" in ProductName; its builds start at 22000.
+#[cfg(windows)]
+fn os_name(_: &dyn Fn(&str, &[&str]) -> Option<String>) -> Option<String> {
+    const KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
+    let product = windows_machine_string(KEY, "ProductName")?;
+    let build: u32 = windows_machine_string(KEY, "CurrentBuild")
+        .and_then(|build| build.parse().ok())
+        .unwrap_or(0);
+    let product = if build >= 22000 {
+        product.replacen("Windows 10", "Windows 11", 1)
+    } else {
+        product
+    };
+    Some(match windows_machine_string(KEY, "DisplayVersion") {
+        Some(version) => format!("{product} {version}"),
+        None => product,
+    })
+}
+
+#[cfg(windows)]
+fn model(_: &dyn Fn(&str, &[&str]) -> Option<String>) -> Option<String> {
+    windows_machine_string(r"HARDWARE\DESCRIPTION\System\BIOS", "SystemProductName")
+}
+
+#[cfg(windows)]
+fn windows_machine_string(key: &str, value: &str) -> Option<String> {
+    use windows_sys::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+
+    crate::local::shell_env::registry_string(HKEY_LOCAL_MACHINE, key, value)
+        .map(|value| value.to_string_lossy().trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 /// Parse `nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits`:

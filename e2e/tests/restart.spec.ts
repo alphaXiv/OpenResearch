@@ -1,11 +1,10 @@
-import { mkdirSync, writeFileSync } from 'node:fs'
-import path from 'node:path'
+import { readFileSync } from 'node:fs'
 import type { Page } from '@playwright/test'
 import type { Agent } from '../src/agent.ts'
 import { SPEEDUP, type Orx } from '../src/orx.ts'
 import { expect, send, test } from '../src/test.ts'
 
-// A crashed turn's lease lapses 60 s after its last heartbeat and orx up looks for lapsed ones
+// A stopped turn's lease lapses 60 s after its last heartbeat and orx up looks for lapsed ones
 // every 61 s, both divided by SPEEDUP.
 const leaseExpiry = { timeout: (2 * 61_000) / SPEEDUP + 10_000 }
 
@@ -24,71 +23,118 @@ async function midTurn(orx: Orx, page: Page, agent: Agent) {
   await expect(page.getByText('Profiling the loader.')).toBeVisible()
 }
 
-for (const [signal, how, quitting] of [['SIGTERM', 'quits', 'quitting'], ['SIGKILL', 'crashes', 'crashing']] as const) {
-  test(`when orx up ${how} mid-turn, the transcript survives and Continue resumes the turn`, async ({ page, agent, launchOrx }) => {
-    const orx = await launchOrx()
-    await midTurn(orx, page, agent)
-
-    await orx.restart(signal)
-    await page.reload()
-    await expect(page.getByText('The baseline trains in four minutes.')).toBeVisible()
-    await expect(page.getByText('Profiling the loader.')).toBeVisible()
-    await expect(page.getByText('This turn did not finish.')).toBeVisible(leaseExpiry)
-    await expect(page.getByText('Never sent.')).toBeHidden()
-
-    agent.script('Profile the data loader.', [{ say: 'The loader spends most of its time decoding JPEGs.' }])
-    await page.getByRole('button', { name: 'Continue', exact: true }).click()
-    await expect(page.getByText('The loader spends most of its time decoding JPEGs.')).toBeVisible()
-    await expect(page.getByText('This turn did not finish.')).toBeHidden()
-  })
-
-  test(`a message queued behind a turn survives orx up ${quitting} and runs once the turn is given up`, async ({ page, agent, launchOrx }) => {
-    const orx = await launchOrx()
-    await midTurn(orx, page, agent)
-    agent.script('Then try pinned memory.', [{ say: 'Pinned memory saves a second per epoch.' }])
-    await send(page, 'Then try pinned memory.')
-    await expect(page.getByText('Queued', { exact: true })).toBeVisible()
-
-    await orx.restart(signal)
-    await page.reload()
-    await expect(page.getByText('Then try pinned memory.')).toBeVisible()
-    await expect(page.getByText('This turn did not finish.')).toBeVisible(leaseExpiry)
-    await expect(page.getByText('Pinned memory saves a second per epoch.')).toBeVisible()
-    await expect(page.getByText('This turn did not finish.')).toHaveCount(1)
-    await expect(page.getByText('Queued', { exact: true })).toBeHidden()
-  })
-}
-
-test('restarting into an update asks before stopping a working agent, whose turn can continue afterwards', async ({ page, agent, launchOrx }) => {
+test('when orx up quits mid-turn, the next start resumes the turn on its own', async ({ page, agent, launchOrx }) => {
   const orx = await launchOrx()
-  // The relaunch keeps orx up's arguments, and the first launch asks for any free port.
-  await orx.restart()
   await midTurn(orx, page, agent)
-  // As the updater leaves things once it has installed a release underneath this server.
-  const { channel } = await (await fetch(`${orx.url}/api/update`)).json()
-  const config = path.join(orx.root, 'home', '.config', 'openresearch')
-  mkdirSync(config, { recursive: true })
-  writeFileSync(path.join(config, `update-check-${channel}.json`), JSON.stringify({ checked_at: 1, latest: '99.0.0', installed_version: '99.0.0' }))
-  await page.reload()
-
-  const dialog = page.getByRole('dialog')
-  await page.getByRole('button', { name: 'Restart now' }).first().click()
-  await expect(dialog.getByText('Agents are still working')).toBeVisible()
-  await expect(dialog.getByRole('listitem')).toHaveCount(1)
-  await dialog.getByRole('button', { name: 'Cancel' }).click()
-  await expect(dialog).toBeHidden()
-  await expect(page.getByText('Profiling the loader.')).toBeVisible()
-  await expect(page.getByText('This turn did not finish.')).toBeHidden()
-
-  await page.getByRole('button', { name: 'Restart now' }).first().click()
-  // The page reloads itself once the relaunched server answers.
-  const reloaded = page.waitForEvent('load')
-  await dialog.getByRole('button', { name: 'Restart now' }).click()
-  await reloaded
-  await expect(page.getByText('This turn did not finish.')).toBeVisible()
-  await expect(page.getByText('Never sent.')).toBeHidden()
 
   agent.script('Profile the data loader.', [{ say: 'The loader spends most of its time decoding JPEGs.' }])
-  await page.getByRole('button', { name: 'Continue', exact: true }).click()
+  await orx.restart('SIGTERM')
+  await page.reload()
+  await expect(page.getByText('The baseline trains in four minutes.')).toBeVisible()
+  await expect(page.getByText('Profiling the loader.')).toBeVisible()
   await expect(page.getByText('The loader spends most of its time decoding JPEGs.')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Continue', exact: true })).toBeHidden()
+  await expect(page.getByText('Never sent.')).toBeHidden()
+})
+
+test('a message queued behind a turn survives orx up quitting and runs once the turn ends', async ({ page, agent, launchOrx }) => {
+  const orx = await launchOrx()
+  await midTurn(orx, page, agent)
+  agent.script('Then try pinned memory.', [{ say: 'Pinned memory saves a second per epoch.' }])
+  await send(page, 'Then try pinned memory.')
+  await expect(page.getByText('Queued', { exact: true })).toBeVisible()
+
+  agent.script('Profile the data loader.', [{ say: 'The loader spends most of its time decoding JPEGs.' }])
+  await orx.restart('SIGTERM')
+  await page.reload()
+  await expect(page.getByText('Then try pinned memory.')).toBeVisible()
+  await expect(page.getByText('The loader spends most of its time decoding JPEGs.')).toBeVisible()
+  await expect(page.getByText('Pinned memory saves a second per epoch.')).toBeVisible(leaseExpiry)
+  await expect(page.getByText('Queued', { exact: true })).toBeHidden()
+  await expect(page.getByRole('button', { name: 'Continue', exact: true })).toBeHidden()
+})
+
+test('a turn a crash kept from reaching the agent is sent on its own at the next start', async ({ page, agent, launchOrx }) => {
+  const orx = await launchOrx()
+  await orx.onboard()
+  const project = await orx.createProject('restart')
+  agent.holdStart('starting')
+  agent.script('Profile the data loader.', [{ say: 'The loader spends most of its time decoding JPEGs.' }])
+  await project.open(page)
+  await send(page, 'Profile the data loader.')
+  await agent.reached('starting')
+
+  await orx.restart('SIGKILL')
+  await page.reload()
+  await expect(page.getByText('The loader spends most of its time decoding JPEGs.')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeHidden()
+  await expect(page.getByText(/before this turn finished/)).toBeHidden()
+})
+
+test('a crashed ACP turn finishes the same reply without another prompt', async ({ page, agent, launchOrx }) => {
+  const orx = await launchOrx()
+  await midTurn(orx, page, agent)
+  const message = page.locator('[data-message-id]').filter({ has: page.getByText('Profiling the loader.', { exact: true }) })
+  const messageId = await message.getAttribute('data-message-id')
+  expect(messageId).toBeTruthy()
+  await orx.restart('SIGKILL')
+  await page.reload()
+  agent.release('profiling')
+  await expect(page.getByText('Profiling the loader. Never sent.', { exact: true })).toBeVisible()
+  await expect(page.getByText(/before this turn finished/)).toBeHidden()
+  await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeHidden()
+  await expect(page.locator(`[data-message-id="${messageId}"]`).getByText('Profiling the loader. Never sent.', { exact: true })).toBeVisible()
+  await page.reload()
+  await expect(page.getByText('Profiling the loader. Never sent.', { exact: true })).toHaveCount(1)
+})
+
+test('an ACP permission card survives a crash and answers its original request', async ({ page, agent, launchOrx }) => {
+  const orx = await launchOrx()
+  await orx.onboard()
+  const project = await orx.createProject('restart-permission')
+  agent.script('Inspect the data.', [{ permission: 'Read the training data' }, { say: 'Data inspection finished.' }])
+  await project.open(page)
+  await send(page, 'Inspect the data.')
+  await expect(page.getByRole('button', { name: 'Allow this action', exact: true })).toBeVisible()
+  await orx.restart('SIGKILL')
+  await page.reload()
+  await expect(page.getByRole('button', { name: 'Allow this action', exact: true })).toHaveCount(1)
+  await page.getByRole('button', { name: 'Allow this action', exact: true }).click()
+  await expect(page.getByText('Data inspection finished.', { exact: true })).toBeVisible()
+  await expect(page.getByText(/before this turn finished/)).toBeHidden()
+})
+
+test('an ACP command running during a crash completes on the adopted connection', async ({ page, agent, launchOrx }) => {
+  const orx = await launchOrx()
+  await orx.onboard()
+  const project = await orx.createProject('restart-command')
+  agent.script('Run the analysis.', [
+    { say: 'Analysis started. ' },
+    { run: `curl --fail --silent --request POST '${agent.url}/hold/command' && printf COMMAND_FINISHED` },
+    { say: 'Analysis finished.' },
+  ])
+  await project.open(page)
+  await send(page, 'Run the analysis.')
+  await agent.reached('command')
+  await orx.restart('SIGKILL')
+  await page.reload()
+  agent.release('command')
+  await expect(page.getByText('Analysis finished.', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeHidden()
+  await expect(page.getByText(/before this turn finished/)).toBeHidden()
+  expect(readFileSync(orx.agentLog, 'utf8')).toContain('COMMAND_FINISHED')
+})
+
+test('a turn running when orx up hands off to its next build finishes the same reply', async ({ page, agent, launchOrx }) => {
+  const orx = await launchOrx()
+  await midTurn(orx, page, agent)
+  // What `node dev.ts restart` and an update restart do: hand the work to the next server.
+  await orx.restart('SIGUSR2')
+  await page.reload()
+  agent.release('profiling')
+  await expect(page.getByText('Profiling the loader. Never sent.', { exact: true })).toBeVisible()
+  await expect(page.getByText(/before this turn finished/)).toBeHidden()
+  await page.reload()
+  await expect(page.getByText('Profiling the loader. Never sent.', { exact: true })).toHaveCount(1)
+  await expect(page.getByText('The baseline trains in four minutes.')).toHaveCount(1)
 })

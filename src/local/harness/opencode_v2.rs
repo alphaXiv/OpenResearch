@@ -5,8 +5,12 @@ use std::pin::Pin;
 use futures::stream::BoxStream;
 use futures::{FutureExt, StreamExt, TryStreamExt};
 
+use serde::{Deserialize, Serialize};
+
 use super::*;
 use crate::error::Context;
+use crate::keep::KeptHandle;
+use crate::local::chat::Resume;
 use crate::local::opencode::AgentEndpoint;
 
 async fn get(endpoint: &AgentEndpoint, path: &str) -> Result<Value> {
@@ -81,10 +85,10 @@ pub(super) async fn run_turn(
     database: PathBuf,
 ) -> Result<()> {
     ensure_runtime(ctx, store, binary, database).await?;
-    let endpoint = ctx
+    let (endpoint, keeper) = ctx
         .host
         .opencode
-        .endpoint_for(&ctx.session_id)
+        .server_for(&ctx.session_id)
         .await
         .ok_or_else(|| anyhow!("OpenCode stopped during setup"))?;
     let mut model = ctx
@@ -102,8 +106,11 @@ pub(super) async fn run_turn(
         get(&endpoint, &format!("/api/session/{id}")).await?;
         id.clone()
     } else {
-        let directory =
-            crate::local::git::existing_session_worktree_path(&ctx.project, &ctx.session_id);
+        let directory = crate::local::git::existing_session_worktree_path(
+            &crate::store::Store::open()?,
+            &ctx.project,
+            &ctx.session_id,
+        )?;
         let mut body =
             json!({"agent":opencode_agent(ctx.plan_mode),"location":{"directory":directory}});
         if let Some(model) = &model {
@@ -136,19 +143,16 @@ pub(super) async fn run_turn(
     if let Some(model) = model {
         post(&endpoint, &format!("{path}/model"), &json!({"model":model})).await?;
     }
-    let mut events = subscribe(&endpoint).await?;
-    let before = get(&endpoint, &endpoint.v2_export_path(&native_id)).await?;
-    let previous: HashSet<String> = messages(&before)?
-        .iter()
-        .filter_map(|m| m["id"].as_str().map(str::to_owned))
-        .collect();
-    let prompt_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+    let events = subscribe(&endpoint).await?;
+    let checkpoint = Checkpoint {
+        prompt_id: format!("msg_{}", uuid::Uuid::new_v4().simple()),
+    };
     ctx.persist_delivery(DeliveryState::Unknown)?;
     // A transport failure can follow durable admission. Never replay this POST.
     let admission = post(
         &endpoint,
         &format!("{path}/prompt"),
-        &json!({"id":prompt_id,"text":ctx.text}),
+        &json!({"id":checkpoint.prompt_id,"text":ctx.text}),
     )
     .await;
     if admission.is_ok() {
@@ -156,137 +160,83 @@ pub(super) async fn run_turn(
     }
     let mut turn = Turn {
         endpoint: &endpoint,
+        keeper: &keeper,
+        checkpoint: &checkpoint,
         native_id: &native_id,
         path: &path,
-        prompt_id: &prompt_id,
         delivered: false,
-        previous: &previous,
         steps: Vec::new(),
         recorded: HashSet::new(),
         surfaced: HashSet::new(),
     };
-    let mut answered = ctx.host.prompt_answered.subscribe();
+    turn.commit(ctx)?;
+    let answered = ctx.host.prompt_answered.subscribe();
     turn.reconcile(ctx).await?;
     // A rejected prompt starts no execution, so no event would ever end this wait.
-    let mut ended = admission.is_err() && turn.idle().await?;
-    let mut failure = None;
-    let mut failure_retry_after = None;
-    let mut stopped = false;
-    let mut stale = false;
-    while !ended {
-        let event = tokio::select! {
-            event = events.next() => event,
-            _ = ctx.flush_due() => {
-                ctx.flush()?;
-                continue;
-            }
-            answer = answered.recv() => {
-                // A local answer can activate a conditional form field; the card is resolved
-                // only after the harness replies, so adopt it before looking again.
-                if !matches!(&answer, Ok(session) if *session != ctx.session_id) {
-                    ctx.flush()?;
-                    turn.reconcile(ctx).await?;
-                }
-                continue;
-            }
-        };
-        let Some(Ok(event)) = event else {
-            events = subscribe(&endpoint).await.map_err(|error| {
-                anyhow!("OpenCode stopped streaming this chat's events: {error}")
-            })?;
-            let (projection, _) = turn.reconcile(ctx).await?;
-            turn.delivered |= turn.holds_prompt(&projection)?;
-            ended = turn.idle().await?;
-            continue;
-        };
-        let kind = event["type"].as_str().unwrap_or_default();
-        let data = &event["data"];
-        match fold(&mut turn.steps, &native_id, &event) {
-            Some(Folded::Text { part, delta }) => ctx.append_part_text(&part, delta),
-            Some(Folded::Step(index)) => {
-                for (part, _) in projected_parts(&turn.steps[index]) {
-                    ctx.upsert_part(part);
-                }
-            }
-            None if kind == "session.inbox.delivered"
-                && data["inboxID"].as_str() == Some(prompt_id.as_str()) =>
-            {
-                turn.delivered = true;
-                stale = true;
-            }
-            None if data["sessionID"].as_str() == Some(native_id.as_str())
-                && matches!(
-                    kind,
-                    "session.execution.succeeded"
-                        | "session.execution.failed"
-                        | "session.execution.interrupted"
-                ) =>
-            {
-                ended = turn.finished(ctx).await?;
-                if ended {
-                    failure = data.get("error").map(error_text);
-                    failure_retry_after = data.get("error").and_then(error_retry_after_ms);
-                    stopped = kind == "session.execution.interrupted";
-                }
-            }
-            // A failed step is only terminal once no retry follows, which the next event says.
-            None if kind == "session.step.failed" => stale = false,
-            None => {
-                stale |= event.get("durable").is_some()
-                    || kind == "session.retry.scheduled"
-                    || kind.starts_with("permission.")
-                    || kind.starts_with("form.");
-            }
-        }
-        if stale && Pin::new(&mut events).peek().now_or_never().is_none() {
-            turn.reconcile(ctx).await?;
-            stale = false;
-        }
-        ctx.maybe_flush();
-    }
-    turn.steps.clear();
-    for read in 0..FINAL_READS {
-        // The export can trail the event that ended the execution.
-        if read > 0 {
-            tokio::time::sleep(crate::config::paced(Duration::from_millis(100))).await;
-        }
-        let (projection, answered) = turn.reconcile(ctx).await?;
-        let delivered = messages(&projection)?
-            .iter()
-            .any(|m| m["id"].as_str() == Some(&prompt_id));
-        let outcome = projection
-            .pointer("/data/info/outcome")
-            .and_then(Value::as_str);
-        // Declining a permission or question interrupts the execution without an export outcome.
-        if delivered
-            && answered
-            && (stopped || matches!(outcome, Some("succeeded" | "interrupted")))
-        {
-            ctx.persist_delivery(DeliveryState::Accepted)?;
-            ctx.mark_final_text_tail();
-            return Ok(());
-        }
-        if let (true, Some(message)) = (delivered, &failure) {
-            // Failures before a step (e.g. an unavailable model) leave no assistant message.
-            ctx.mark_native_retry_exhausted();
-            ctx.mark_usage_reset(failure_retry_after);
-            ctx.mark_terminal_failure("opencode_terminal", message);
-            return Err(anyhow!("OpenCode V2: {message}"));
-        }
-    }
-    admission?;
-    Err(anyhow!(
-        "OpenCode V2 became idle without completing this prompt"
-    ))
+    let ended = admission.is_err() && turn.idle().await?;
+    turn.follow(ctx, events, answered, ended, admission).await
+}
+
+/// What a turn checkpoints beside its transcript; the export and the pending requests hold the
+/// rest.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Checkpoint {
+    prompt_id: String,
+}
+
+/// Goes on with a turn a previous server left running on this chat's kept server: its prompt's
+/// place in the export marks which messages are the turn's, and the transcript's cards are the
+/// requests already surfaced.
+pub(super) async fn resume_turn(ctx: &mut TurnCtx, resume: Resume) -> Result<()> {
+    let (endpoint, keeper) = ctx
+        .host
+        .opencode
+        .server_for(&ctx.session_id)
+        .await
+        .filter(|(_, keeper)| keeper.id() == resume.keep_id)
+        .ok_or_else(|| {
+            anyhow!("The OpenCode server this turn ran on stopped while orx restarted")
+        })?;
+    let native_id = ctx
+        .native_session_id
+        .clone()
+        .ok_or_else(|| anyhow!("This OpenCode turn has no session to resume"))?;
+    let checkpoint: Checkpoint = serde_json::from_value(resume.state)
+        .map_err(|error| anyhow!("This OpenCode turn has an unreadable checkpoint: {error}"))?;
+    let path = format!("/api/session/{native_id}");
+    // Subscribed before reading back, so nothing between the two is missed.
+    let events = subscribe(&endpoint).await?;
+    let surfaced = ctx
+        .assistant
+        .parts
+        .iter()
+        .filter_map(|part| part.prompt.as_ref()?.native_id.clone())
+        .collect();
+    let mut turn = Turn {
+        endpoint: &endpoint,
+        keeper: &keeper,
+        checkpoint: &checkpoint,
+        native_id: &native_id,
+        path: &path,
+        delivered: false,
+        steps: Vec::new(),
+        recorded: HashSet::new(),
+        surfaced,
+    };
+    let answered = ctx.host.prompt_answered.subscribe();
+    // The stream no longer carries the delivery a previous server may have seen.
+    let (projection, _) = turn.reconcile(ctx).await?;
+    turn.delivered = turn.holds_prompt(&projection)?;
+    let ended = turn.idle().await?;
+    turn.follow(ctx, events, answered, ended, Ok(())).await
 }
 
 const FINAL_READS: usize = 3;
 
 /// OpenCode's event bus. Text deltas and the step in flight reach only this stream; the export
 /// gains an assistant message when its step ends.
-async fn subscribe(
-    endpoint: &AgentEndpoint,
-) -> Result<futures::stream::Peekable<BoxStream<'static, Result<Value>>>> {
+async fn subscribe(endpoint: &AgentEndpoint) -> Result<Events> {
     use tokio::io::AsyncBufReadExt;
     let response = endpoint
         .client
@@ -407,33 +357,170 @@ fn fold<'a>(steps: &mut Vec<Value>, native_id: &str, event: &'a Value) -> Option
     Some(Folded::Step(index))
 }
 
+type Events = futures::stream::Peekable<BoxStream<'static, Result<Value>>>;
+
 /// One prompt's view of its session: the export for finished steps, `steps` for those in flight.
 struct Turn<'a> {
     endpoint: &'a AgentEndpoint,
+    /// The server's keeper, which the turn checkpoints against.
+    keeper: &'a KeptHandle,
+    checkpoint: &'a Checkpoint,
     native_id: &'a str,
     path: &'a str,
-    prompt_id: &'a str,
     /// Whether the event stream has said OpenCode took the prompt out of its inbox to run it.
     delivered: bool,
-    previous: &'a HashSet<String>,
     steps: Vec<Value>,
     recorded: HashSet<String>,
     surfaced: HashSet<String>,
 }
 
 impl Turn<'_> {
+    /// Commits the transcript with the turn's checkpoint. The server's own output carries
+    /// nothing a turn applies, so the checkpoint sits where this attachment's output starts.
+    fn commit(&self, ctx: &mut TurnCtx) -> Result<()> {
+        ctx.flush_at(self.keeper, self.keeper.start(), self.checkpoint)
+    }
+
+    /// Follows the session's events until the prompt's execution ends, then reads its outcome.
+    async fn follow(
+        &mut self,
+        ctx: &mut TurnCtx,
+        mut events: Events,
+        mut answered: tokio::sync::broadcast::Receiver<String>,
+        mut ended: bool,
+        admission: Result<()>,
+    ) -> Result<()> {
+        let prompt_id = self.checkpoint.prompt_id.as_str();
+        let mut failure = None;
+        let mut failure_retry_after = None;
+        let mut stopped = false;
+        let mut stale = false;
+        while !ended {
+            let event = tokio::select! {
+                event = events.next() => event,
+                _ = ctx.flush_due() => {
+                    self.commit(ctx)?;
+                    continue;
+                }
+                answer = answered.recv() => {
+                    // A local answer can activate a conditional form field; the card is resolved
+                    // only after the harness replies, so adopt it before looking again.
+                    if !matches!(&answer, Ok(session) if *session != ctx.session_id) {
+                        self.commit(ctx)?;
+                        self.reconcile(ctx).await?;
+                    }
+                    continue;
+                }
+            };
+            let Some(Ok(event)) = event else {
+                events = subscribe(self.endpoint).await.map_err(|error| {
+                    anyhow!("OpenCode stopped streaming this chat's events: {error}")
+                })?;
+                let (projection, _) = self.reconcile(ctx).await?;
+                self.delivered |= self.holds_prompt(&projection)?;
+                ended = self.idle().await?;
+                continue;
+            };
+            let kind = event["type"].as_str().unwrap_or_default();
+            let data = &event["data"];
+            match fold(&mut self.steps, self.native_id, &event) {
+                Some(Folded::Text { part, delta }) => ctx.append_part_text(&part, delta),
+                Some(Folded::Step(index)) => {
+                    for (part, _) in projected_parts(&self.steps[index]) {
+                        ctx.upsert_part(part);
+                    }
+                }
+                None if kind == "session.inbox.delivered"
+                    && data["inboxID"].as_str() == Some(prompt_id) =>
+                {
+                    self.delivered = true;
+                    stale = true;
+                }
+                None if data["sessionID"].as_str() == Some(self.native_id)
+                    && matches!(
+                        kind,
+                        "session.execution.succeeded"
+                            | "session.execution.failed"
+                            | "session.execution.interrupted"
+                    ) =>
+                {
+                    ended = self.finished(ctx).await?;
+                    if ended {
+                        failure = data.get("error").map(error_text);
+                        failure_retry_after = data.get("error").and_then(error_retry_after_ms);
+                        stopped = kind == "session.execution.interrupted";
+                    }
+                }
+                // A failed step is only terminal once no retry follows, which the next event says.
+                None if kind == "session.step.failed" => stale = false,
+                None => {
+                    stale |= event.get("durable").is_some()
+                        || kind == "session.retry.scheduled"
+                        || kind.starts_with("permission.")
+                        || kind.starts_with("form.");
+                }
+            }
+            if stale && Pin::new(&mut events).peek().now_or_never().is_none() {
+                self.reconcile(ctx).await?;
+                stale = false;
+            }
+            ctx.maybe_flush_at(self.keeper, self.keeper.start(), self.checkpoint);
+        }
+        self.steps.clear();
+        for read in 0..FINAL_READS {
+            // The export can trail the event that ended the execution.
+            if read > 0 {
+                tokio::time::sleep(crate::config::paced(Duration::from_millis(100))).await;
+            }
+            let (projection, answered) = self.reconcile(ctx).await?;
+            let delivered = self.holds_prompt(&projection)?;
+            let outcome = projection
+                .pointer("/data/info/outcome")
+                .and_then(Value::as_str);
+            // Declining a permission or question interrupts the execution without an export outcome.
+            if delivered
+                && answered
+                && (stopped || matches!(outcome, Some("succeeded" | "interrupted")))
+            {
+                ctx.persist_delivery(DeliveryState::Accepted)?;
+                ctx.mark_final_text_tail();
+                return Ok(());
+            }
+            if let (true, Some(message)) = (delivered, &failure) {
+                // Failures before a step (e.g. an unavailable model) leave no assistant message.
+                ctx.mark_native_retry_exhausted();
+                ctx.mark_usage_reset(failure_retry_after);
+                ctx.mark_terminal_failure("opencode_terminal", message);
+                return Err(anyhow!("OpenCode V2: {message}"));
+            }
+        }
+        admission?;
+        Err(anyhow!(
+            "OpenCode V2 became idle without completing this prompt"
+        ))
+    }
+
     /// Merges the export and the steps it does not hold yet, then surfaces pending requests.
     async fn reconcile(&mut self, ctx: &mut TurnCtx) -> Result<(Value, bool)> {
         let projection = get(self.endpoint, &self.endpoint.v2_export_path(self.native_id)).await?;
-        let mut current = messages(&projection)?.clone();
+        let exported = messages(&projection)?;
         self.steps.retain(|step| {
-            !current.iter().any(|message| {
+            !exported.iter().any(|message| {
                 message["id"] == step["id"]
                     && message
                         .pointer("/time/completed")
                         .is_some_and(|time| !time.is_null())
             })
         });
+        // The export orders steps by when they started but holds each only once it settles, so a
+        // step OpenCode finalizes late, like one a stopped server left running, lands before this
+        // prompt: only what follows the prompt is this turn's.
+        let mut current: Vec<Value> = exported
+            .iter()
+            .skip_while(|message| message["id"].as_str() != Some(&self.checkpoint.prompt_id))
+            .skip(1)
+            .cloned()
+            .collect();
         for step in &self.steps {
             match current
                 .iter_mut()
@@ -448,21 +535,25 @@ impl Turn<'_> {
             self.endpoint,
             self.native_id,
             &current,
-            self.previous,
             &mut self.recorded,
         )
         .await?;
         if self.holds_prompt(&projection)? && ctx.delivery_state() != DeliveryState::Accepted {
             ctx.persist_delivery(DeliveryState::Accepted)?;
         }
+        let surfaced = self.surfaced.len();
         prompts(ctx, self.endpoint, self.path, &mut self.surfaced).await?;
+        // A card renders at once, and an answer orx gave is checkpointed after it was sent.
+        if self.surfaced.len() > surfaced {
+            self.commit(ctx)?;
+        }
         Ok((projection, answered))
     }
 
     fn holds_prompt(&self, projection: &Value) -> Result<bool> {
         Ok(messages(projection)?
             .iter()
-            .any(|message| message["id"].as_str() == Some(self.prompt_id)))
+            .any(|message| message["id"].as_str() == Some(self.checkpoint.prompt_id.as_str())))
     }
 
     /// Whether an execution's end is this prompt's. The export can hold the prompt before the
@@ -485,7 +576,7 @@ impl Turn<'_> {
             .as_array()
             .ok_or_else(|| anyhow!("OpenCode V2 inbox response is invalid"))?
             .iter()
-            .any(|item| item["id"].as_str() == Some(self.prompt_id)))
+            .any(|item| item["id"].as_str() == Some(self.checkpoint.prompt_id.as_str())))
     }
 
     async fn idle(&self) -> Result<bool> {
@@ -503,15 +594,12 @@ async fn merge_projection(
     endpoint: &AgentEndpoint,
     native_id: &str,
     messages: &[Value],
-    previous: &HashSet<String>,
     recorded: &mut HashSet<String>,
 ) -> Result<bool> {
     let mut answered = false;
     let mut latest_usage = None;
     let mut latest_retry = None;
-    for message in messages.iter().filter(|m| {
-        m["id"].as_str().is_some_and(|id| !previous.contains(id)) && m["type"] == "assistant"
-    }) {
+    for message in messages.iter().filter(|m| m["type"] == "assistant") {
         if message.get("retry").is_none_or(Value::is_null)
             && message
                 .pointer("/time/completed")
@@ -1214,7 +1302,7 @@ pub(super) async fn detect(
         result
     })
     .await;
-    match catalog {
+    match &catalog {
         Ok(Ok((models, integrations))) => {
             let connected: HashSet<&str> = integrations["data"]
                 .as_array()
@@ -1278,6 +1366,16 @@ pub(super) async fn detect(
         Ok(Err(error)) => info.agent_note = Some(error.to_string()),
         Err(error) => info.agent_note = Some(format!("OpenCode discovery failed: {error}")),
     }
+
+    let integrations = match &catalog {
+        Ok(Ok((_, integrations))) => integrations,
+        _ => &Value::Null,
+    };
+    let catalog = info
+        .models
+        .iter()
+        .map(|model| super::model_provider(&model.id));
+    info.found_providers = super::found_providers(catalog, integrations);
     if let Err(error) = refreshed {
         info.agent_note = Some(format!("Could not refresh provider models: {error}"));
     }
@@ -1329,15 +1427,21 @@ async fn discover_models_within(
 ) -> Result<(Value, Value)> {
     let mut catalog = None;
     let mut plugins_pending = false;
-    let result = tokio::time::timeout(timeout, async {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let result = tokio::time::timeout_at(deadline, async {
         if endpoint.legacy_v2_api {
             post(endpoint, "/api/plugin/await-activation", &json!({})).await?;
         }
         loop {
-            if !endpoint.legacy_v2_api && !endpoint.plugins_active().await? {
-                plugins_pending = true;
-                tokio::time::sleep(retry).await;
-                continue;
+            if !endpoint.legacy_v2_api {
+                // A plugin check the deadline cuts off counts as pending; an answer leaves what the
+                // catalogs last said.
+                let catalogs_pending = std::mem::replace(&mut plugins_pending, true);
+                if !endpoint.plugins_active(deadline).await? {
+                    tokio::time::sleep(retry).await;
+                    continue;
+                }
+                plugins_pending = catalogs_pending;
             }
             let models = catalog_get(endpoint, "/api/model").await?;
             plugins_pending = models.is_none();
@@ -1386,7 +1490,8 @@ pub(super) async fn generate(
         .filter(|(provider, id)| !provider.trim().is_empty() && !id.trim().is_empty())
         .ok_or_else(|| anyhow!("OpenCode V2 needs a model in provider/model form."))?;
     let body = json!({"prompt":prompt,"model":{"providerID":provider,"id":id}});
-    tokio::spawn(async move {
+    // Inline, so a caller that gives up drops the server with it.
+    async move {
         let db = native_store::prepare_opencode(NativeStore::Isolated)?;
         let lease = crate::local::opencode::prepare_database(&binary, &db).await?;
         let mut cmd = crate::process::tokio_command(&binary.path);
@@ -1433,8 +1538,8 @@ pub(super) async fn generate(
         .and_then(|result| result);
         let _ = child.kill().await;
         result
-    })
-    .await?
+    }
+    .await
 }
 
 #[cfg(test)]
@@ -1890,6 +1995,47 @@ mod tests {
         }
     }
 
+    /// The first `/api/plugin` boots OpenCode's location; on a busy machine it answers after
+    /// seconds, and only the discovery deadline may give up on it.
+    #[tokio::test]
+    async fn discovery_waits_for_a_slow_first_plugin_answer() {
+        use axum::{routing::get, Json, Router};
+
+        for (answer_after, budget) in [
+            (Duration::from_millis(2500), Duration::from_secs(10)),
+            (Duration::from_secs(60), Duration::from_millis(200)),
+        ] {
+            let app = Router::new()
+                .route(
+                    "/api/plugin",
+                    get(move || async move {
+                        tokio::time::sleep(answer_after).await;
+                        Json(json!({"data":[{"id":"fixture"}]}))
+                    }),
+                )
+                .route(
+                    "/api/model",
+                    get(|| async { Json(json!({"data":[{"id":"model"}]})) }),
+                )
+                .route(
+                    "/api/integration",
+                    get(|| async { Json(json!({"data":[]})) }),
+                );
+            let (endpoint, server) = catalog_server(app, false).await;
+            let result = discover_models_within(&endpoint, budget, RETRY).await;
+            server.abort();
+            if answer_after < budget {
+                assert_eq!(result.unwrap().0["data"][0]["id"], "model");
+            } else {
+                let error = result.unwrap_err().to_string();
+                assert!(
+                    error.starts_with("OpenCode plugins did not finish activating"),
+                    "{error}"
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn discovery_polls_cold_catalogs_and_keeps_the_last_complete_pair() {
         use axum::{http::StatusCode, routing::get, Json, Router};
@@ -2215,5 +2361,275 @@ mod catalog_tests {
         assert_eq!(with(json!(["text"])), Some(false));
         assert_eq!(with(json!([])), None);
         assert_eq!(image_input(&json!({})), None);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod restart_tests {
+    use super::*;
+    use axum::{
+        routing::{get, post},
+        Json, Router,
+    };
+    use std::sync::{Arc, Mutex};
+
+    fn permission(id: &str) -> Value {
+        json!({"id":id,"action":"shell","resources":["ls"],"metadata":{"input":{}}})
+    }
+
+    #[test]
+    fn a_resumed_turn_finishes_from_the_export_without_prompting_again() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let prompted = Arc::new(Mutex::new(false));
+            let running = Arc::new(Mutex::new(true));
+            let listed = Arc::new(tokio::sync::Notify::new());
+            let (send, events) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let events = Arc::new(Mutex::new(Some(events)));
+            let export = json!({"data":{"info":{"outcome":"succeeded"},"messages":[
+                {"id":"msg_earlier","type":"assistant","time":{"completed":1},
+                    "content":[{"type":"text","text":"an earlier answer"}]},
+                {"id":"msg_prompt","type":"user"},
+                {"id":"msg_reply","type":"assistant","time":{"completed":2},
+                    "content":[{"type":"text","text":"the answer"}]}
+            ]}});
+            let empty = || async { Json(json!({"data":[]})) };
+            let app = Router::new()
+                .route(
+                    "/api/event",
+                    get(move || {
+                        let rx = events.lock().unwrap().take().expect("one subscription");
+                        let connected = r#"{"type":"server.connected"}"#.to_owned();
+                        let stream = futures::stream::once(async move { connected })
+                            .chain(futures::stream::unfold(rx, |mut rx| async move {
+                                Some((rx.recv().await?, rx))
+                            }))
+                            .map(|line| Ok::<_, std::io::Error>(format!("data: {line}\n\n")));
+                        async move { axum::body::Body::from_stream(stream) }
+                    }),
+                )
+                .route(
+                    "/api/experimental/session/native/export",
+                    get(move || {
+                        let body = export.clone();
+                        async move { Json(body) }
+                    }),
+                )
+                .route("/api/session/native/inbox", get(empty))
+                .route(
+                    "/api/session/native/permission",
+                    get({
+                        let listed = listed.clone();
+                        move || {
+                            listed.notify_one();
+                            async {
+                                Json(json!({"data":[permission("per_before"), permission("per_gap")]}))
+                            }
+                        }
+                    }),
+                )
+                .route("/api/session/native/form", get(empty))
+                .route(
+                    "/api/session/active",
+                    get({
+                        let running = running.clone();
+                        move || {
+                            let running = *running.lock().unwrap();
+                            async move {
+                                Json(if running {
+                                    json!({"data":{"native":{}}})
+                                } else {
+                                    json!({"data":{}})
+                                })
+                            }
+                        }
+                    }),
+                )
+                .route(
+                    "/api/session/native/prompt",
+                    post({
+                        let prompted = prompted.clone();
+                        move || {
+                            *prompted.lock().unwrap() = true;
+                            async { Json(json!({})) }
+                        }
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let root = crate::local::git::TemporaryDirectory::new("orx-opencode-resume").unwrap();
+            let mut ctx = TurnCtx::test_stub();
+            ctx.host
+                .opencode
+                .serve_for_test(&ctx.session_id, port, root.path())
+                .await;
+            let (_, keeper) = ctx.host.opencode.server_for(&ctx.session_id).await.unwrap();
+            // What the previous server had streamed and committed before it restarted.
+            ctx.native_session_id = Some("native".into());
+            ctx.upsert_part(WirePart::text("msg_reply:0", "the ans"));
+            ctx.upsert_part(WirePart::prompt(
+                "per_before",
+                permission_card(&permission("per_before"), "per_before"),
+            ));
+            ctx.resume = Some(Resume {
+                keep_id: keeper.id().into(),
+                offset: keeper.start(),
+                state: json!({"promptId": "msg_prompt"}),
+            });
+
+            let driver = async {
+                listed.notified().await;
+                *running.lock().unwrap() = false;
+                send.send(
+                    json!({"type":"session.execution.succeeded","data":{"sessionID":"native"}})
+                        .to_string(),
+                )
+                .unwrap();
+            };
+            let (result, ()) = tokio::join!(super::super::run_turn(&mut ctx), driver);
+            result.unwrap();
+
+            assert!(!*prompted.lock().unwrap(), "the prompt is never sent again");
+            let ids: Vec<&str> = ctx.assistant.parts.iter().map(|p| p.id.as_str()).collect();
+            assert_eq!(ids, ["msg_reply:0", "per_before", "per_gap"]);
+            assert_eq!(ctx.assistant.parts[0].text.as_deref(), Some("the answer"));
+            let checkpoint = crate::store::Store::open()
+                .unwrap()
+                .chat_turn_checkpoint(&ctx.turn_id)
+                .unwrap()
+                .expect("the card the resumed turn surfaced is checkpointed");
+            assert_eq!(checkpoint.keep_id, keeper.id());
+            let state: Value = serde_json::from_str(&checkpoint.state_json).unwrap();
+            assert_eq!(state["harness"]["promptId"], "msg_prompt");
+        });
+    }
+
+    #[test]
+    fn a_step_finalized_late_stays_with_the_turn_it_started_in() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let earlier = json!({"id":"msg_earlier","type":"assistant","time":{"completed":1},
+                "content":[{"type":"text","text":"an earlier answer"}]});
+            let prompt = json!({"id":"msg_prompt","type":"user"});
+            let export = Arc::new(Mutex::new(json!({"data":{"info":{"outcome":"succeeded"},
+                "messages":[earlier.clone(), prompt.clone()]}})));
+            let running = Arc::new(Mutex::new(true));
+            let read = Arc::new(tokio::sync::Notify::new());
+            let (send, events) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let events = Arc::new(Mutex::new(Some(events)));
+            let empty = || async { Json(json!({"data":[]})) };
+            let app = Router::new()
+                .route(
+                    "/api/event",
+                    get(move || {
+                        let rx = events.lock().unwrap().take().expect("one subscription");
+                        let connected = r#"{"type":"server.connected"}"#.to_owned();
+                        let stream = futures::stream::once(async move { connected })
+                            .chain(futures::stream::unfold(rx, |mut rx| async move {
+                                Some((rx.recv().await?, rx))
+                            }))
+                            .map(|line| Ok::<_, std::io::Error>(format!("data: {line}\n\n")));
+                        async move { axum::body::Body::from_stream(stream) }
+                    }),
+                )
+                .route(
+                    "/api/experimental/session/native/export",
+                    get({
+                        let export = export.clone();
+                        let read = read.clone();
+                        move || {
+                            let body = export.lock().unwrap().clone();
+                            read.notify_one();
+                            async move { Json(body) }
+                        }
+                    }),
+                )
+                .route("/api/session/native/inbox", get(empty))
+                .route("/api/session/native/permission", get(empty))
+                .route("/api/session/native/form", get(empty))
+                .route(
+                    "/api/session/active",
+                    get({
+                        let running = running.clone();
+                        move || {
+                            let running = *running.lock().unwrap();
+                            async move {
+                                Json(if running {
+                                    json!({"data":{"native":{}}})
+                                } else {
+                                    json!({"data":{}})
+                                })
+                            }
+                        }
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let root = crate::local::git::TemporaryDirectory::new("orx-opencode-late").unwrap();
+            let mut ctx = TurnCtx::test_stub();
+            ctx.host
+                .opencode
+                .serve_for_test(&ctx.session_id, port, root.path())
+                .await;
+            let (_, keeper) = ctx.host.opencode.server_for(&ctx.session_id).await.unwrap();
+            ctx.native_session_id = Some("native".into());
+            ctx.resume = Some(Resume {
+                keep_id: keeper.id().into(),
+                offset: keeper.start(),
+                state: json!({"promptId": "msg_prompt"}),
+            });
+
+            // A step of an earlier turn, settled only once this prompt ran, keeps its place.
+            let late = json!({"id":"msg_late","type":"assistant",
+                "time":{"completed":3},"error":{"type":"aborted","message":"Step interrupted"},
+                "content":[{"type":"reasoning","text":"run the command"},
+                    {"type":"tool","id":"call_shell","name":"shell","state":{"status":"error",
+                        "input":{"command":"sleep 60"},
+                        "error":{"message":"Tool execution interrupted: shell"}}}]});
+            let reply = json!({"id":"msg_reply","type":"assistant","time":{"completed":4},
+                "content":[{"type":"text","text":"the answer"}]});
+            let driver = async {
+                read.notified().await;
+                export.lock().unwrap()["data"]["messages"] = json!([earlier, late, prompt, reply]);
+                *running.lock().unwrap() = false;
+                send.send(
+                    json!({"type":"session.execution.succeeded","data":{"sessionID":"native"}})
+                        .to_string(),
+                )
+                .unwrap();
+            };
+            let (result, ()) = tokio::join!(super::super::run_turn(&mut ctx), driver);
+            result.unwrap();
+
+            let ids: Vec<&str> = ctx.assistant.parts.iter().map(|p| p.id.as_str()).collect();
+            assert_eq!(ids, ["msg_reply:0"]);
+        });
+    }
+
+    #[test]
+    fn a_turn_whose_server_died_in_the_gap_fails_for_recovery() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let mut ctx = TurnCtx::test_stub();
+            ctx.native_session_id = Some("native".into());
+            ctx.resume = Some(Resume {
+                keep_id: "gone".into(),
+                offset: 0,
+                state: json!({"promptId": "msg_prompt"}),
+            });
+            let error = super::super::run_turn(&mut ctx).await.unwrap_err();
+            assert!(
+                error.to_string().contains("stopped while orx restarted"),
+                "{error}"
+            );
+        });
     }
 }

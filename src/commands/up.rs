@@ -32,7 +32,7 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::commands::remote_host::{DashboardLock, HostDescriptor, RemoteAuth};
 use crate::commands::up_remote::{self, RemoteSessionStatus};
@@ -49,17 +49,24 @@ use crate::updates;
 use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
 use crate::{browser, UpArgs};
 
-mod agent_tools;
+pub(crate) mod agent_tools;
 pub(crate) mod api_v2;
 pub(crate) mod compute_settings;
 mod harness_setup;
 pub(crate) mod model_feed;
 mod network;
+mod project_settings;
 mod search;
+mod terminals;
 mod usage;
 use compute_settings::*;
 
 pub async fn run(args: UpArgs) -> Result<()> {
+    if args.app_window {
+        if let Err(error) = relay_stderr() {
+            eprintln!("orx up: could not relay stderr to the app window: {error}");
+        }
+    }
     // orx's own clients reach the server on 127.0.0.1, which both of these binds serve.
     let reach = match args.host {
         std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) => up_remote::Reach::Loopback,
@@ -70,7 +77,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
             ))
         }
     };
-    if !args.desktop_app && !args.remote_host && !args.headless {
+    if !args.app_window && !args.remote_host && !args.headless {
         let data_dir = crate::commands::remote_host::canonical_data_dir()?;
         if let Some(server) =
             crate::commands::remote_host::ServerDescriptor::live(&data_dir).await?
@@ -92,10 +99,6 @@ pub async fn run(args: UpArgs) -> Result<()> {
     updates::note_startup_image();
     let port = args.port;
     let persistent_host = args.remote_host;
-    // Agent sessions and the CLI present this bearer to the server's API.
-    let token = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
-    local::chat::set_up_auth_token(token.clone());
-    let remote_auth = persistent_host.then(|| RemoteAuth::new(&token));
     let data_dir = crate::commands::remote_host::canonical_data_dir()?;
     // The engine lock: one engine per data directory.
     let dashboard_lock = DashboardLock::acquire(&data_dir)?;
@@ -114,23 +117,58 @@ pub async fn run(args: UpArgs) -> Result<()> {
     // An install that finished while this process waited replaced the image it was started from.
     if backend_lock.is_some() && updates::updated_exe_on_disk().await {
         drop(backend_lock);
-        let err = updates::relaunch(port);
+        let err = updates::relaunch();
         return Err(anyhow!("orx up: could not restart: {err}"));
     }
-    let listener = tokio::net::TcpListener::bind((args.host, port))
-        .await
-        .map_err(|error| {
-            anyhow!(
-                "Could not bind {}: {}",
-                SocketAddr::new(args.host, port),
-                error
-            )
-        })?;
+    let inherited = Lineage::inherited()?;
+    // The desktop app chose its port already, preferring this one.
+    let recorded = inherited
+        .as_ref()
+        .map(|lineage| lineage.port)
+        .filter(|recorded| *recorded != port && !args.app_window);
+    let taken_back = match recorded {
+        Some(recorded) => {
+            match tokio::net::TcpListener::bind((args.host, recorded)).await {
+                Ok(listener) => Some(listener),
+                Err(error) => {
+                    eprintln!("orx up: could not take back port {recorded}, which kept agents call: {error}");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    let listener = match taken_back {
+        Some(listener) => listener,
+        None => tokio::net::TcpListener::bind((args.host, port))
+            .await
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::AddrInUse => {
+                    anyhow!("Another program is using port {port}. Quit it and try again.")
+                }
+                _ => anyhow!(
+                    "Could not bind {}: {}",
+                    SocketAddr::new(args.host, port),
+                    error
+                ),
+            })?,
+    };
     let actual_port = listener.local_addr()?.port();
+    // Kept agents call the port and bearer in their environment, so only their own lineage reaches them.
+    let inherited = inherited.filter(|lineage| lineage.port == actual_port);
+    let reachable = inherited.is_some();
+    let lineage = inherited.unwrap_or_else(|| Lineage::fresh(actual_port));
+    if let Err(error) = lineage.record() {
+        eprintln!("orx up: agents started now will not survive a restart: {error:#}");
+    }
+    // Agent sessions and the CLI present this bearer to the server's API.
+    let token = lineage.token.clone();
+    local::chat::set_up_auth_token(token.clone());
+    local::chat::delegation::set_agent_key(lineage.agent_key);
+    let remote_auth = persistent_host.then(|| RemoteAuth::new(&token));
     // Open early so the schema exists before any request or agent spawn.
     {
         let store = Store::open()?;
-        local::chat::reconcile_unfinished_turns(&store)?;
         // Under the engine lock, before any notice can be produced.
         store.migrate_run_wakeups()?;
     }
@@ -172,7 +210,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     )?);
     api_v2::install(api.clone())?;
 
-    let remote_instance_id = persistent_host.then(|| uuid::Uuid::new_v4().to_string());
+    let remote_instance_id = persistent_host.then(crate::commands::remote_host::instance_id);
     let state = AppState {
         agent: agent.clone(),
         chat: chat.clone(),
@@ -189,15 +227,47 @@ pub async fn run(args: UpArgs) -> Result<()> {
         remote_sessions: crate::commands::up_remote::RemoteSessionManager::new(),
         remote_instance_id: remote_instance_id.clone(),
         stopping: stopping.clone(),
-        dashboard_lock: Arc::new(std::sync::Mutex::new(Some(dashboard_lock))),
+        dashboard_locks: Arc::new(std::sync::Mutex::new(vec![dashboard_lock])),
         restart: Arc::new(tokio::sync::Notify::new()),
+        app_window: args.app_window,
         reopen: Arc::default(),
         trackio: Arc::default(),
         opencode_signins: Arc::default(),
+        terminals: Arc::default(),
     };
+    state.terminals.adopt(crate::keep::entries()?).await;
+    if let Err(error) = state.remote_sessions.restore().await {
+        eprintln!("orx up: {error:#}");
+    }
     // Plan-mode turns hand this port to the `orx mcp` permission bridge.
     state.chat.set_up_port(actual_port);
-    state.chat.resume_persisted_queues();
+    end_terminals_with_their_chats(&state);
+    {
+        let lifecycle = state.project_lifecycle.clone();
+        let moving = state.data_dir_move_in_progress.clone();
+        state
+            .chat
+            .set_project_change_guard(Box::new(move |project| {
+                let change = lifecycle.begin_delete(project)?;
+                // Checked after claiming: a move that raised its flag first counts this change.
+                let moving = moving.load(Ordering::SeqCst);
+                (!moving).then(|| Box::new(change) as Box<dyn Send>)
+            }));
+    }
+    // One dashboard owns the data directory, so any move still recorded was cut short.
+    let recovered = tokio::task::spawn_blocking(|| match Store::open() {
+        Ok(store) => local::projects::recover_project_moves(&store),
+        Err(error) => {
+            eprintln!("orx up: could not open the store to recover project moves: {error}")
+        }
+    });
+    if let Err(error) = recovered.await {
+        eprintln!("orx up: recovering interrupted project moves stopped: {error}");
+    }
+    // Before serving: agents' calls must find their chats and turns taken back.
+    local::chat::adopt_kept_work(&state.chat, reachable).await?;
+    // Before any queue, notice or lease sweep can take a quit turn's slot.
+    state.chat.resume_quit_turns().await;
     {
         let chat = state.chat.clone();
         let moving = state.data_dir_move_in_progress.clone();
@@ -214,7 +284,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
                 if moving.load(std::sync::atomic::Ordering::SeqCst) {
                     continue;
                 }
-                if let Err(err) = chat.reconcile_expired_turn_leases() {
+                if let Err(err) = chat.reconcile_expired_turn_leases().await {
                     eprintln!("orx up: could not reconcile expired chat turns: {err}");
                 }
                 // Also picks up moves waiting from before a restart.
@@ -237,6 +307,11 @@ pub async fn run(args: UpArgs) -> Result<()> {
         let gate = state.data_dir_gate.clone();
         tokio::task::spawn_blocking(move || local::demo::prewarm(move_in_progress, gate));
     }
+    tokio::spawn(publish_sidebar_rows(
+        state.clone(),
+        state.chat.subscribe(),
+        engine.bus.subscribe(),
+    ));
     tokio::spawn(local::chat::keep_turn_leases(
         state.chat.clone(),
         state.data_dir_move_in_progress.clone(),
@@ -263,7 +338,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         state.harness_fill_in_flight.clone(),
     );
     spawn_background_tasks(remote_auth.is_none());
-    if !persistent_host && !args.desktop_app {
+    if !persistent_host && !args.app_window {
         spawn_restart_when_idle(state.clone());
     }
     let live_events = state.chat.clone();
@@ -308,6 +383,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
             crate::commands::remote_host::start_control_server(
                 HostDescriptor {
                     instance_id: remote_instance_id.clone().expect("persistent instance id"),
+                    restarting_until: None,
                     hostname: crate::commands::remote_host::hostname(),
                     port: actual_port,
                     version: env!("CARGO_PKG_VERSION").into(),
@@ -340,13 +416,13 @@ pub async fn run(args: UpArgs) -> Result<()> {
         if let Some(warning) = crate::local::bash::missing_toolchain() {
             eprintln!("orx up: warning: {warning}");
         }
-        if !args.desktop_app && !persistent_host && std::io::stderr().is_terminal() {
+        if !args.app_window && !persistent_host && std::io::stderr().is_terminal() {
             eprintln!(
                 "orx up: the OpenResearch desktop app opens these same projects: {}",
                 crate::updates::desktop_app_download_url()
             );
         }
-        if !args.no_browser {
+        if !args.no_browser && !args.app_window {
             browser::open_dashboard(&url, crate::telemetry::UpLaunchMode::of(&args));
         }
     }
@@ -358,52 +434,100 @@ pub async fn run(args: UpArgs) -> Result<()> {
     // over SSH by `orx up --remote`, closing that tunnel (the launcher's Ctrl-C)
     // delivers SIGHUP here as the channel tears down — without handling it the
     // remote server would leak, staying bound to its port after the tunnel dies.
-    let restart = state.restart.clone();
-    let mut restarting = false;
-    let explicit_stop = if persistent_host {
-        tokio::select! {
-            r = axum::serve(listener, app) => {
-                r.map_err(|e| anyhow!("orx up: server error: {e}"))?;
-                false
+    if persistent_host {
+        let state = state.clone();
+        tokio::spawn(async move {
+            crate::commands::remote_host::RESTART.notified().await;
+            loop {
+                if begin_restart(&state, 0, true).await.is_ok() {
+                    state.restart.notify_one();
+                    return;
+                }
+                tokio::time::sleep(crate::config::paced(Duration::from_millis(100))).await;
             }
-            changed = stop_rx.changed() => changed.is_ok() && *stop_rx.borrow(),
-            _ = restart.notified() => { restarting = true; false }
-            _ = persistent_shutdown_signal() => false,
+        });
+    }
+    let restart = state.restart.clone();
+    let (stop_monitoring, stop) = tokio::sync::watch::channel(());
+    let monitor = tokio::spawn(crate::engine::monitor::keep_current(engine, stop.clone()));
+    let watcher = tokio::spawn(crate::engine::watch::keep_watching(stop));
+    let mut restarting = false;
+    // A development rebuild, or a window gone without quitting, hands off like an update and exits.
+    let mut handing_off = false;
+    let mut explicit_stop = false;
+    let served = tokio::select! {
+        result = axum::serve(listener, app) => result,
+        changed = stop_rx.changed(), if persistent_host => {
+            explicit_stop = changed.is_ok() && *stop_rx.borrow();
+            Ok(())
         }
-    } else {
-        tokio::select! {
-            r = axum::serve(listener, app) => r.map_err(|e| anyhow!("orx up: server error: {e}"))?,
-            _ = restart.notified() => restarting = true,
-            _ = shutdown_signal() => eprintln!("orx up: shutting down"),
-        }
-        false
+        _ = restart.notified() => { restarting = true; Ok(()) }
+        _ = hand_off_signal(), if !persistent_host => { handing_off = true; Ok(()) }
+        _ = window_closed(), if args.app_window => { handing_off = true; Ok(()) }
+        _ = async {
+            if persistent_host {
+                persistent_shutdown_signal().await;
+            } else {
+                shutdown_signal().await;
+                eprintln!("orx up: shutting down");
+            }
+        } => Ok(()),
     };
+    // Reopening into another data directory leaves no successor to take its children back.
+    let hand_off = handing_off || restarting && !state.reopen.load(Ordering::SeqCst);
     if persistent_host {
         stopping.store(true, std::sync::atomic::Ordering::SeqCst);
     }
     // Before agents go down: a turn their shutdown ends must not start the next queued message.
     state.chat.stop_admitting();
-    if explicit_stop {
+    drop(stop_monitoring);
+    for (name, task) in [("run monitor", monitor), ("watcher", watcher)] {
+        if let Err(error) = task.await {
+            eprintln!("orx up: shutting down the {name}: {error}");
+        }
+    }
+    if hand_off {
+        local::harness::ONE_SHOTS.finish().await;
+        state.chat.hand_off().await;
+    } else if explicit_stop {
         state.chat.interrupt_all().await;
     } else {
         state.chat.stop_for_shutdown().await;
     }
     state.opencode_signins.shutdown().await;
     state.remote_sessions.shutdown().await;
-    agent.shutdown().await;
-    tokio::join!(codex.shutdown(), claude.shutdown());
-    state.chat.acp.shutdown().await;
+    state.terminals.shutdown().await;
+    if !hand_off {
+        agent.shutdown().await;
+        tokio::join!(codex.shutdown(), claude.shutdown());
+        state.chat.acp.shutdown().await;
+        local::chat::stop_kept(|_| true, "orx up stopped").await;
+    }
+    // At once, so the next server resumes the turns this one let go.
     state.chat.release_turn_leases();
     if let Some(server) = control_server {
         server.shutdown().await;
     }
-    state.dashboard_lock.lock().unwrap().take();
+    state.dashboard_locks.lock().unwrap().clear();
+    served.map_err(|error| anyhow!("orx up: server error: {error}"))?;
+    if hand_off {
+        if let Err(error) =
+            crate::commands::remote_host::ServerDescriptor::announce_relaunch(&data_dir, None)
+        {
+            eprintln!("orx up: the CLI will not wait out this restart: {error:#}");
+        }
+    }
     if restarting {
         drop(backend_lock);
         if let Err(error) = crate::commands::remote_host::ServerDescriptor::withdraw(&data_dir) {
             eprintln!(
                 "orx up: could not withdraw the server descriptor before restarting: {error:#}"
             );
+        }
+        #[cfg(unix)]
+        if let Some(instance) = remote_instance_id.as_deref() {
+            let error = crate::commands::remote_host::relaunch(instance, actual_port);
+            return Err(anyhow!("Could not restart the remote host: {error}"));
         }
         if !state.reopen.load(Ordering::SeqCst) && !updates::updated_exe_on_disk().await {
             eprintln!("orx up: installing the update before restarting");
@@ -421,25 +545,127 @@ pub async fn run(args: UpArgs) -> Result<()> {
             }
         }
         eprintln!("orx up: restarting");
-        let err = updates::relaunch(actual_port);
+        let err = updates::relaunch();
         return Err(anyhow!("orx up: could not restart: {err}"));
     }
     Ok(())
 }
 
-/// The desktop app's quit. A stored permit covers a quit that lands before the
-/// server is waiting for one.
-static SHUTDOWN_REQUESTED: tokio::sync::Notify = tokio::sync::Notify::const_new();
-
-#[cfg(desktop_app)]
-pub(crate) fn request_shutdown() {
-    SHUTDOWN_REQUESTED.notify_one();
+/// What a server's agents carry in their environment to call it, kept per data directory
+/// beside its keepers so the successor that takes the agents back is the server they name.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Lineage {
+    token: String,
+    /// What `orx mcp` tokens derive from (`delegation::agent_token`).
+    agent_key: String,
+    port: u16,
 }
+
+impl Lineage {
+    fn path() -> std::path::PathBuf {
+        crate::keep::root().join("lineage.json")
+    }
+
+    fn fresh(port: u16) -> Self {
+        let secret = || format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        Self {
+            token: secret(),
+            agent_key: secret(),
+            port,
+        }
+    }
+
+    /// The lineage the kept agents still running were started under, if any runs. A keeper
+    /// that might be an agent still running counts: drawing a fresh lineage would cut it off.
+    fn inherited() -> Result<Option<Self>> {
+        use crate::keep::{Liveness, Owner, Record};
+        let survives = crate::keep::entries()?.into_iter().any(|entry| {
+            entry.liveness != Liveness::Dead
+                && matches!(
+                    entry.owner,
+                    Record::Known(Owner::Agent { .. } | Owner::AgentCommand { .. })
+                        | Record::Unreadable
+                )
+        });
+        if !survives {
+            return Ok(None);
+        }
+        let path = Self::path();
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!(
+                    "orx up: {} is missing, so the agents kept running cannot call this server",
+                    path.display()
+                );
+                return Ok(None);
+            }
+            // Starting without it would stop agents that may still be working.
+            Err(error) => {
+                return Err(anyhow!(
+                    "Could not read {}, which agents still running need to reach OpenResearch: {error}. Fix its permissions and start again.",
+                    path.display()
+                ))
+            }
+        };
+        serde_json::from_slice(&bytes).map(Some).map_err(|error| {
+            anyhow!(
+                "{} is damaged ({error}), so agents still running cannot reach OpenResearch. Delete it to stop them, then start again.",
+                path.display()
+            )
+        })
+    }
+
+    fn record(&self) -> Result<()> {
+        let path = Self::path();
+        let dir = crate::keep::root();
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| anyhow!("Could not create {}: {error}", dir.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| anyhow!("Could not restrict {}: {error}", dir.display()))?;
+        }
+        crate::local::git::atomic_write_with_mode(&path, &serde_json::to_vec(self)?, Some(0o600))
+            .map_err(|error| anyhow!("Could not write {}: {error:#}", path.display()))
+    }
+}
+
+/// A chat deleted from anywhere (its page, its parent's deletion, an agent) takes its terminals.
+fn end_terminals_with_their_chats(state: &AppState) {
+    let terminals = state.terminals.clone();
+    state.chat.set_session_teardown(Box::new(move |session_id| {
+        let terminals = terminals.clone();
+        let session_id = session_id.to_string();
+        Box::pin(async move {
+            terminals
+                .close_where(|_, session| session == Some(session_id.as_str()))
+                .await;
+        })
+    }));
+}
+
+/// The port kept agents call, for the desktop app to serve on while any survives.
+#[cfg(desktop_app)]
+pub(crate) fn kept_agents_port() -> Option<u16> {
+    Lineage::inherited()
+        .unwrap_or_else(|error| {
+            eprintln!("orx up: {error:#}");
+            None
+        })
+        .map(|lineage| lineage.port)
+}
+
+/// A quit from the desktop window or an idle headless server. A stored permit covers a
+/// quit that lands before the server is waiting for one.
+static SHUTDOWN_REQUESTED: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
 /// Resolves when the process is asked to stop: SIGINT everywhere; on Unix also
 /// SIGTERM and SIGHUP (SIGHUP is what an SSH tunnel delivers on disconnect, so
 /// a `--remote`-launched server exits with its tunnel instead of leaking); and
-/// [`request_shutdown`].
+/// [`SHUTDOWN_REQUESTED`].
 async fn shutdown_signal() {
     tokio::select! {
         _ = SHUTDOWN_REQUESTED.notified() => {}
@@ -473,6 +699,181 @@ async fn os_shutdown_signal() {
     {
         let _ = tokio::signal::ctrl_c().await;
     }
+}
+
+/// Resolves once the desktop window that started this server is gone: it holds the other end of
+/// stdin and never writes, so end of input, or a broken pipe, is its exit.
+async fn window_closed() {
+    let (closed, gone) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut stdin = std::io::stdin();
+        let mut buffer = [0; 256];
+        while matches!(stdin.read(&mut buffer), Ok(read) if read > 0) {}
+        let _ = closed.send(());
+    });
+    let _ = gone.await;
+}
+
+/// A `--app-window` server's stderr, which the window reads.
+struct StderrRelay {
+    /// The window's end, which a successor inherits in place of the relay's pipe.
+    window: std::fs::File,
+    /// The relay's end, which fd 2 is again after a failed exec.
+    #[cfg(unix)]
+    writer: std::io::PipeWriter,
+    /// How many [`FLUSH`] markers the relay has passed.
+    flushed: std::sync::Arc<(std::sync::Mutex<u64>, std::sync::Condvar)>,
+}
+
+static STDERR_RELAY: std::sync::OnceLock<StderrRelay> = std::sync::OnceLock::new();
+
+/// Written by [`flush_stderr`]; the relay drops it once all written before it is passed on.
+const FLUSH: &[u8] = b"\0orx: stderr flushed\n";
+
+/// Points stderr at a pipe of this process's own and relays it to the window's until a write
+/// there fails, then drains it: `eprintln!` panics on a write to a closed pipe.
+fn relay_stderr() -> std::io::Result<()> {
+    use std::io::{BufRead as _, Write as _};
+
+    if STDERR_RELAY.get().is_some() {
+        return Err(std::io::Error::other("stderr is relayed already"));
+    }
+    let (reader, writer) = std::io::pipe()?;
+    #[cfg(unix)]
+    let window = std::os::fd::AsFd::as_fd(&std::io::stderr()).try_clone_to_owned()?;
+    #[cfg(windows)]
+    let window =
+        std::os::windows::io::AsHandle::as_handle(&std::io::stderr()).try_clone_to_owned()?;
+    let window = std::fs::File::from(window);
+    let flushed = std::sync::Arc::<(std::sync::Mutex<u64>, std::sync::Condvar)>::default();
+
+    // Before stderr is the pipe: until then a failure leaves stderr as it was.
+    let mut to = Some(window.try_clone()?);
+    let passed = flushed.clone();
+    std::thread::Builder::new().spawn(move || {
+        let mut reader = std::io::BufReader::new(reader);
+        let mut line = Vec::new();
+        while reader
+            .read_until(b'\n', &mut line)
+            .is_ok_and(|read| read > 0)
+        {
+            let flush = line.ends_with(FLUSH);
+            if flush {
+                line.truncate(line.len() - FLUSH.len());
+            }
+            if to.as_mut().is_some_and(|to| to.write_all(&line).is_err()) {
+                to = None;
+            }
+            if flush {
+                let (count, passed) = &*passed;
+                *count
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+                passed.notify_all();
+            }
+            line.clear();
+        }
+    })?;
+
+    // SAFETY: a plain syscall on descriptors this process owns.
+    #[cfg(unix)]
+    if unsafe {
+        libc::dup2(
+            std::os::fd::AsRawFd::as_raw_fd(&writer),
+            libc::STDERR_FILENO,
+        )
+    } < 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::{AsRawHandle as _, IntoRawHandle as _};
+        use windows_sys::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE};
+        // SAFETY: a plain syscall; on success the handle is released to stay open as stderr.
+        if unsafe { SetStdHandle(STD_ERROR_HANDLE, writer.as_raw_handle()) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let _ = writer.into_raw_handle();
+    }
+
+    let relay = StderrRelay {
+        window,
+        #[cfg(unix)]
+        writer,
+        flushed,
+    };
+    if STDERR_RELAY.set(relay).is_err() {
+        return Err(std::io::Error::other("stderr is relayed already"));
+    }
+    let report = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic| {
+        report(panic);
+        flush_stderr();
+    }));
+    Ok(())
+}
+
+/// Waits, up to a second, for the relay to pass on what stderr has had so far, which an exit or
+/// an exec would lose.
+pub(crate) fn flush_stderr() {
+    use std::io::Write as _;
+
+    let Some(relay) = STDERR_RELAY.get() else {
+        return;
+    };
+    let (count, passed) = &*relay.flushed;
+    let lock = || {
+        count
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    let before = *lock();
+    if std::io::stderr().write_all(FLUSH).is_ok() {
+        let _ = passed.wait_timeout_while(lock(), Duration::from_secs(1), |count| *count == before);
+    }
+}
+
+/// Execs `command` in place with the window's stderr, as the relay ends with this process; a
+/// failed exec leaves stderr the relay's again.
+#[cfg(unix)]
+pub(crate) fn exec(command: &mut std::process::Command) -> std::io::Error {
+    use std::os::unix::process::CommandExt as _;
+
+    flush_stderr();
+    let error = command.stderr(successor_stderr()).exec();
+    if let Some(relay) = STDERR_RELAY.get() {
+        // SAFETY: a plain syscall on descriptors this process owns.
+        unsafe {
+            libc::dup2(
+                std::os::fd::AsRawFd::as_raw_fd(&relay.writer),
+                libc::STDERR_FILENO,
+            )
+        };
+    }
+    error
+}
+
+/// The stderr for a successor this server starts: the window's, which outlives the relay.
+pub(crate) fn successor_stderr() -> std::process::Stdio {
+    STDERR_RELAY
+        .get()
+        .and_then(|relay| relay.window.try_clone().ok())
+        .map_or_else(std::process::Stdio::inherit, std::process::Stdio::from)
+}
+
+/// `node dev.ts restart` asks with SIGUSR2 for its next build to take this server's work back.
+async fn hand_off_signal() {
+    #[cfg(unix)]
+    if let Ok(mut signal) =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined2())
+    {
+        signal.recv().await;
+        eprintln!("orx up: handing off to the next build");
+        return;
+    }
+    std::future::pending::<()>().await
 }
 
 async fn persistent_shutdown_signal() {
@@ -524,14 +925,18 @@ struct AppState {
     remote_sessions: crate::commands::up_remote::RemoteSessionManager,
     remote_instance_id: Option<String>,
     stopping: Arc<AtomicBool>,
-    dashboard_lock: Arc<std::sync::Mutex<Option<DashboardLock>>>,
+    /// Both directories stay locked through the worker shutdown after a switch.
+    dashboard_locks: Arc<std::sync::Mutex<Vec<DashboardLock>>>,
     /// Fired by `POST /api/update/restart`; the serve loop relaunches on it.
     restart: Arc<tokio::sync::Notify>,
+    /// Serving a desktop window, which controls it through `/api/app-window`.
+    app_window: bool,
     /// Set with `restart` when the data directory changed: the engine reopens there, and no
     /// update is installed first.
     reopen: Arc<AtomicBool>,
     trackio: Arc<crate::local::trackio::LocalServer>,
     opencode_signins: Arc<local::opencode_signin::SignIns>,
+    terminals: Arc<terminals::Terminals>,
 }
 
 async fn project_publication_lock(
@@ -678,6 +1083,11 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
                 .patch(update_project)
                 .delete(delete_project),
         )
+        .route(
+            "/api/projects/{id}/settings",
+            get(project_settings::project_settings)
+                .patch(project_settings::update_project_settings),
+        )
         .route("/api/projects/{id}/open", post(open_project))
         .route("/api/projects/{id}/git", get(project_git_status))
         .route(
@@ -794,6 +1204,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             post(reveal_artifact_file),
         )
         .route("/api/projects/{id}/terminal", get(project_terminal))
+        .route(
+            "/api/projects/{id}/terminals/{terminal_id}",
+            axum::routing::delete(close_project_terminal),
+        )
         .route("/api/events", get(events))
         .route(
             "/api/settings/run-engine",
@@ -839,6 +1253,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         .route(
             "/api/settings/telemetry",
             get(telemetry_settings).post(set_telemetry_settings),
+        )
+        .route(
+            "/api/settings/bug-reports",
+            get(bug_report_settings).post(set_bug_report_settings),
         )
         .route("/api/telemetry/event", post(record_ui_event))
         .route("/api/telemetry/locale", post(set_dashboard_locale))
@@ -886,6 +1304,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         .route(
             "/api/remote/sessions/{id}/reconnect",
             post(reconnect_remote_session),
+        )
+        .route(
+            "/api/remote/sessions/{id}/update",
+            post(update_remote_session),
         )
         .route(
             "/api/remote/sessions/{id}/disconnect",
@@ -957,6 +1379,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         )
         .route("/api/harnesses/{id}/snapshot", get(harness_snapshot))
         .route(
+            "/api/harnesses/claude-code/root-full-access",
+            post(allow_claude_root_full_access),
+        )
+        .route(
             "/api/harnesses/{id}/install",
             axum::routing::delete(remove_harness_install),
         )
@@ -1027,6 +1453,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             get(list_chat_sessions).post(create_chat_session),
         )
         .route(
+            "/api/chat/sessions/{id}/lit-sources",
+            get(project_settings::chat_lit_sources).put(project_settings::set_chat_lit_sources),
+        )
+        .route(
             "/api/chat/sessions/{id}",
             get(get_chat_session)
                 .delete(delete_chat_session)
@@ -1059,6 +1489,11 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             post(compact_chat_session),
         )
         .route("/api/chat/active-runs", get(chat_active_runs))
+        .route("/api/chat/shown-runs", get(chat_shown_runs))
+        .route(
+            "/api/chat/sessions/{id}/shown-runs/{run_id}/dismiss",
+            post(dismiss_shown_run),
+        )
         .route("/api/chat/native-sessions", get(list_native_chats))
         .route("/api/chat/native-sessions/import", post(import_native_chat))
         .route(
@@ -1069,6 +1504,14 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         .route("/api/chat/sessions/{id}/fork", post(fork_chat_turn))
         .route("/api/chat/sessions/{id}/branch", post(select_chat_branch))
         .route("/api/chat/sessions/{id}/interrupt", post(interrupt_chat))
+        .route(
+            "/api/chat/sessions/{id}/stop-and-archive",
+            post(stop_and_archive_chat),
+        )
+        .route(
+            "/api/chat/sessions/{id}/background/{task}/stop",
+            post(stop_background_task),
+        )
         .route(
             "/api/chat/sessions/{id}/queue/{itemId}",
             axum::routing::delete(cancel_queued_chat).post(retry_queued_chat),
@@ -1082,7 +1525,15 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         // authenticated in the handler by that chat's agent token.
         .route("/api/internal/mcp", post(agent_tools::agent_tools))
         .route("/api/chat/attachments/{name}", get(chat_attachment))
-        .route("/api/agent/status", get(agent_status))
+        .route("/api/agent/status", get(agent_status));
+    // The window's control API, a contract with every window shipped (src/commands/app/FROZEN.md).
+    let app = if state.app_window {
+        app.route("/api/app-window", get(app_window_state))
+            .route("/api/app-window/quit", post(quit_app_window))
+    } else {
+        app
+    };
+    let app = app
         .fallback(spa)
         // Chat attachments (PDFs, images) ride as base64 in the send-message
         // JSON body; the 2 MB axum default rejects any real paper. Cap it well
@@ -1181,6 +1632,8 @@ fn remote_route_forbidden(path: &str) -> bool {
             | "/api/update"
             | "/api/update/apply"
             | "/api/update/restart"
+            | "/api/app-window"
+            | "/api/app-window/quit"
             | "/api/update/auto"
             | "/api/update/channel"
             | "/api/update/install-cli"
@@ -1233,6 +1686,12 @@ impl IntoResponse for ApiError {
 
 impl From<crate::error::Error> for ApiError {
     fn from(err: crate::error::Error) -> Self {
+        if crate::store::is_db_locked(&err) {
+            return Self(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "OpenResearch's database is busy. Try again in a moment.".into(),
+            );
+        }
         Self(StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
     }
 }
@@ -1281,10 +1740,15 @@ struct ApiRun {
     lost_reason: Option<String>,
     host: Option<String>,
     notice_error: Option<String>,
+    /// The chat that launched the run; absent for a run the CLI started outside a chat.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     log_collection: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     log_collection_error: Option<String>,
+    monitor: Option<Value>,
+    outcome: Option<Value>,
 }
 
 pub(crate) fn run_host(store: &Store, run: &StoredRun) -> Result<Option<String>> {
@@ -1321,7 +1785,13 @@ impl ApiRun {
             backend: crate::store::public_backend(&run.backend_json, launch),
             command: Some(run.command.clone()).filter(|c| !c.is_empty()),
             commit_sha: run.commit_sha.clone(),
-            result_markdown: run.result_markdown.clone(),
+            result_markdown: if run.status == "failed" {
+                run.result_markdown
+                    .as_deref()
+                    .map(crate::plane::reason_words)
+            } else {
+                run.result_markdown.clone()
+            },
             created_at: run.created_at,
             updated_at: run.updated_at,
             started_at: state.as_ref().and_then(|state| state.started_at),
@@ -1351,11 +1821,47 @@ impl ApiRun {
                 }),
             host: run_host(store, run)?,
             notice_error: store.run_notice_error(&run.id)?,
+            chat_session_id: run.chat_session_id.clone(),
             log_collection: collection
                 .as_ref()
                 .map(|(failed, _)| if *failed { "failed" } else { "pending" }),
             log_collection_error: collection.and_then(|(_, error)| error),
+            monitor: run_monitor_summary(store, run),
+            outcome: run_outcome(store, run),
         })
+    }
+}
+
+/// Who stopped a cancelled run, when its stop was recorded: `{by, at, reason?, rule?}`.
+pub(crate) fn run_outcome(store: &Store, run: &StoredRun) -> Option<Value> {
+    if run.status != "cancelled" {
+        return None;
+    }
+    let stop = match store.run_stop(&run.id) {
+        Ok(stop) => stop?,
+        Err(error) => {
+            eprintln!("orx up: run {}: {error:#}", run.id);
+            return None;
+        }
+    };
+    let mut outcome = json!({"by": stop.by, "at": stop.at, "reason": stop.reason});
+    if let Some(rule) = stop.rule {
+        outcome["rule"] = match crate::engine::rules::parse_rule(&rule) {
+            Ok(rule) => rule.shown(),
+            Err(_) => rule,
+        };
+    }
+    Some(outcome)
+}
+
+/// A run's monitor summary; a run whose monitor cannot be projected shows its lifecycle alone.
+pub(crate) fn run_monitor_summary(store: &Store, run: &StoredRun) -> Option<Value> {
+    match crate::engine::monitor::current(store, run) {
+        Ok(projection) => projection.map(|projection| projection.summary().clone()),
+        Err(error) => {
+            eprintln!("orx up: run {} monitor: {error:#}", run.id);
+            None
+        }
     }
 }
 
@@ -1753,6 +2259,7 @@ fn project_json_with_artifacts_dir(p: &local::model::LocalProject, artifacts_dir
         map.insert("path".into(), Value::String(p.repo_path.clone()));
         map.insert("githubEnabled".into(), Value::Bool(p.github_enabled()));
         map.insert("scratch".into(), Value::Bool(p.is_scratch()));
+        map.insert("unnamed".into(), Value::Bool(p.is_unnamed_scratch()));
         map.insert(
             "githubUrl".into(),
             p.github_url().map(Value::String).unwrap_or(Value::Null),
@@ -2057,6 +2564,12 @@ async fn create_scratch_project(State(state): State<AppState>) -> ApiResult {
 struct ChatProjectReq {
     name: String,
     path: String,
+    /// The project the asker saw and whether it was a chat without a project;
+    /// older dashboards leave both out.
+    project: Option<String>,
+    scratch: Option<bool>,
+    /// The tool call id of the agent proposal confirmed, `""` for none; older dashboards leave it out.
+    proposal: Option<String>,
 }
 
 /// Makes a chat a project of its own, now or once its turn ends.
@@ -2066,17 +2579,15 @@ async fn move_chat_to_project(
     Json(req): Json<ChatProjectReq>,
 ) -> ApiResult {
     reject_if_moving(&state)?;
-    let project_id = Store::open()?
-        .get_chat_session(&id)?
-        .ok_or_else(|| not_found("chat session"))?
-        .project_id;
-    let _changing = state
-        .project_lifecycle
-        .begin_delete(&project_id)
-        .ok_or_else(|| bad_request("The project is busy with another change; try again."))?;
     let moved = state
         .chat
-        .move_to_new_project(&id, &req.name, &req.path)
+        .move_to_new_project(
+            &id,
+            &req.name,
+            &req.path,
+            req.project.as_deref().zip(req.scratch),
+            req.proposal.as_deref(),
+        )
         .await
         .map_err(bad_request)?;
     Ok(Json(match moved {
@@ -2085,13 +2596,21 @@ async fn move_chat_to_project(
     }))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CancelChatProjectMoveQ {
+    /// The request the asker saw; older dashboards cancel whichever is waiting.
+    requested_at: Option<i64>,
+}
+
 async fn cancel_chat_project_move(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(q): Query<CancelChatProjectMoveQ>,
 ) -> ApiResult {
-    if !state.chat.cancel_project_move(&id).await? {
+    if !state.chat.cancel_project_move(&id, q.requested_at).await? {
         return Err(bad_request(
-            "No move is waiting for this chat; it may have already started.",
+            "No move is waiting for this chat; it may have started or been replaced.",
         ));
     }
     Ok(Json(json!({ "ok": true })))
@@ -2191,7 +2710,7 @@ async fn initialize_project_git(
         local::git::initialize_repository(path)?;
         local::git::validate_project_repository(path)?;
         project.baseline_branch = local::git::require_current_branch(path)?;
-        store.update_local_project(&project)?;
+        store.set_project_baseline_branch(&project.id, &project.baseline_branch)?;
         Ok(Json(project_git_json(&project, github_status)))
     })
     .await
@@ -2232,15 +2751,13 @@ async fn create_independent_project_repository(
     organization: Option<&str>,
 ) -> Result<local::model::LocalProject> {
     let store = Store::open()?;
-    let legacy = store
-        .list_chat_sessions_by_project(&project.id)?
-        .into_iter()
-        .map(|session| session.id)
-        .filter(|id| {
-            local::git::existing_session_worktree_path(&project, id)
-                != local::git::session_worktree_path(&project.id, id)
-        })
-        .collect::<Vec<_>>();
+    let mut legacy = Vec::new();
+    for session in store.list_chat_sessions_by_project(&project.id)? {
+        let worktree = local::git::existing_session_worktree_path(&store, &project, &session.id)?;
+        if worktree != local::git::session_worktree_path(&project.id, &session.id) {
+            legacy.push(session.id);
+        }
+    }
     // `git worktree move` would pull a running turn's checkout out from under it.
     chat.while_idle(&legacy, || {
         local::git::migrate_legacy_project_worktrees(&project, &legacy)
@@ -2262,10 +2779,10 @@ async fn create_independent_project_repository(
             source_repository.as_ref(),
         )?;
     }
+    store.set_project_github_repository(&project.id, &owner, &repo)?;
     project.github_owner = owner;
     project.github_repo = repo;
     project.github_sync_enabled = false;
-    store.update_local_project(&project)?;
     Ok(project)
 }
 
@@ -2316,8 +2833,8 @@ async fn push_project_for_sync(
             .map_err(|error| anyhow!("Git push task failed: {error}"))??;
     }
 
+    Store::open()?.set_project_github_sync(&project.id, true)?;
     project.github_sync_enabled = true;
-    Store::open()?.update_local_project(&project)?;
     Ok((project, github_status))
 }
 
@@ -2372,8 +2889,8 @@ async fn disable_project_github(
     let mut project = store
         .get_local_project(&id)?
         .ok_or_else(|| not_found("project"))?;
+    store.set_project_github_sync(&project.id, false)?;
     project.github_sync_enabled = false;
-    store.update_local_project(&project)?;
     let github_status = local::github::status().await;
     Ok(Json(json!({
         "project": project_json(&project),
@@ -2938,23 +3455,24 @@ async fn update_project(
     if let Some(Some(icon)) = &req.icon {
         validate_project_icon(icon)?;
     }
+    let name = req.name.as_deref().map(str::trim);
+    if name.is_some_and(str::is_empty) {
+        return Err(bad_request("name cannot be empty"));
+    }
+    let run_command = req
+        .run_command
+        .as_ref()
+        .map(|cmd| cmd.as_deref().filter(|c| !c.trim().is_empty()));
     let store = Store::open()?;
-    let mut project = store
-        .get_local_project(&id)?
-        .ok_or_else(|| not_found("project"))?;
-    if let Some(name) = req.name {
-        if name.trim().is_empty() {
-            return Err(bad_request("name cannot be empty"));
-        }
-        project.name = name.trim().to_string();
+    if store.get_local_project(&id)?.is_none() {
+        return Err(not_found("project"));
     }
-    if let Some(cmd) = req.run_command {
-        project.run_command = cmd.filter(|c| !c.trim().is_empty());
-    }
-    if let Some(icon) = req.icon {
-        project.icon = icon;
-    }
-    store.update_local_project(&project)?;
+    store.edit_local_project(
+        &id,
+        name,
+        run_command,
+        req.icon.as_ref().map(Option::as_ref),
+    )?;
     // Re-read: update bumps updated_at, which is also what fires the SSE
     // project.updated diff.
     let project = store
@@ -3000,7 +3518,7 @@ async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQ
         .get_local_project(&id)?
         .ok_or_else(|| not_found("project"))?;
     if query.only_unused_scratch
-        && (!project.is_scratch() || !store.list_chat_sessions_by_project(&id)?.is_empty())
+        && (!project.is_unnamed_scratch() || !store.list_chat_sessions_by_project(&id)?.is_empty())
     {
         return Ok(Json(json!({ "ok": false })));
     }
@@ -3015,6 +3533,7 @@ async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQ
             if let Err(err) = api_v2::cancel_run(
                 run,
                 "Cancel requested because the project is being deleted.",
+                None,
             )
             .await
             {
@@ -3045,6 +3564,10 @@ async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQ
                 .ok_or_else(|| bad_request("a chat session deletion is already in progress"))?,
         );
     }
+    state
+        .terminals
+        .close_where(|project, _| project == id)
+        .await;
     for session in &sessions {
         state.chat.clear_queue(&session.id)?;
         let _ = state.chat.interrupt(&session.id).await;
@@ -3132,22 +3655,43 @@ async fn set_experiment_archive(
 
 async fn delete_experiment(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     reject_if_moving(&state)?;
+    let chat = state.chat.clone();
     // Deletion can wait up to RUN_ARTIFACTS_WAIT for the run-artifacts lock.
-    blocking_api(move || {
-        let store = Store::open()?;
-        let experiment = store
-            .get_local_experiment(&id)?
-            .ok_or_else(|| not_found("experiment"))?;
-        let _admission = state
-            .project_lifecycle
-            .admit(&experiment.project_id)
-            .ok_or_else(|| bad_request("project deletion is in progress"))?;
-        let deleted = local::experiments::delete_experiment(&store, &id).map_err(bad_request)?;
-        Ok(Json(
-            json!({ "ok": true, "branchCommit": deleted.branch_commit }),
-        ))
-    })
-    .await
+    let (response, chats) =
+        tokio::task::spawn_blocking(move || -> std::result::Result<_, ApiError> {
+            let store = Store::open()?;
+            let experiment = store
+                .get_local_experiment(&id)?
+                .ok_or_else(|| not_found("experiment"))?;
+            let _admission = state
+                .project_lifecycle
+                .admit(&experiment.project_id)
+                .ok_or_else(|| bad_request("project deletion is in progress"))?;
+            let mut chats = HashSet::new();
+            for run in store.list_runs_by_experiment(&id)? {
+                chats.extend(store.run_subscribers(&run.id)?);
+            }
+            let deleted =
+                local::experiments::delete_experiment(&store, &id).map_err(bad_request)?;
+            Ok((
+                Json(json!({ "ok": true, "branchCommit": deleted.branch_commit })),
+                chats,
+            ))
+        })
+        .await
+        .map_err(|e| ApiError::from(anyhow!("Request worker failed: {e}")))??;
+    // Their sidebar cards showed the deleted runs; the deletion stands either way.
+    for id in chats {
+        match Store::open().and_then(|store| store.get_chat_session(&id)) {
+            Ok(session) => {
+                chat.emit_session(session).await;
+            }
+            Err(error) => eprintln!(
+                "orx up: could not refresh chat {id}'s sidebar card after deleting its runs: {error:#}"
+            ),
+        }
+    }
+    Ok(response)
 }
 
 async fn list_project_runs(Path(id): Path<String>) -> ApiResult {
@@ -3207,17 +3751,15 @@ struct CreateRunReq {
 
 impl CreateRunReq {
     fn into_run_args(self) -> crate::ExpRunArgs {
-        let mut backend = self.backend;
-        let mut flavor = self.flavor;
-        local::apply_compute_default(&mut backend, &mut flavor);
         crate::ExpRunArgs {
+            estimate: false,
             invocation_context: self.invocation_context,
             telemetry_suppressed: self.telemetry_suppressed,
             exp_id: self.experiment_id,
             disk: self.disk,
             provider: self.provider,
-            backend: Some(backend.unwrap_or_else(|| "local".to_string())),
-            flavor,
+            backend: self.backend,
+            flavor: self.flavor,
             org: self.org,
             host: self.host,
             container: self.container,
@@ -3434,6 +3976,7 @@ async fn list_instances() -> ApiResult {
 #[serde(rename_all = "camelCase")]
 struct CancelRunReq {
     chat_session_id: Option<String>,
+    reason: Option<String>,
 }
 
 async fn cancel_run(
@@ -3448,11 +3991,18 @@ async fn cancel_run(
     if is_terminal(&run.status) {
         return Ok(Json(json!({ "ok": true, "alreadyTerminal": true })));
     }
-    let reason = match req {
-        Some(Json(req)) => crate::commands::exp::exp_cancel_reason(req.chat_session_id.as_deref()),
-        None => "Cancel requested through orx up (dashboard or an older orx CLI).".into(),
+    let (reason, stop) = match req {
+        Some(Json(req)) => crate::commands::exp::exp_cancel_stop(
+            req.chat_session_id.as_deref(),
+            req.reason.as_deref(),
+        )
+        .map_err(bad_request)?,
+        None => (
+            "Cancel requested through orx up (dashboard or an older orx CLI).".into(),
+            crate::store::StopContext::by(crate::store::StopBy::User),
+        ),
     };
-    api_v2::cancel_run(&run, &reason).await?;
+    api_v2::cancel_run(&run, &reason, Some(&stop)).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -3498,14 +4048,14 @@ fn diff_json(d: local::git::DiffPayload) -> Value {
     })
 }
 
-/// Off-worker helper for git-backed handlers.
+/// Runs a synchronous handler on the blocking pool.
 async fn blocking_api<F>(f: F) -> ApiResult
 where
     F: FnOnce() -> std::result::Result<Json<Value>, ApiError> + Send + 'static,
 {
     tokio::task::spawn_blocking(f)
         .await
-        .map_err(|e| ApiError::from(anyhow!("git task failed: {e}")))?
+        .map_err(|e| ApiError::from(anyhow!("Request worker failed: {e}")))?
 }
 
 /// Cumulative diff of a run's commit vs its experiment's parent branch. A root
@@ -3817,7 +4367,7 @@ fn resolve_checkout_root(
                 .get_chat_session(s)?
                 .filter(|sess| sess.project_id == project.id)
                 .ok_or_else(|| not_found("chat session"))?;
-            let dir = local::git::existing_session_worktree_path(project, &session.id);
+            let dir = local::git::existing_session_worktree_path(store, project, &session.id)?;
             match crate::paths::canonicalize(&dir) {
                 Ok(p) => Some(p),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -5519,12 +6069,33 @@ pub(crate) async fn track_active(request: axum::extract::Request, next: Next) ->
     if IDLE_EXIT.load(Ordering::SeqCst) {
         return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
+    // A held approval is posted again by its tool call and finds its card, so a restart carries it over.
     if matches!(
         request.uri().path(),
-        "/api/events" | "/api/v2/events" | "/api/v2/hello"
+        "/api/events" | "/api/v2/events" | "/api/v2/hello" | "/api/internal/permissions"
     ) {
         return next.run(request).await;
     }
+    let request = if request.uri().path() == "/api/internal/mcp" {
+        let (parts, body) = request.into_parts();
+        let Ok(bytes) = axum::body::to_bytes(body, 2 * 1024 * 1024).await else {
+            return ApiError(
+                axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                "The agent's tool call is too large or was cut off.".into(),
+            )
+            .into_response();
+        };
+        // `orx mcp` sends a cut `wait` to the next server, so its long poll holds off no restart.
+        let waits = serde_json::from_slice::<Value>(&bytes)
+            .is_ok_and(|call| call["method"] == "tools/call" && call["params"]["name"] == "wait");
+        let request = axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes));
+        if waits {
+            return next.run(request).await;
+        }
+        request
+    } else {
+        request
+    };
     // Count first, then check: paired with the drain's set-then-count, one side always sees the other.
     let active = loop {
         let active = Active::new();
@@ -5715,9 +6286,6 @@ fn spawn_restart_when_idle(state: AppState) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(UPDATE_SAMPLE_INTERVAL).await;
-            if crate::commands::app::windowless() {
-                continue;
-            }
             let status = updates::status();
             // The cache can claim an install the exec target doesn't have; never restart in a loop.
             if !(status.auto_update
@@ -5726,7 +6294,7 @@ fn spawn_restart_when_idle(state: AppState) {
             {
                 continue;
             }
-            if begin_restart(&state, 0, false).await {
+            if begin_restart(&state, 0, false).await.is_ok() {
                 state.restart.notify_one();
                 return;
             }
@@ -5737,32 +6305,45 @@ fn spawn_restart_when_idle(state: AppState) {
 /// Serializes restart attempts; true once one committed, after which nothing reopens admission.
 static RESTART_COMMITTED: tokio::sync::Mutex<bool> = tokio::sync::Mutex::const_new(false);
 
-/// Stop admitting work and commit to a restart if nothing is in flight beyond
-/// `own_requests` (the caller's), save for chat turns when `stop_agents`. Returns false, and admits again, otherwise.
-async fn begin_restart(state: &AppState, own_requests: usize, stop_agents: bool) -> bool {
+/// Stop admitting work and commit to a restart if nothing it would cut off is in flight
+/// beyond `own_requests` (the caller's), save for chat turns when `stop_agents`. Turns the next
+/// server resumes, terminals and remote sessions carry over. Otherwise admits again and says
+/// what holds the restart back.
+async fn begin_restart(
+    state: &AppState,
+    own_requests: usize,
+    stop_agents: bool,
+) -> std::result::Result<(), &'static str> {
     let mut committed = RESTART_COMMITTED.lock().await;
     if *committed {
-        return true;
+        return Ok(());
     }
     DRAINING.store(true, Ordering::SeqCst);
-    if ACTIVE.load(Ordering::SeqCst) <= own_requests
-        && !state.data_dir_move_in_progress.load(Ordering::SeqCst)
-        && state.remote_sessions.list().await.iter().all(|session| {
-            matches!(
-                session.status,
-                RemoteSessionStatus::Disconnected
-                    | RemoteSessionStatus::NeedsInstall
-                    | RemoteSessionStatus::NeedsUpdate
-            )
-        })
-        && (stop_agents || state.chat.stop_admitting_if_idle().await)
-    {
-        state.chat.stop_admitting();
-        *committed = true;
-        return true;
+    let blocked = if ACTIVE.load(Ordering::SeqCst) > own_requests {
+        Some("a request, a sign-in, a terminal or an import is still in progress.")
+    } else if state.data_dir_move_in_progress.load(Ordering::SeqCst) {
+        Some("the data directory is moving.")
+    } else if state.opencode_signins.in_progress() {
+        Some("an OpenCode sign-in is still open.")
+    } else if state.remote_sessions.list().await.iter().any(|session| {
+        matches!(
+            session.status,
+            RemoteSessionStatus::Applying | RemoteSessionStatus::Updating
+        )
+    }) {
+        Some("OpenResearch is installing on a remote machine.")
+    } else if !stop_agents && !state.chat.stop_admitting_unless_restart_stops().await {
+        Some("an agent is working that a restart would stop.")
+    } else {
+        None
+    };
+    if let Some(blocked) = blocked {
+        DRAINING.store(false, Ordering::SeqCst);
+        return Err(blocked);
     }
-    DRAINING.store(false, Ordering::SeqCst);
-    false
+    state.chat.stop_admitting();
+    *committed = true;
+    Ok(())
 }
 
 /// Once a day, keep each agent orx can install current: through the user's own
@@ -6028,7 +6609,7 @@ pub(super) fn env_key_error(key: &str) -> Option<String> {
     })
 }
 
-async fn set_env_var(Json(req): Json<SetEnvVarReq>) -> ApiResult {
+async fn set_env_var(State(state): State<AppState>, Json(req): Json<SetEnvVarReq>) -> ApiResult {
     let key = req.key.trim().to_string();
     if let Some(error) = env_key_error(&key) {
         return Err(bad_request(error));
@@ -6040,7 +6621,9 @@ async fn set_env_var(Json(req): Json<SetEnvVarReq>) -> ApiResult {
     if value.is_none() && req.description.is_none() {
         return Err(bad_request("give a value, a description, or both"));
     }
-    tokio::task::spawn_blocking(move || {
+
+    let rechecks = req.project_id.is_none() && value.is_some();
+    let response = tokio::task::spawn_blocking(move || -> ApiResult {
         let store = Store::open()?;
         let project = req.project_id.as_deref();
         if let Some(project) = project {
@@ -6067,14 +6650,25 @@ async fn set_env_var(Json(req): Json<SetEnvVarReq>) -> ApiResult {
         Ok(Json(env_settings_json(project)?))
     })
     .await
-    .map_err(|e| ApiError::from(anyhow!("env task failed: {e}")))?
+    .map_err(|e| ApiError::from(anyhow!("env task failed: {e}")))??;
+    // OpenCode turns providers on from keys in its environment.
+    if rechecks {
+        recheck_opencode(&state).await;
+    }
+    Ok(response)
 }
 
-async fn delete_env_var(Path(key): Path<String>, Query(scope): Query<EnvQuery>) -> ApiResult {
+async fn delete_env_var(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+    Query(scope): Query<EnvQuery>,
+) -> ApiResult {
     if !valid_env_key(&key) {
         return Err(bad_request("invalid key"));
     }
-    tokio::task::spawn_blocking(move || {
+
+    let rechecks = scope.project_id.is_none();
+    let response = tokio::task::spawn_blocking(move || -> ApiResult {
         let store = Store::open()?;
         let project = scope.project_id.as_deref();
         match project {
@@ -6087,7 +6681,11 @@ async fn delete_env_var(Path(key): Path<String>, Query(scope): Query<EnvQuery>) 
         Ok(Json(env_settings_json(project)?))
     })
     .await
-    .map_err(|e| ApiError::from(anyhow!("env task failed: {e}")))?
+    .map_err(|e| ApiError::from(anyhow!("env task failed: {e}")))??;
+    if rechecks {
+        recheck_opencode(&state).await;
+    }
+    Ok(response)
 }
 
 // --- data directory ---------------------------------------------------------
@@ -6197,7 +6795,7 @@ async fn set_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq>
     tokio::task::spawn_blocking(move || crate::config::set_settings_data_dir(Some(path)))
         .await
         .map_err(|e| ApiError::from(anyhow!("settings task failed: {e}")))??;
-    *state.dashboard_lock.lock().unwrap() = Some(next_lock);
+    state.dashboard_locks.lock().unwrap().push(next_lock);
     state.chat.shutdown_harnesses().await;
     state.reopen.store(true, Ordering::SeqCst);
     state.restart.notify_one();
@@ -6313,6 +6911,39 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
         .into_response();
     }
 
+    // A terminal's keeper lives in the data directory; moving it would cut the shell off.
+    let entries = match crate::keep::entries() {
+        Ok(entries) => entries,
+        Err(error) => {
+            release_move_claim(&move_token);
+            release(&state);
+            return ApiError::from(error).into_response();
+        }
+    };
+    let terminals = entries
+        .into_iter()
+        .filter(|entry| {
+            use crate::keep::{Liveness, Owner, Record};
+            entry.liveness != Liveness::Dead
+                && matches!(
+                    entry.owner,
+                    Record::Known(Owner::Terminal { .. }) | Record::Unreadable
+                )
+        })
+        .count();
+    if terminals > 0 {
+        release_move_claim(&move_token);
+        release(&state);
+        return ApiError(
+            StatusCode::CONFLICT,
+            format!(
+                "Can't move while project terminals are open ({terminals} open). \
+                 Close them, then retry."
+            ),
+        )
+        .into_response();
+    }
+
     // Validate before kicking off the background move.
     let vpath = path.clone();
     let validated = tokio::task::spawn_blocking(move || {
@@ -6354,11 +6985,16 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
     // Provider-native SQLite/session stores now live inside this directory.
     // Close every idle harness child before the filesystem begins moving it.
     chat.shutdown_harnesses().await;
+    local::chat::stop_kept(
+        |owner| !matches!(owner, Some(crate::keep::Owner::Terminal { .. })),
+        "the data directory moved",
+    )
+    .await;
 
     // Spawn the move on a blocking task (it does synchronous FS work); forward
     // throttled progress onto the SSE broadcast, clear the flag when done.
     let flag = state.data_dir_move_in_progress.clone();
-    let dashboard_lock = state.dashboard_lock.clone();
+    let dashboard_locks = state.dashboard_locks.clone();
     let (restart, reopen) = (state.restart.clone(), state.reopen.clone());
     let target = std::path::PathBuf::from(path);
     tokio::spawn(async move {
@@ -6387,7 +7023,7 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
 
         match result {
             Ok(Ok(outcome)) => {
-                *dashboard_lock.lock().unwrap() = Some(next_lock);
+                dashboard_locks.lock().unwrap().push(next_lock);
                 // Close any child spawned while a cross-filesystem copy ran.
                 chat.shutdown_harnesses().await;
                 chat.emit_event("datadir.move.done", json!(outcome));
@@ -6615,6 +7251,8 @@ struct UiEventReq {
     new: Option<bool>,
     #[serde(default)]
     free: Option<bool>,
+    #[serde(default)]
+    pane: Option<String>,
 }
 
 async fn record_ui_event(Json(req): Json<UiEventReq>) -> ApiResult {
@@ -6659,6 +7297,11 @@ async fn record_ui_event(Json(req): Json<UiEventReq>) -> ApiResult {
                 crate::telemetry::capture_model_picked(section, model, harness, new, free);
             }
         }
+        "pane_opened" => {
+            if let Some(pane) = req.pane.as_deref() {
+                crate::telemetry::capture_pane_opened(pane);
+            }
+        }
         _ => return Ok(Json(json!({ "ok": false }))),
     }
     Ok(Json(json!({ "ok": true })))
@@ -6679,6 +7322,29 @@ async fn set_telemetry_settings(Json(req): Json<SetTelemetryReq>) -> ApiResult {
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("telemetry task failed: {e}")))?
+}
+
+async fn bug_report_settings() -> ApiResult {
+    tokio::task::spawn_blocking(|| {
+        let linear = crate::config::linear_bug_reports().map_err(ApiError::from)?;
+        Ok(Json(json!({ "linear": linear })))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("bug report settings task failed: {e}")))?
+}
+
+#[derive(Deserialize)]
+struct SetBugReportsReq {
+    linear: bool,
+}
+
+async fn set_bug_report_settings(Json(req): Json<SetBugReportsReq>) -> ApiResult {
+    tokio::task::spawn_blocking(move || {
+        crate::config::set_linear_bug_reports(req.linear).map_err(ApiError::from)?;
+        Ok(Json(json!({ "linear": req.linear })))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("bug report settings task failed: {e}")))?
 }
 
 #[derive(Deserialize)]
@@ -6789,6 +7455,21 @@ async fn apply_update() -> ApiResult {
     Ok(Json(json!(updates::status())))
 }
 
+/// Whether quitting would interrupt work or close a page someone has open.
+async fn app_window_state() -> ApiResult {
+    Ok(Json(json!({ "busy": api_v2::busy().await? })))
+}
+
+/// The window's quit, once nothing pending holds it or the user chose to quit anyway: asks the
+/// runs that need OpenResearch open to stop, then stops everything else and exits. Answers first.
+async fn quit_app_window() -> StatusCode {
+    tokio::spawn(async {
+        api_v2::force_stop_runs().await;
+        SHUTDOWN_REQUESTED.notify_one();
+    });
+    StatusCode::NO_CONTENT
+}
+
 /// Relaunch into the copy the updater already installed. Answers first, then
 /// restarts, so the dashboard learns the request landed before the connection
 /// drops; it reloads once the new server is up.
@@ -6814,20 +7495,18 @@ async fn restart_after_update(
         ));
     };
     // A dashboard poll landing alongside the click is not work worth refusing over.
-    let mut began = false;
+    let mut began = Err("");
     for _ in 0..10 {
         began = begin_restart(&state, 1, stop_agents).await;
-        if began {
+        if began.is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    if !began {
+    if let Err(blocked) = began {
         return Err(ApiError(
             StatusCode::CONFLICT,
-            "OpenResearch is busy: a chat turn, queued message, approval, open terminal, \
-             remote session, or request is still in progress. Try again once it finishes."
-                .into(),
+            format!("OpenResearch can't restart yet: {blocked} Try again once it finishes."),
         ));
     }
     let restart = state.restart.clone();
@@ -6982,6 +7661,8 @@ struct SetUiStateReq {
     model_section_order: Option<Vec<String>>,
     collapsed_model_sections: Option<Vec<String>>,
     model_sightings: Option<Value>,
+    run_banner: Option<String>,
+    run_watching: Option<bool>,
     seen_nudges: Option<Vec<String>>,
 }
 
@@ -6996,10 +7677,51 @@ struct StoredAgentSelectionReq {
     reasoning_level: Option<String>,
 }
 
+/// An agent choice checked against the agents orx knows; its model is already resolved.
+fn stored_agent_selection(selection: StoredAgentSelectionReq) -> Result<StoredAgentSelection> {
+    if !local::harness::is_chat_harness(&selection.harness) {
+        return Err(anyhow!("unknown agent: {}", selection.harness));
+    }
+    let nonempty = |value: Option<String>| value.filter(|item| !item.trim().is_empty());
+    let permission_mode = nonempty(selection.permission_mode);
+    let service_tier = nonempty(selection.service_tier);
+    if permission_mode
+        .as_deref()
+        .is_some_and(|mode| local::harness::permission_mode_for(&selection.harness, mode).is_none())
+    {
+        return Err(anyhow!("invalid permission mode for the selected agent"));
+    }
+    if service_tier
+        .as_deref()
+        .is_some_and(|tier| local::harness::service_tier_for(&selection.harness, tier).is_none())
+    {
+        return Err(anyhow!("invalid speed for the selected agent"));
+    }
+    if let Some(id) = &selection.profile {
+        local::agent_profiles::home(id, &selection.harness)?;
+    }
+    Ok(StoredAgentSelection {
+        profile: selection.profile,
+        harness: selection.harness.clone(),
+        model: nonempty(selection.model),
+        service_tier,
+        permission_mode: preferred_permission_mode(&selection.harness, permission_mode),
+        reasoning_level: nonempty(selection.reasoning_level),
+    })
+}
+
 async fn set_ui_state(
     State(state): State<AppState>,
     Json(mut req): Json<SetUiStateReq>,
 ) -> ApiResult {
+    let run_banner = req
+        .run_banner
+        .as_deref()
+        .map(|level| {
+            crate::store::RunBannerLevel::parse(level)
+                .ok_or_else(|| bad_request("Choose line or strip for the run banner."))
+        })
+        .transpose()?;
     if let Some(selection) = req.preferred_agent.as_mut() {
         selection.model = selected_chat_model(
             &state,
@@ -7098,35 +7820,7 @@ async fn set_ui_state(
         let store = Store::open()?;
         let selection = req
             .preferred_agent
-            .map(|selection| {
-                if !local::harness::is_chat_harness(&selection.harness) {
-                    return Err(anyhow!("unknown agent: {}", selection.harness));
-                }
-                let nonempty = |value: Option<String>| value.filter(|item| !item.trim().is_empty());
-                let permission_mode = nonempty(selection.permission_mode);
-                let service_tier = nonempty(selection.service_tier);
-                if permission_mode.as_deref().is_some_and(|mode| {
-                    local::harness::permission_mode_for(&selection.harness, mode).is_none()
-                }) {
-                    return Err(anyhow!("invalid permission mode for the selected agent"));
-                }
-                if service_tier.as_deref().is_some_and(|tier| {
-                    local::harness::service_tier_for(&selection.harness, tier).is_none()
-                }) {
-                    return Err(anyhow!("invalid speed for the selected agent"));
-                }
-                if let Some(id) = &selection.profile {
-                    local::agent_profiles::home(id, &selection.harness)?;
-                }
-                Ok(StoredAgentSelection {
-                    profile: selection.profile,
-                    harness: selection.harness.clone(),
-                    model: nonempty(selection.model),
-                    service_tier,
-                    permission_mode: preferred_permission_mode(&selection.harness, permission_mode),
-                    reasoning_level: nonempty(selection.reasoning_level),
-                })
-            })
+            .map(stored_agent_selection)
             .transpose()?;
         if let Some(completed) = req.tour_completed {
             store.set_tour_completed(completed)?;
@@ -7158,6 +7852,12 @@ async fn set_ui_state(
         }
         if let Some(workspace) = req.workspace {
             store.set_global_workspace_state(&workspace)?;
+        }
+        if let Some(level) = run_banner {
+            store.set_run_banner(level)?;
+        }
+        if let Some(on) = req.run_watching {
+            store.set_run_watching(on)?;
         }
         Ok(Json(json!(store.ui_state()?)))
     })
@@ -7392,15 +8092,12 @@ fn start_pty_with_env(
         command.env("PATH", path);
     }
     local::shell_env::export_to(|key, value| command.env(key, value));
-    for (key, value) in local::shell_env::host_gui_env() {
+    for (key, value) in terminal_env() {
         match value {
             Some(value) => command.env(key, value),
             None => command.env_remove(key),
         }
     }
-    command.env("TERM", "xterm-256color");
-    command.env_remove("NO_COLOR");
-    command.env_remove("FORCE_COLOR");
     if let Some(cwd) = cwd {
         command.cwd(cwd);
     }
@@ -7491,6 +8188,17 @@ fn start_pty_with_env(
         events: event_rx,
         kill: kill_tx,
     })
+}
+
+/// What a terminal's child sees beyond orx's own environment.
+fn terminal_env() -> Vec<(&'static str, Option<std::ffi::OsString>)> {
+    let mut env = local::shell_env::host_gui_env();
+    env.extend([
+        ("TERM", Some("xterm-256color".into())),
+        ("NO_COLOR", None),
+        ("FORCE_COLOR", None),
+    ]);
+    env
 }
 
 /// The dashboard's Connect: the engine logs in through its own connection, and each
@@ -7807,9 +8515,13 @@ async fn relay_pty(
 #[serde(rename_all = "camelCase")]
 struct ProjectTerminalReq {
     session_id: Option<String>,
+    /// The page's id for a terminal that outlives its socket; without one (an older page), the
+    /// shell ends with the socket.
+    terminal_id: Option<String>,
 }
 
 async fn project_terminal(
+    State(state): State<AppState>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
     Path(id): Path<String>,
@@ -7817,6 +8529,22 @@ async fn project_terminal(
 ) -> Response {
     if let Some(rejected) = reject_cross_origin(&headers) {
         return rejected;
+    }
+    if let Some(terminal_id) = req.terminal_id {
+        if !crate::workspace_state::valid_terminal_id(&terminal_id) {
+            return bad_request(format!("{terminal_id:?} is not a terminal id")).into_response();
+        }
+        let session_id = req
+            .session_id
+            .map(|session| session.trim().to_string())
+            .filter(|session| !session.is_empty());
+        return ws.on_upgrade(move |socket| async move {
+            let shell = interactive_shell();
+            state
+                .terminals
+                .serve(&state, socket, id, session_id, terminal_id, shell)
+                .await
+        });
     }
     let active = Active::new();
     ws.on_upgrade(move |mut socket| async move {
@@ -7851,6 +8579,16 @@ async fn project_terminal(
     })
 }
 
+async fn close_project_terminal(
+    State(state): State<AppState>,
+    Path((project_id, terminal_id)): Path<(String, String)>,
+) -> ApiResult {
+    if !state.terminals.close(&project_id, &terminal_id).await {
+        return Err(not_found("terminal"));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
 /// The session worktree or, without a session, the project clone.
 fn project_terminal_root(project_id: &str, session_id: Option<&str>) -> Result<std::path::PathBuf> {
     let store = Store::open()?;
@@ -7878,7 +8616,7 @@ fn session_checkout_root(
     project: &local::model::LocalProject,
     session_id: &str,
 ) -> std::result::Result<std::path::PathBuf, ApiError> {
-    match local::git::ensure_session_worktree(project, session_id) {
+    match local::git::ensure_session_worktree(store, project, session_id) {
         Ok(dir) => Ok(crate::paths::canonicalize(&dir).unwrap_or(dir)),
         Err(error) => {
             eprintln!("orx up: session worktree unavailable, using the clone: {error}");
@@ -8309,6 +9047,15 @@ async fn reconnect_remote_session(
     Ok(Json(json!(state.remote_sessions.reconnect(&id).await?)))
 }
 
+async fn update_remote_session(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    let session = state
+        .remote_sessions
+        .update(&id)
+        .await
+        .map_err(bad_request)?;
+    Ok(Json(json!(session)))
+}
+
 async fn disconnect_remote_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -8491,6 +9238,33 @@ async fn remove_found_provider(State(state): State<AppState>, Path(id): Path<Str
             "OpenResearch added this provider. Remove it from its own row in Settings → Agents.",
         ));
     }
+
+    let env_key = state
+        .harnesses
+        .lock()
+        .await
+        .as_ref()
+        .and_then(|(_, payload)| {
+            let opencode = payload["harnesses"]
+                .as_array()?
+                .iter()
+                .find(|h| h["id"] == "opencode")?;
+            let found = opencode["foundProviders"]
+                .as_array()?
+                .iter()
+                .find(|found| found["id"] == id.as_str())?;
+            let from_env = found["sources"]
+                .as_array()?
+                .iter()
+                .any(|source| source == "env");
+            from_env.then(|| found["env"][0].as_str().map(str::to_owned))?
+        });
+    if let Some(var) = env_key {
+        return Err(bad_request(format!(
+            "`{var}` in your environment provides {id}. Remove it there, or turn this provider off."
+        )));
+    }
+
     let key = format!("opencode:{id}");
     tokio::task::spawn_blocking(move || {
         local::harness::opencode::delete_found_provider(&id)?;
@@ -8882,8 +9656,21 @@ async fn list_harnesses(State(state): State<AppState>, Query(q): Query<HarnessQu
         }
         let harness = entry["id"].as_str().unwrap_or_default().to_string();
         local::model_routes::name_models(&harness, &mut entry["models"]);
+        if harness == "claude-code" {
+            entry["fullAccessNeedsRootConsent"] = json!(
+                local::harness::claude::full_access()
+                    == local::harness::claude::FullAccess::NeedsRootConsent
+            );
+        }
     }
     Ok(Json(payload))
+}
+
+async fn allow_claude_root_full_access(State(state): State<AppState>) -> ApiResult {
+    crate::telemetry::set_claude_root_full_access(true)
+        .map_err(|e| anyhow!("could not save the full access confirmation: {e}"))?;
+    state.chat.emit_event("harness.catalog", json!({}));
+    Ok(Json(json!({})))
 }
 
 #[derive(Deserialize)]
@@ -9605,6 +10392,216 @@ fn sidebar_session_json(
     Ok(value)
 }
 
+/// A chat's sidebar card: the session, what it is doing, and its newest run.
+fn sidebar_row_json(
+    store: &Store,
+    session: &StoredChatSession,
+    busy: bool,
+    background: Option<&Value>,
+    catalog: &Value,
+) -> Result<Value> {
+    let mut value = sidebar_session_json(store, session, busy, background, catalog)?;
+    value["lastRun"] = last_run_json(store, &session.id)?;
+    Ok(value)
+}
+
+fn sidebar_totals(store: &Store) -> Result<Value> {
+    Ok(json!({
+        "active": store.count_sidebar_chat_sessions(Some(false))?,
+        "archived": store.count_sidebar_chat_sessions(Some(true))?,
+    }))
+}
+
+/// The chat whose sidebar card a chat event may change.
+fn sidebar_change(name: &str, data: &Value) -> Option<String> {
+    let id = match name {
+        "chat.session" => &data["session"]["id"],
+        "chat.session.deleted" | "chat.busy" | "chat.background" | "chat.branch" => {
+            &data["sessionId"]
+        }
+        // A prompt card opening or being answered can change whether the chat waits on the user.
+        "chat.message"
+            if data["message"]["parts"]
+                .as_array()
+                .is_some_and(|parts| parts.iter().any(|part| part["type"] == "prompt")) =>
+        {
+            &data["sessionId"]
+        }
+        _ => return None,
+    };
+    id.as_str().map(str::to_owned)
+}
+
+/// What a burst of events changed: chats by id, and runs whose chat is looked up with the rest.
+#[derive(Default)]
+struct SidebarChanges {
+    chats: HashSet<String>,
+    runs: HashSet<String>,
+    lagged: bool,
+}
+
+impl SidebarChanges {
+    fn is_empty(&self) -> bool {
+        self.chats.is_empty() && self.runs.is_empty() && !self.lagged
+    }
+
+    fn chat_event(
+        &mut self,
+        event: std::result::Result<(&'static str, Value), broadcast::error::RecvError>,
+    ) -> bool {
+        match event {
+            Ok((name, data)) => self.chats.extend(sidebar_change(name, &data)),
+            Err(broadcast::error::RecvError::Lagged(_)) => self.lagged = true,
+            Err(broadcast::error::RecvError::Closed) => return false,
+        }
+        true
+    }
+
+    fn run_event(
+        &mut self,
+        event: std::result::Result<crate::engine::bus::RunEvent, broadcast::error::RecvError>,
+    ) {
+        match event {
+            Ok(crate::engine::bus::RunEvent::Changed { run_id, .. }) => {
+                self.runs.insert(run_id);
+            }
+            Err(broadcast::error::RecvError::Lagged(_)) => self.lagged = true,
+            _ => {}
+        }
+    }
+}
+
+/// Sends the sidebar cards of the chats a burst of events changed, with the sidebar's counts, so a
+/// dashboard updates those rows instead of re-reading its lists. A missed or unreadable change asks dashboards to resync.
+async fn publish_sidebar_rows(
+    state: AppState,
+    mut events: broadcast::Receiver<(&'static str, Value)>,
+    mut runs: broadcast::Receiver<crate::engine::bus::RunEvent>,
+) {
+    loop {
+        let mut changes = SidebarChanges::default();
+        while changes.is_empty() {
+            tokio::select! {
+                event = events.recv() => if !changes.chat_event(event) { return },
+                event = runs.recv() => changes.run_event(event),
+            }
+        }
+        // Coalesces a burst, such as a turn's busy, session and message events, into one read.
+        let window = tokio::time::sleep(crate::config::paced(Duration::from_millis(50)));
+        tokio::pin!(window);
+        loop {
+            tokio::select! {
+                _ = &mut window => break,
+                event = events.recv() => if !changes.chat_event(event) { return },
+                event = runs.recv() => changes.run_event(event),
+            }
+        }
+        // A data-directory move holds the gate until it ends, so cards and resyncs wait for it.
+        let _data_dir_guard = state.data_dir_gate.lock().await;
+        if changes.lagged {
+            state.chat.emit_event("resync.required", json!({}));
+            continue;
+        }
+        let busy = state.chat.busy_sessions().await;
+        let background = match state.chat.waiting_on().await {
+            Ok(background) => background,
+            Err(error) => {
+                eprintln!(
+                    "orx up: could not read chats' background work for the sidebar: {error:#}"
+                );
+                state.chat.emit_event("resync.required", json!({}));
+                continue;
+            }
+        };
+        let catalog = state
+            .harnesses
+            .lock()
+            .await
+            .as_ref()
+            .map(|(_, catalog)| catalog.clone())
+            .unwrap_or(Value::Null);
+        let batch = tokio::task::spawn_blocking(move || -> Result<Value> {
+            let store = Store::open()?;
+            let mut chats = changes.chats;
+            for run_id in &changes.runs {
+                chats.extend(store.run_subscribers(run_id)?);
+            }
+            // A delegate's work shows on the cards of the chats above it.
+            let mut climbing: Vec<String> = chats.iter().cloned().collect();
+            while let Some(id) = climbing.pop() {
+                if let Some(parent) = store.delegation(&id)?.parent {
+                    if chats.insert(parent.clone()) {
+                        climbing.push(parent);
+                    }
+                }
+            }
+            let totals = sidebar_totals(&store)?;
+            // The chats a page lists first however old they are, so a card can say where it goes.
+            let live: Vec<&str> = busy
+                .iter()
+                .chain(background.keys())
+                .map(String::as_str)
+                .collect();
+            let at_work: HashSet<String> = store
+                .sidebar_chat_sessions_at_work(None, &live)?
+                .into_iter()
+                .map(|session| session.id)
+                .collect();
+            let cards = chats
+                .into_iter()
+                .map(|id| {
+                    let row = store
+                        .get_sidebar_chat_session(&id)?
+                        .map(|session| {
+                            sidebar_row_json(
+                                &store,
+                                &session,
+                                busy.contains(&session.id),
+                                background.get(&session.id),
+                                &catalog,
+                            )
+                        })
+                        .transpose()?;
+                    Ok(json!({
+                        "sessionId": id,
+                        "session": row,
+                        "atWork": at_work.contains(&id),
+                    }))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            // One event per read, so the counts arrive with every card they include.
+            Ok(json!({ "cards": cards, "totals": totals }))
+        })
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|batch| batch);
+        match batch {
+            Ok(batch) => state.chat.emit_event("chat.sidebar", batch),
+            Err(error) => {
+                eprintln!("orx up: could not read changed sidebar rows: {error:#}");
+                state.chat.emit_event("resync.required", json!({}));
+            }
+        }
+    }
+}
+
+/// The newest run a chat launched, for its sidebar card; a run that cannot be shown costs the card a line, not the page.
+fn last_run_json(store: &Store, session_id: &str) -> Result<Value> {
+    let Some(run) = store.latest_chat_run(session_id)? else {
+        return Ok(Value::Null);
+    };
+    Ok(match ApiRun::new(store, &run) {
+        Ok(run) => json!(run),
+        Err(error) => {
+            eprintln!(
+                "orx up: could not show run {} on chat {session_id}'s card: {error:#}",
+                run.id
+            );
+            Value::Null
+        }
+    })
+}
+
 fn chat_active_runs_json(store: &Store) -> Result<Value> {
     let mut rows = Vec::new();
     for (session_id, run) in store.chat_active_runs()? {
@@ -9620,8 +10617,94 @@ fn chat_active_runs_json(store: &Store) -> Result<Value> {
     Ok(json!(rows))
 }
 
+/// Active runs only, as older pages read it; `chat_shown_runs` is the projection that keeps ended ones.
 async fn chat_active_runs() -> ApiResult {
     Ok(Json(chat_active_runs_json(&Store::open()?)?))
+}
+
+fn chat_shown_runs_json(store: &Store) -> Result<Value> {
+    let mut failed_sessions = std::collections::BTreeSet::new();
+    let rows = store
+        .chat_shown_runs()?
+        .into_iter()
+        .filter_map(|item| {
+            let run = match ApiRun::new(store, &item.run) {
+                Ok(run) => run,
+                Err(error) => {
+                    eprintln!(
+                        "orx up: could not show run {} above the composer: {error:#}",
+                        item.run.id
+                    );
+                    failed_sessions.insert(item.session_id);
+                    return None;
+                }
+            };
+            Some(json!({
+                "sessionId": item.session_id,
+                "run": run,
+                "experimentName": item.experiment_name,
+                "experimentSlug": item.experiment_slug,
+                "runNo": item.run_no,
+                "runCount": item.run_count,
+            }))
+        })
+        .collect::<Vec<_>>();
+    // The chat's newest look rides on each of its rows: one watcher writes the summary for them all.
+    let mut watched = std::collections::HashMap::new();
+    let mut rows = rows;
+    for row in &mut rows {
+        let Some(chat) = row["sessionId"].as_str().map(str::to_owned) else {
+            continue;
+        };
+        if !watched.contains_key(&chat) {
+            let watch = crate::engine::watch::chat_summary(store, &chat).unwrap_or_else(|error| {
+                eprintln!("orx up: could not read chat {chat}'s watcher summary: {error:#}");
+                Value::Null
+            });
+            watched.insert(chat.clone(), watch);
+        }
+        row["watch"] = watched[&chat].clone();
+    }
+    Ok(json!({ "runs": rows, "failedSessions": failed_sessions }))
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatShownRunsQuery {
+    #[serde(default)]
+    include_failures: bool,
+}
+
+async fn chat_shown_runs(Query(query): Query<ChatShownRunsQuery>) -> ApiResult {
+    blocking_api(move || {
+        let mut projection = chat_shown_runs_json(&Store::open()?)?;
+        Ok(Json(if query.include_failures {
+            projection
+        } else {
+            projection["runs"].take()
+        }))
+    })
+    .await
+}
+
+async fn dismiss_shown_run(Path((session_id, run_id)): Path<(String, String)>) -> ApiResult {
+    blocking_api(move || {
+        let mut store = Store::open()?;
+        if store.get_chat_session(&session_id)?.is_none() {
+            return Err(not_found("chat"));
+        }
+        if store.get_run(&run_id)?.is_none() {
+            return Err(not_found("run"));
+        }
+        match store.dismiss_chat_run(&session_id, &run_id)? {
+            crate::store::RunDismissal::Dismissed => Ok(Json(json!({ "dismissed": true }))),
+            crate::store::RunDismissal::NotAssociated => Err(not_found("run in this chat")),
+            crate::store::RunDismissal::Refused(reason) => {
+                Err(ApiError(StatusCode::CONFLICT, reason.into()))
+            }
+        }
+    })
+    .await
 }
 
 async fn list_chat_sessions(
@@ -9667,7 +10750,7 @@ async fn list_chat_sessions(
         let sessions: Vec<Value> = sessions
             .iter()
             .map(|session| {
-                sidebar_session_json(
+                sidebar_row_json(
                     &store,
                     session,
                     busy.contains(&session.id),
@@ -9676,7 +10759,13 @@ async fn list_chat_sessions(
                 )
             })
             .collect::<Result<_>>()?;
-        return Ok(Json(json!({ "sessions": sessions, "next": next })));
+        // A folded section still says how many chats it holds, however many pages they run to.
+        return Ok(Json(json!({
+            "sessions": sessions,
+            "next": next,
+            "total": store.count_sidebar_chat_sessions(q.archived)?,
+            "totals": sidebar_totals(&store)?,
+        })));
     }
     let sessions = match (q.project_id.as_deref(), q.scope.as_deref()) {
         (Some(project_id), _) => store.list_chat_sessions_by_project(project_id)?,
@@ -9713,6 +10802,20 @@ struct CreateChatSessionReq {
     plan_mode: bool,
     reasoning_level: Option<String>,
     autonomy: Option<Autonomy>,
+    /// Sources a draft turned off before its first message.
+    #[serde(default)]
+    disabled_lit_sources: Option<Vec<String>>,
+}
+
+/// The autonomy a new chat gets when its request names none: its project's, else the last one used.
+fn project_autonomy(store: &Store, project_id: &str) -> Result<String> {
+    let own = store.project_settings(project_id)?.autonomy;
+    let autonomy = own
+        .as_deref()
+        .and_then(Autonomy::from_id)
+        .or(store.ui_state()?.preferred_autonomy)
+        .unwrap_or_default();
+    Ok(autonomy.id().to_string())
 }
 
 async fn selected_chat_model(
@@ -9822,6 +10925,7 @@ fn new_chat_settings(
         plan_mode: false,
         reasoning_level,
         autonomy: Some(preferences.preferred_autonomy.unwrap_or(Autonomy::Agentic)),
+        disabled_lit_sources: None,
     })
 }
 
@@ -9880,7 +10984,7 @@ async fn create_chat_session(
         .ok_or_else(|| not_found("project"))?;
     // A chat without a project gets one of its own, even when two drafts were
     // opened on the same unused scratch project.
-    let _scratch_guard = if project.is_scratch() {
+    let _scratch_guard = if project.is_unnamed_scratch() {
         let guard = state.project_creation_lock.clone().lock_owned().await;
         if !store.list_chat_sessions_by_project(&project.id)?.is_empty() {
             req.project_id = local::projects::scratch_project(&store)?.id;
@@ -9900,8 +11004,25 @@ async fn create_chat_session(
         }
     }
     if req.harness.is_none() {
-        let preferences = store.ui_state()?;
-        req = new_chat_settings(req.project_id, preferences, &catalog).map_err(bad_request)?;
+        let mut preferences = store.ui_state()?;
+        let project = store.project_settings(&req.project_id)?;
+        if let Some(autonomy) = project.autonomy.as_deref().and_then(Autonomy::from_id) {
+            preferences.preferred_autonomy = Some(autonomy);
+        }
+        let pinned = project.agent;
+        let from_project = pinned.is_some();
+        if pinned.is_some() {
+            preferences.preferred_agent = pinned;
+        }
+        let disabled_lit_sources = req.disabled_lit_sources.take();
+        req = new_chat_settings(req.project_id, preferences, &catalog).map_err(|error| {
+            if from_project {
+                bad_request("This project's agent for new chats is unavailable. Check its installation and sign-in, or choose another agent in Project settings.")
+            } else {
+                bad_request(error)
+            }
+        })?;
+        req.disabled_lit_sources = disabled_lit_sources;
     }
     let harness = req
         .harness
@@ -9939,6 +11060,12 @@ async fn create_chat_session(
         req.model.as_deref(),
     )
     .map_err(bad_request)?;
+    let disabled_lit_sources = req
+        .disabled_lit_sources
+        .map(project_settings::lit_sources)
+        .transpose()
+        .map_err(bad_request)?;
+    let session_project = req.project_id.clone();
     let session = StoredChatSession {
         profile_id: req.profile,
         id: format!("chat_{}", uuid::Uuid::new_v4()),
@@ -9958,7 +11085,10 @@ async fn create_chat_session(
         context_usage_json: None,
         bootstrap_context: None,
         goal: None,
-        autonomy: req.autonomy.map(|autonomy| autonomy.id().to_string()),
+        autonomy: Some(match req.autonomy {
+            Some(autonomy) => autonomy.id().to_string(),
+            None => project_autonomy(&store, &session_project)?,
+        }),
         active_leaf_id: None,
         side_parent_session_id: None,
         side_parent_leaf_id: None,
@@ -9966,6 +11096,9 @@ async fn create_chat_session(
         updated_at: now_ms(),
     };
     store.create_chat_session(&session)?;
+    if let Some(disabled) = &disabled_lit_sources {
+        store.set_chat_lit_sources(&session.id, Some(disabled))?;
+    }
     state.chat.emit_session(Some(session.clone())).await;
     Ok(Json(
         json!({ "session": state.chat.session_json(&session, false).await }),
@@ -10052,8 +11185,21 @@ async fn import_native_chat(
     ))
 }
 
-async fn open_side_chat(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+#[derive(Deserialize)]
+struct OpenSideChatReq {
+    /// Absent, the side chat starts on the parent's agent.
+    agent: Option<crate::store::StoredAgentSelection>,
+}
+
+async fn open_side_chat(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<OpenSideChatReq>,
+) -> ApiResult {
     reject_if_moving(&state)?;
+    if let Some(agent) = &req.agent {
+        check_agent(agent)?;
+    }
     let parent = Store::open()?
         .get_chat_session(&id)?
         .ok_or_else(|| not_found("chat session"))?;
@@ -10065,13 +11211,17 @@ async fn open_side_chat(State(state): State<AppState>, Path(id): Path<String>) -
         .admit(&parent.project_id)
         .ok_or_else(|| bad_request("project deletion is in progress"))?;
     harnesses_payload(&state, &HarnessQuery::default()).await;
-    let session = state.chat.open_side_chat(&parent).await.map_err(|error| {
-        if error.is::<local::harness::ModelSelectionError>() {
-            bad_request(error)
-        } else {
-            ApiError::from(error)
-        }
-    })?;
+    let session = state
+        .chat
+        .open_side_chat(&parent, req.agent)
+        .await
+        .map_err(|error| {
+            if error.is::<local::harness::ModelSelectionError>() {
+                bad_request(error)
+            } else {
+                ApiError::from(error)
+            }
+        })?;
     Ok(Json(
         json!({ "session": state.chat.session_json(&session, false).await }),
     ))
@@ -10087,7 +11237,7 @@ async fn delete_chat_session(State(state): State<AppState>, Path(id): Path<Strin
         .map(|session| store.get_local_project(&session.project_id))
         .transpose()?
         .flatten()
-        .filter(|project| project.is_scratch());
+        .filter(|project| project.is_unnamed_scratch());
     drop(store);
     tokio::spawn(async move {
         chat.delete_session(&id).await?;
@@ -10235,6 +11385,33 @@ async fn set_chat_configuration(
     ))
 }
 
+/// Rejects an agent selection whose account, permission mode or speed doesn't belong to its agent.
+fn check_agent(agent: &crate::store::StoredAgentSelection) -> Result<(), ApiError> {
+    if !local::harness::is_chat_harness(&agent.harness) {
+        return Err(bad_request("Choose an available agent"));
+    }
+    if let Some(profile) = &agent.profile {
+        local::agent_profiles::home(profile, &agent.harness).map_err(bad_request)?;
+    }
+    if agent
+        .permission_mode
+        .as_deref()
+        .is_some_and(|mode| local::harness::permission_mode_for(&agent.harness, mode).is_none())
+    {
+        return Err(bad_request(
+            "invalid permission mode for the selected agent",
+        ));
+    }
+    if agent
+        .service_tier
+        .as_deref()
+        .is_some_and(|tier| local::harness::service_tier_for(&agent.harness, tier).is_none())
+    {
+        return Err(bad_request("invalid speed for the selected agent"));
+    }
+    Ok(())
+}
+
 async fn update_chat_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -10249,9 +11426,6 @@ async fn update_chat_session(
             agent
         } else {
             let harness = req.harness.unwrap_or_else(|| current.harness.clone());
-            if !local::harness::is_chat_harness(&harness) {
-                return Err(bad_request("Choose an available agent"));
-            }
             let same_harness = harness == current.harness;
             let profile = req.profile.unwrap_or_else(|| {
                 if same_harness {
@@ -10294,9 +11468,7 @@ async fn update_chat_session(
                 }),
             }
         };
-        if let Some(profile) = &selection.profile {
-            local::agent_profiles::home(profile, &selection.harness).map_err(bad_request)?;
-        }
+        check_agent(&selection)?;
         let catalog = harnesses_payload(&state, &HarnessQuery::default()).await;
         selection.model = local::harness::selected_model(
             &catalog,
@@ -10305,18 +11477,6 @@ async fn update_chat_session(
             selection.model.as_deref(),
         )
         .map_err(bad_request)?;
-        if selection.permission_mode.as_deref().is_some_and(|mode| {
-            local::harness::permission_mode_for(&selection.harness, mode).is_none()
-        }) {
-            return Err(bad_request(
-                "invalid permission mode for the selected agent",
-            ));
-        }
-        if selection.service_tier.as_deref().is_some_and(|tier| {
-            local::harness::service_tier_for(&selection.harness, tier).is_none()
-        }) {
-            return Err(bad_request("invalid speed for the selected agent"));
-        }
         let window = catalog["harnesses"]
             .as_array()
             .and_then(|entries| {
@@ -10348,10 +11508,12 @@ async fn update_chat_session(
             .await?
             .ok_or_else(|| not_found("chat session"))?
     } else if let Some(archived) = req.archived {
+        let store = Store::open()?;
+        store.set_chat_session_archived(&id, archived)?;
         state
             .chat
-            .set_archived(&id, archived)
-            .await?
+            .emit_session(store.get_chat_session(&id)?)
+            .await
             .ok_or_else(|| not_found("chat session"))?
     } else if let Some(plan_mode) = req.plan_mode {
         state
@@ -10369,6 +11531,17 @@ async fn update_chat_session(
             .await?
             .ok_or_else(|| not_found("chat session"))?
     } else if let Some(permission_mode) = req.permission_mode {
+        let harness = Store::open()?
+            .get_chat_session(&id)?
+            .ok_or_else(|| not_found("chat session"))?
+            .harness;
+        if harness == "claude-code" {
+            local::harness::claude::check_full_access(local::harness::permission_mode_for(
+                &harness,
+                &permission_mode,
+            ))
+            .map_err(bad_request)?;
+        }
         state
             .chat
             .set_permission_mode(&id, &permission_mode)
@@ -10381,9 +11554,17 @@ async fn update_chat_session(
             .await?
             .ok_or_else(|| not_found("chat session"))?
     } else if req.notify_parent == Some(false) {
-        let session = local::chat::delegation::release_delegate(&Store::open()?, &id)?
+        let store = Store::open()?;
+        let parent = store.delegation(&id)?.parent;
+        let session = local::chat::delegation::release_delegate(&store, &id)?
             .ok_or_else(|| not_found("chat session"))?;
         state.chat.emit_session(Some(session.clone())).await;
+        // The chat it worked for no longer waits on it.
+        if let Some(parent) = parent {
+            state
+                .chat
+                .emit_event("chat.background", json!({ "sessionId": parent }));
+        }
         session
     } else {
         return Err(bad_request("nothing to update"));
@@ -10700,6 +11881,15 @@ async fn recover_chat_turn(
 ) -> ApiResult {
     reject_if_stopping(&state)?;
     reject_if_moving(&state)?;
+    let latest = Store::open()
+        .and_then(|store| store.latest_chat_turn(&id))
+        .map_err(|error| ApiError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    if latest.is_some_and(|turn| turn.id != turn_id) {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "A later message replaced this turn.".into(),
+        ));
+    }
     let result = state
         .chat
         .recover_turn(
@@ -10797,13 +11987,13 @@ async fn select_chat_branch(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// Raw bytes of a chat attachment (image or PDF), by bare file name.
+/// Raw bytes of a chat attachment, by bare file name.
 async fn chat_attachment(
     Path(name): Path<String>,
     method: Method,
     headers: HeaderMap,
 ) -> std::result::Result<Response, ApiError> {
-    // Names are server-minted (att-<uuid>__<name>.<ext>); anything else is rejected.
+    // Names are server-minted (att-<uuid>__<name>[.<ext>]); anything else is rejected.
     if !name
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
@@ -10837,6 +12027,74 @@ async fn chat_attachment(
 
 async fn interrupt_chat(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     state.chat.interrupt_by_user(&id).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn stop_and_archive_chat(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    reject_if_moving(&state)?;
+    let chat = state.chat;
+    // A disconnected client must not leave the chat between stopping and archiving.
+    tokio::spawn(async move {
+        let store = Store::open()?;
+        store
+            .get_chat_session(&id)?
+            .ok_or_else(|| not_found("chat session"))?;
+        if !chat.queued_items(&id).is_empty() {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "This chat has queued messages. Remove them, then mark it done.".into(),
+            ));
+        }
+        chat.interrupt(&id).await?;
+        let mut guard = local::chat::TurnGuard::claim(&chat, &id, None)
+            .await
+            .ok_or_else(|| {
+                ApiError(
+                    StatusCode::CONFLICT,
+                    "The chat took on another turn. Try marking it done again.".into(),
+                )
+            })?;
+        chat.claude.interrupt_session(&id).await;
+        chat.stop_delegates(&id).await?;
+
+        let reason = format!("Cancel requested by marking chat {id} done in the dashboard.");
+        for (session, run) in store.chat_active_runs()? {
+            if session == id && run.chat_session_id.as_deref() == Some(id.as_str()) {
+                api_v2::cancel_run(
+                    &run,
+                    &reason,
+                    Some(&crate::store::StopContext::by(crate::store::StopBy::User)),
+                )
+                .await
+                .map_err(|error| anyhow!("Could not stop experiment run {}: {error}", run.id))?;
+                store.dismiss_run_notices(&run.id, &id, now_ms())?;
+            }
+        }
+        store.set_chat_session_archived(&id, true)?;
+        guard.release().await;
+        let session = chat
+            .emit_session(store.get_chat_session(&id)?)
+            .await
+            .ok_or_else(|| not_found("chat session"))?;
+        Ok(Json(
+            chat.session_json(&session, chat.is_busy(&id).await).await,
+        ))
+    })
+    .await
+    .map_err(|error| anyhow!("Could not finish marking the chat done: {error}"))?
+}
+
+async fn stop_background_task(
+    State(state): State<AppState>,
+    Path((id, task)): Path<(String, String)>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    if !state.chat.stop_background(&id, &task).await? {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "That background task has already finished.".into(),
+        ));
+    }
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -10928,7 +12186,13 @@ async fn bridge_permission(
 ) -> ApiResult {
     let decision = state
         .chat
-        .request_permission(&req.session_id, &req.token, &req.tool_name, req.tool_input)
+        .request_permission(
+            &req.session_id,
+            &req.token,
+            &req.tool_name,
+            req.tool_input,
+            req.tool_use_id.as_deref(),
+        )
         .await
         .map_err(bad_request)?;
     Ok(Json(serde_json::to_value(decision).map_err(bad_request)?))
@@ -10942,6 +12206,8 @@ struct BridgePermissionReq {
     tool_name: String,
     #[serde(default)]
     tool_input: Value,
+    #[serde(default)]
+    tool_use_id: Option<String>,
 }
 
 // --- agent ----------------------------------------------------------------
@@ -11022,7 +12288,7 @@ struct EventCursor {
     followed: HashMap<String, Box<dyn Send>>,
     log_offsets: HashMap<String, u64>,
     log_generations: HashMap<String, String>,
-    chat_active_runs: Option<Value>,
+    chat_shown_runs: Option<Value>,
     /// Last update status sent. Unlike the rest of the cursor this isn't store
     /// state — the updater is a separate process, so its progress reaches the UI
     /// through the same diff the store changes do.
@@ -11040,16 +12306,23 @@ async fn event_loop(
     tx: mpsc::Sender<Event>,
     mut runs: Option<tokio::sync::broadcast::Receiver<crate::engine::bus::RunEvent>>,
 ) {
+    use crate::engine::bus::RunEvent;
     use tokio::sync::broadcast::error::RecvError;
+    let period = Duration::from_millis(500);
+    let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut cursor = EventCursor::default();
     let mut first = true;
+    let mut store = None;
     loop {
-        if !first {
+        let event = if first {
+            None
+        } else {
             // An idle store never sends, so a failed send can't be the only
             // disconnect signal — watch the receiver side too or the loop
             // leaks per closed EventSource.
-            let event = tokio::select! {
-                _ = tokio::time::sleep(Duration::from_millis(500)) => None,
+            tokio::select! {
+                _ = tick.tick() => None,
                 _ = tx.closed() => return,
                 event = async {
                     match runs.as_mut() {
@@ -11057,42 +12330,66 @@ async fn event_loop(
                         None => std::future::pending().await,
                     }
                 } => Some(event),
-            };
-            let batch = match event {
-                None => None,
-                Some(Ok(event)) => Some(
-                    Store::open().and_then(|store| run_events(&store, &mut cursor, Some(event))),
-                ),
-                // Lagged: resynchronize every run from the store.
-                Some(Err(RecvError::Lagged(_))) => {
-                    Some(Store::open().and_then(|store| run_events(&store, &mut cursor, None)))
+            }
+        };
+        match &event {
+            Some(Ok(RunEvent::Monitor { event, .. })) => {
+                // The published monitor must reach the browser even if SQLite cannot supply its summary.
+                if tx.send(json_event("run.monitor", event)).await.is_err() {
+                    return;
                 }
-                Some(Err(RecvError::Closed)) => {
-                    runs = None;
-                    continue;
-                }
-            };
-            if let Some(batch) = batch {
-                for ev in batch.unwrap_or_default() {
-                    if tx.send(ev).await.is_err() {
-                        return;
-                    }
+            }
+            Some(Ok(RunEvent::Grew { run_id, len, .. })) => {
+                let event = json_event(
+                    "run.log",
+                    &json!({"runId": run_id, "dataBase64": "", "offset": len}),
+                );
+                if tx.send(event).await.is_err() {
+                    return;
                 }
                 continue;
             }
+            Some(Ok(RunEvent::Notices { .. } | RunEvent::FlagReview { .. })) => continue,
+            Some(Err(RecvError::Closed)) => {
+                runs = None;
+                continue;
+            }
+            _ => {}
         }
         if tx.is_closed() {
             return;
         }
-        // Store hiccups (locked db) just skip a tick.
-        let mut batch = collect_events(&mut cursor).unwrap_or_default();
-        if first {
-            batch.extend(
-                Store::open()
-                    .and_then(|store| run_events(&store, &mut cursor, None))
-                    .unwrap_or_default(),
-            );
-        }
+        let collected = tokio::task::spawn_blocking(move || {
+            let opening = store.is_none();
+            let connection = match store.map_or_else(Store::open, Ok) {
+                Ok(connection) => connection,
+                Err(error) => {
+                    eprintln!("orx up: could not open the dashboard event store: {error:#}");
+                    return (cursor, None, Vec::new());
+                }
+            };
+            // A failed read is recovered by the next snapshot. A lagged receiver snapshots every run.
+            let mut batch = if opening || event.is_none() {
+                collect_events(&connection, &mut cursor).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            if opening || event.is_some() {
+                let event = event.filter(|_| !opening).and_then(std::result::Result::ok);
+                batch.extend(run_events(&connection, &mut cursor, event).unwrap_or_default());
+            }
+            (cursor, Some(connection), batch)
+        })
+        .await;
+        let (next, connection, batch) = match collected {
+            Ok(collected) => collected,
+            Err(error) => {
+                eprintln!("orx up: could not collect dashboard events: {error}");
+                return;
+            }
+        };
+        cursor = next;
+        store = connection;
         first = false;
         for ev in batch {
             if tx.send(ev).await.is_err() {
@@ -11108,7 +12405,7 @@ fn json_event(name: &str, data: &Value) -> Event {
 
 /// One non-run diff pass. On the first pass everything is "changed", so a fresh
 /// subscriber gets a full snapshot and needs no separate baseline fetches.
-fn collect_events(cursor: &mut EventCursor) -> Result<Vec<Event>> {
+fn collect_events(store: &Store, cursor: &mut EventCursor) -> Result<Vec<Event>> {
     let mut out = Vec::new();
 
     // Sampled far below the 2Hz loop — the updater works on the scale of
@@ -11128,7 +12425,6 @@ fn collect_events(cursor: &mut EventCursor) -> Result<Vec<Event>> {
         out.push(json_event("update.status", &json!(update)));
     }
 
-    let store = Store::open()?;
     for project in store.list_local_projects()? {
         if cursor.projects.get(&project.id) != Some(&project.updated_at) {
             cursor
@@ -11139,7 +12435,7 @@ fn collect_events(cursor: &mut EventCursor) -> Result<Vec<Event>> {
                 &json!({ "project": project_json(&project) }),
             ));
         }
-        push_experiment_events(&store, &project.id, cursor, &mut out)?;
+        push_experiment_events(store, &project.id, cursor, &mut out)?;
         // Artifacts appear live — anything written into the directory (by the
         // agent or the user) pings the UI to refetch the listing.
         let fp = local::files::fingerprint(&project);
@@ -11166,11 +12462,25 @@ fn collect_events(cursor: &mut EventCursor) -> Result<Vec<Event>> {
             cursor.tailed.remove(&run_id);
         }
     }
+    push_chat_run_events(store, cursor, &mut out)?;
     // Committed only now that the batch is certain to be returned.
     if let Some(update) = sampled_update {
         cursor.update = Some(update);
     }
     Ok(out)
+}
+
+fn push_chat_run_events(
+    store: &Store,
+    cursor: &mut EventCursor,
+    out: &mut Vec<Event>,
+) -> Result<()> {
+    let shown_runs = chat_shown_runs_json(store)?;
+    if cursor.chat_shown_runs.as_ref() != Some(&shown_runs) {
+        out.push(json_event("chat.runs", &json!({})));
+        cursor.chat_shown_runs = Some(shown_runs);
+    }
+    Ok(())
 }
 
 /// Run events for one Bus event, or for every recent run when `event` is `None` (the first
@@ -11181,18 +12491,11 @@ fn run_events(
     event: Option<crate::engine::bus::RunEvent>,
 ) -> Result<Vec<Event>> {
     use crate::engine::bus::RunEvent;
-    let first = cursor.chat_active_runs.is_none();
+    let first = event.is_none() && cursor.runs.is_empty();
     let runs = match &event {
         None => store.list_runs(200)?,
         Some(RunEvent::Changed { run_id, .. } | RunEvent::LogCollection { run_id }) => {
             store.get_run(run_id)?.into_iter().collect()
-        }
-        Some(RunEvent::Grew { run_id, len, .. }) => {
-            // A followed engine run's log grew on its host; the client refetches it.
-            return Ok(vec![json_event(
-                "run.log",
-                &json!({"runId": run_id, "dataBase64": "", "offset": len}),
-            )]);
         }
         Some(RunEvent::Host { alias, root, state }) => {
             return Ok(vec![json_event(
@@ -11200,7 +12503,18 @@ fn run_events(
                 &api_v2::host_view(store, alias, root, state)?,
             )])
         }
-        Some(RunEvent::Notices { .. }) => return Ok(Vec::new()),
+        Some(RunEvent::Monitor { run_id, .. }) => {
+            let Some(run) = store.get_run(run_id)? else {
+                return Ok(Vec::new());
+            };
+            return Ok(vec![json_event(
+                "run.updated",
+                &json!({ "run": ApiRun::new(store, &run)? }),
+            )]);
+        }
+        Some(RunEvent::Grew { .. } | RunEvent::Notices { .. } | RunEvent::FlagReview { .. }) => {
+            return Ok(Vec::new())
+        }
     };
     let mut out = Vec::new();
     if event.is_none() {
@@ -11238,11 +12552,7 @@ fn run_events(
             &json!({ "run": ApiRun::new(store, &run)? }),
         ));
     }
-    let active_runs = chat_active_runs_json(store)?;
-    if cursor.chat_active_runs.as_ref() != Some(&active_runs) {
-        out.push(json_event("chat.runs", &json!({})));
-        cursor.chat_active_runs = Some(active_runs);
-    }
+    push_chat_run_events(store, cursor, &mut out)?;
     Ok(out)
 }
 
@@ -11375,6 +12685,97 @@ pub(crate) async fn spa(uri: Uri) -> Response {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn a_servers_secrets_and_port_outlive_it_only_while_a_kept_agent_does() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let first = Lineage::fresh(4321);
+            first.record().unwrap();
+            assert!(Lineage::inherited().unwrap().is_none());
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let mode = std::fs::metadata(Lineage::path())
+                    .unwrap()
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o777, 0o600);
+            }
+
+            let command = crate::process::command("cat");
+            let kept = crate::keep::spawn(crate::keep::Keep {
+                command: &command,
+                io: crate::keep::Io::Pipes { stderr: None },
+                retain: crate::keep::LOSSLESS,
+                owner: crate::keep::Owner::Agent {
+                    harness: "codex".into(),
+                    session_id: "chat".into(),
+                    state: Value::Null,
+                }
+                .to_value(),
+            })
+            .await
+            .unwrap();
+            let inherited = Lineage::inherited().unwrap().unwrap();
+            assert_eq!(
+                (inherited.token, inherited.agent_key, inherited.port),
+                (first.token, first.agent_key, 4321)
+            );
+
+            // Unknown is not absent: a damaged record leaves the agent to the user, not stopped.
+            std::fs::write(Lineage::path(), b"{").unwrap();
+            let Err(damaged) = Lineage::inherited() else {
+                panic!("a damaged lineage was read as valid");
+            };
+            let damaged = damaged.to_string();
+            assert!(damaged.contains("lineage.json"), "{damaged}");
+            std::fs::remove_file(Lineage::path()).unwrap();
+            assert!(Lineage::inherited().unwrap().is_none());
+
+            kept.handle().stop(Duration::from_secs(10)).await.unwrap();
+            let id = kept.handle().id().to_string();
+            let stopped =
+                async {
+                    while crate::keep::entries().unwrap().iter().any(|entry| {
+                        entry.id == id && entry.liveness == crate::keep::Liveness::Alive
+                    }) {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                };
+            tokio::time::timeout(Duration::from_secs(10), stopped)
+                .await
+                .unwrap();
+            assert!(Lineage::inherited().unwrap().is_none());
+        });
+    }
+
+    #[tokio::test]
+    async fn shown_runs_reports_a_busy_database_without_blocking_the_worker() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        let writer = store.begin_immediate().unwrap();
+        let start = std::time::Instant::now();
+        let request = chat_shown_runs(Query(ChatShownRunsQuery::default()));
+        tokio::pin!(request);
+        assert!(futures::poll!(&mut request).is_pending());
+        let error = request.await.unwrap_err();
+        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE, "{}", error.1);
+        assert!(error.1.contains("database is busy"), "{}", error.1);
+        assert!(start.elapsed() < crate::store::BUSY_TIMEOUT + Duration::from_secs(1));
+        drop(writer);
+        assert_eq!(
+            chat_shown_runs(Query(ChatShownRunsQuery::default()))
+                .await
+                .unwrap()
+                .0,
+            json!([])
+        );
+    }
+
     #[tokio::test]
     async fn variables_save_for_a_project_or_every_project_with_their_descriptions() {
         let project = format!("proj_{}", uuid::Uuid::new_v4().simple());
@@ -11383,13 +12784,17 @@ mod tests {
             .unwrap()
             .create_local_project(&crate::store::tests::local_project_fixture(&project))
             .unwrap();
+        let state = test_state();
         let set = |value: Option<&str>, description: Option<&str>, project_id: Option<&str>| {
-            set_env_var(Json(SetEnvVarReq {
-                key: key.clone(),
-                value: value.map(str::to_string),
-                description: description.map(str::to_string),
-                project_id: project_id.map(str::to_string),
-            }))
+            set_env_var(
+                State(state.clone()),
+                Json(SetEnvVarReq {
+                    key: key.clone(),
+                    value: value.map(str::to_string),
+                    description: description.map(str::to_string),
+                    project_id: project_id.map(str::to_string),
+                }),
+            )
         };
         let row = |body: &Value, list: &str| {
             body[list]
@@ -11436,6 +12841,7 @@ mod tests {
         assert!(row(&body, "vars").is_some() && row(&body, "projectVars").is_some());
 
         let Json(body) = delete_env_var(
+            State(state.clone()),
             Path(key.clone()),
             Query(EnvQuery {
                 project_id: Some(project.clone()),
@@ -11448,9 +12854,13 @@ mod tests {
             row(&body, "vars").is_some(),
             "deleting the project's copy keeps every project's"
         );
-        let Json(body) = delete_env_var(Path(key.clone()), Query(EnvQuery { project_id: None }))
-            .await
-            .unwrap();
+        let Json(body) = delete_env_var(
+            State(state),
+            Path(key.clone()),
+            Query(EnvQuery { project_id: None }),
+        )
+        .await
+        .unwrap();
         assert!(row(&body, "vars").is_none());
         assert!(!Store::open()
             .unwrap()
@@ -11515,6 +12925,80 @@ mod tests {
         assert!(!run_events(&store, &mut cursor, None).unwrap().is_empty());
         drop(store);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_monitor_event_precedes_its_summary_even_when_the_store_is_busy() {
+        use crate::engine::bus::RunEvent;
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let store = Store::open().unwrap();
+        let run = StoredRun {
+            id: "r".into(),
+            experiment_id: "e".into(),
+            project_id: "p".into(),
+            status: "running".into(),
+            backend_json: r#"{"kind":"local_job"}"#.into(),
+            command: "true".into(),
+            created_at: 1,
+            updated_at: 1,
+            ended_at: None,
+            exit_code: None,
+            commit_sha: None,
+            result_markdown: None,
+            cancel_requested: false,
+            cancel_reason: None,
+            chat_session_id: None,
+        };
+        store.upsert_run(&run).unwrap();
+        let bus = crate::engine::bus::Bus::new();
+        let (tx, mut rx) = mpsc::channel(16);
+        let stream = tokio::spawn(event_loop(tx, Some(bus.subscribe())));
+        let _initial = rx.recv().await.expect("initial dashboard snapshot");
+        while rx.try_recv().is_ok() {}
+
+        let flag = crate::engine::flags::new_flag(
+            &store,
+            &run,
+            json!({"id": "f1", "source": "tripwire", "fingerprint": "error", "template": "An error."}),
+            true,
+        )
+        .unwrap();
+        store.raise_flags(&[flag], 5).unwrap();
+        let (projection, monitor) = crate::engine::monitor::monitor(&store, &run).unwrap();
+        let rev = &projection.summary()["rev"];
+        assert_eq!(monitor["flagId"], "f1");
+
+        let writer = store.begin_immediate().unwrap();
+        bus.publish(RunEvent::Monitor {
+            run_id: run.id.clone(),
+            event: Arc::new(monitor),
+        });
+        let event = tokio::time::timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .expect("the monitor needs no database read")
+            .unwrap();
+        drop(writer);
+
+        let updated = rx
+            .recv()
+            .await
+            .expect("run summary after the writer released");
+        drop(rx);
+        stream.await.unwrap();
+        let text = event_text(vec![event, updated]).await;
+        assert!(text.starts_with("event: run.monitor\n"), "{text}");
+        assert!(text.contains("\nevent: run.updated\n"), "{text}");
+        let summary: Value = serde_json::from_str(
+            text.lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .nth(1)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(&summary["run"]["monitor"]["rev"], rev);
+        assert_eq!(summary["run"]["monitor"]["flag"]["id"], "f1");
     }
 
     #[tokio::test]
@@ -11663,6 +13147,133 @@ mod tests {
     }
 
     #[test]
+    fn one_unreadable_run_does_not_hide_the_others_above_the_composer() {
+        let dir = std::env::temp_dir().join(format!("orx-shown-bad-row-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for id in ["readable", "quarantined"] {
+            store
+                .upsert_run(&StoredRun {
+                    id: id.into(),
+                    experiment_id: format!("experiment_{id}"),
+                    project_id: "project".into(),
+                    status: "running".into(),
+                    backend_json: "{}".into(),
+                    command: String::new(),
+                    created_at: 1,
+                    updated_at: 1,
+                    ended_at: None,
+                    exit_code: None,
+                    commit_sha: None,
+                    result_markdown: None,
+                    cancel_requested: false,
+                    cancel_reason: None,
+                    chat_session_id: Some("chat".into()),
+                })
+                .unwrap();
+        }
+        rusqlite::Connection::open(dir.join("orx.db"))
+            .unwrap()
+            .execute(
+                "UPDATE runs SET contact = '{\"type\":\"quarantined\"}' WHERE id = 'quarantined'",
+                [],
+            )
+            .unwrap();
+        let shown = chat_shown_runs_json(&store).unwrap();
+        assert_eq!(shown["failedSessions"], json!(["chat"]));
+        let ids: Vec<_> = shown["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["run"]["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["readable"]);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn shown_run_events_reach_each_client_without_an_engine_event() {
+        let dir = std::env::temp_dir().join(format!("orx-shown-events-{}", uuid::Uuid::new_v4()));
+        let mut store = Store::open_at(dir.clone()).unwrap();
+        let session = StoredChatSession {
+            profile_id: None,
+            id: "chat".into(),
+            project_id: "project".into(),
+            harness: "claude-code".into(),
+            native_session_id: None,
+            native_fork_at: None,
+            title: None,
+            title_source: None,
+            model: None,
+            service_tier: None,
+            permission_mode: None,
+            plan_mode: false,
+            plan_reset_pending: false,
+            reasoning_level: None,
+            archived: false,
+            context_usage_json: None,
+            bootstrap_context: None,
+            goal: None,
+            autonomy: None,
+            active_leaf_id: None,
+            side_parent_session_id: None,
+            side_parent_leaf_id: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.create_chat_session(&session).unwrap();
+        let run = StoredRun {
+            id: "ended".into(),
+            experiment_id: "experiment".into(),
+            project_id: "project".into(),
+            status: "done".into(),
+            backend_json: "{}".into(),
+            command: String::new(),
+            created_at: 1,
+            updated_at: 2,
+            ended_at: Some(2),
+            exit_code: Some(0),
+            commit_sha: None,
+            result_markdown: None,
+            cancel_requested: false,
+            cancel_reason: None,
+            chat_session_id: Some(session.id.clone()),
+        };
+        store.upsert_run(&run).unwrap();
+        store
+            .insert_run_notice(
+                &run.id,
+                &session.id,
+                crate::store::TERMINAL,
+                crate::store::TERMINAL,
+                "finished",
+                2,
+            )
+            .unwrap();
+        let mut clients = [EventCursor::default(), EventCursor::default()];
+        for cursor in &mut clients {
+            let mut events = Vec::new();
+            push_chat_run_events(&store, cursor, &mut events).unwrap();
+            assert_eq!(events.len(), 1);
+        }
+        store.dismiss_chat_run(&session.id, &run.id).unwrap();
+        for cursor in &mut clients {
+            let mut events = Vec::new();
+            push_chat_run_events(&store, cursor, &mut events).unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(
+                cursor.chat_shown_runs,
+                Some(json!({ "runs": [], "failedSessions": [] }))
+            );
+            events.clear();
+            push_chat_run_events(&store, cursor, &mut events).unwrap();
+            assert!(events.is_empty());
+        }
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn new_chat_uses_saved_preferences_and_normalizes_model_settings() {
         let preferences = crate::store::StoredUiState {
             onboarding_completed: true,
@@ -11678,7 +13289,10 @@ mod tests {
             model_section_order: Vec::new(),
             collapsed_model_sections: Vec::new(),
             model_sightings: None,
+            run_banner: crate::store::RunBannerLevel::Strip,
+            run_watching: true,
             seen_nudges: Vec::new(),
+            created_at: None,
             preferred_agent: Some(StoredAgentSelection {
                 profile: None,
                 harness: "codex".into(),
@@ -11719,7 +13333,10 @@ mod tests {
             model_section_order: Vec::new(),
             collapsed_model_sections: Vec::new(),
             model_sightings: None,
+            run_banner: crate::store::RunBannerLevel::Strip,
+            run_watching: true,
             seen_nudges: Vec::new(),
+            created_at: None,
         };
         let catalog = json!({"harnesses": [{"id":"claude-code", "agentReady":true,"defaultModel":"opus",
             "models":[{"id":"opus"}], "options":{"defaultPermissionMode":"plan", "reasoningLevels":[{"id":"default"}]}}]});
@@ -11776,7 +13393,10 @@ mod tests {
             model_section_order: Vec::new(),
             collapsed_model_sections: Vec::new(),
             model_sightings: None,
+            run_banner: crate::store::RunBannerLevel::Strip,
+            run_watching: true,
             seen_nudges: Vec::new(),
+            created_at: None,
         };
         let catalog = json!({"harnesses":[
             {"id":"codex", "agentReady":true, "models":[], "options":{}},
@@ -11921,6 +13541,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_held_approval_or_agent_wait_does_not_hold_off_a_restart() {
+        use tower::ServiceExt;
+
+        let _guard = ACTIVE_TEST_LOCK.lock().await;
+        let app = Router::new()
+            .route(
+                "/api/internal/permissions",
+                post(std::future::pending::<()>),
+            )
+            .route("/api/internal/mcp", post(std::future::pending::<()>))
+            .route("/api/other", post(std::future::pending::<()>))
+            .layer(middleware::from_fn(track_active));
+        let call = |name: &str| {
+            json!({ "sessionId": "chat", "token": "t", "method": "tools/call", "params": { "name": name } })
+                .to_string()
+        };
+        for (path, body, counted) in [
+            ("/api/internal/permissions", String::new(), 0),
+            ("/api/internal/mcp", call("wait"), 0),
+            ("/api/internal/mcp", call("delegate"), 1),
+            ("/api/other", String::new(), 1),
+        ] {
+            let request = axum::http::Request::builder()
+                .method("POST")
+                .uri(path)
+                .body(axum::body::Body::from(body.clone()))
+                .unwrap();
+            let mut held = Box::pin(app.clone().oneshot(request));
+            for _ in 0..10 {
+                assert!(futures::poll!(&mut held).is_pending());
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(ACTIVE.load(Ordering::SeqCst), counted, "{path} {body}");
+        }
+    }
+
+    #[tokio::test]
     async fn a_streaming_response_stays_active_until_its_body_is_sent() {
         let _guard = ACTIVE_TEST_LOCK.lock().await;
         let gate = Arc::new(tokio::sync::Notify::new());
@@ -12044,6 +13701,8 @@ mod tests {
                 model_section_order: None,
                 collapsed_model_sections: None,
                 model_sightings: None,
+                run_banner: None,
+                run_watching: None,
                 seen_nudges: None,
             }),
         )
@@ -12544,6 +14203,7 @@ mod tests {
                 commit_sha: None,
                 chat_session_id: None,
                 spec_digest: "digest",
+                monitor_config: None,
                 launch: &launch,
             })
             .unwrap();
@@ -12568,6 +14228,7 @@ mod tests {
         assert!(value["lostReason"].is_null());
         assert_eq!(value["host"], "lab");
         assert!(value["noticeError"].is_null());
+        assert!(value.get("chatSessionId").is_none());
         store
             .insert_run_notice("e", "chat", crate::store::TERMINAL, "terminal", "done", 1)
             .unwrap();
@@ -12584,6 +14245,10 @@ mod tests {
         let value = serde_json::to_value(ApiRun::new(&store, &engine).unwrap()).unwrap();
         assert_eq!(value["noticeError"], "Chat harness is no longer configured");
         let mut engine = engine;
+        engine.chat_session_id = Some("chat-7".into());
+        let value = serde_json::to_value(ApiRun::new(&store, &engine).unwrap()).unwrap();
+        assert_eq!(value["chatSessionId"], "chat-7");
+        engine.chat_session_id = None;
         engine.backend_json = crate::engine::handle::backend_json(
             "e",
             Some(&crate::engine::handle::Handle::Ssh {
@@ -12760,6 +14425,7 @@ mod tests {
             run_command: None,
             paper_id: None,
             icon: None,
+            proposal: None,
             created_at: 0,
             updated_at: 0,
         };
@@ -12898,7 +14564,7 @@ mod tests {
         }
     }
 
-    fn test_state() -> AppState {
+    pub(super) fn test_state() -> AppState {
         let agent = Arc::new(AgentHost::new(None));
         let codex = Arc::new(local::codex::CodexHost::new());
         let claude = Arc::new(local::claude::ClaudeHost::new());
@@ -12919,12 +14585,181 @@ mod tests {
             remote_sessions: crate::commands::up_remote::RemoteSessionManager::new(),
             remote_instance_id: None,
             stopping: Default::default(),
-            dashboard_lock: Default::default(),
+            dashboard_locks: Default::default(),
             restart: Default::default(),
+            app_window: false,
             reopen: Default::default(),
             trackio: Default::default(),
             opencode_signins: Arc::default(),
+            terminals: Arc::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn sidebar_cards_follow_a_chat_marked_done_and_its_runs() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let state = test_state();
+        let _store = Store::open().unwrap();
+        rusqlite::Connection::open(crate::store::data_dir().join("orx.db"))
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO local_projects (id, name, slug, github_owner, github_repo, repo_path, created_at, updated_at)
+                 VALUES ('p', 'Project', 'p', '', '', '/unused', 1, 1);
+                 INSERT INTO chat_sessions (id, project_id, harness, created_at, updated_at)
+                 VALUES ('finished', 'p', 'codex', 1, 1), ('open', 'p', 'codex', 1, 2), ('helper', 'p', 'codex', 1, 3);
+                 INSERT INTO chat_delegates (session_id, parent_session_id, may_delegate, created_at)
+                 VALUES ('helper', 'open', 0, 1);
+                 INSERT INTO local_experiments (id, project_id, slug, branch_name, run_command, created_at, updated_at)
+                 VALUES ('exp-1', 'p', 'exp-1', 'main', '', 5, 5), ('exp-2', 'p', 'exp-2', 'main', '', 4, 4);
+                 INSERT INTO runs (id, experiment_id, project_id, status, backend_json, created_at, updated_at, chat_session_id)
+                 VALUES ('run-1', 'exp-1', 'p', 'running', '{}', 5, 5, 'open'),
+                        ('run-2', 'exp-2', 'p', 'done', '{}', 6, 6, 'open');",
+            )
+            .unwrap();
+        let (runs, runs_rx) = broadcast::channel(16);
+        let mut events = state.chat.subscribe();
+        tokio::spawn(publish_sidebar_rows(
+            state.clone(),
+            state.chat.subscribe(),
+            runs_rx,
+        ));
+        let mut next_batch = async || loop {
+            let (name, data) = events.recv().await.unwrap();
+            if name == "chat.sidebar" {
+                return data;
+            }
+        };
+        let card = |batch: &Value, id: &str| {
+            batch["cards"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|card| card["sessionId"] == id)
+                .cloned()
+                .unwrap()
+        };
+
+        let page = list_chat_sessions(
+            State(state.clone()),
+            Query(serde_json::from_value(json!({"scope": "sidebar", "archived": false})).unwrap()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(page["totals"], json!({"active": 2, "archived": 0}));
+
+        let _ = update_chat_session(
+            State(state.clone()),
+            Path("finished".into()),
+            Json(serde_json::from_value(json!({"archived": true})).unwrap()),
+        )
+        .await
+        .unwrap();
+        let batch = next_batch().await;
+        assert_eq!(card(&batch, "finished")["session"]["archived"], true);
+        assert_eq!(batch["totals"], json!({"active": 1, "archived": 1}));
+
+        // A delegate has no card of its own; its work shows on the card of the chat it works for.
+        state
+            .chat
+            .emit_event("chat.busy", json!({"sessionId": "helper", "busy": false}));
+        let batch = next_batch().await;
+        assert!(card(&batch, "helper")["session"].is_null());
+        assert_eq!(card(&batch, "open")["session"]["id"], "open");
+
+        runs.send(crate::engine::bus::RunEvent::Changed {
+            run_id: "run-1".into(),
+            phase: crate::engine::Phase::Running,
+            contact: crate::store::Contact::Live,
+            cancelling: false,
+        })
+        .unwrap();
+        let batch = next_batch().await;
+        assert_eq!(card(&batch, "open")["session"]["lastRun"]["id"], "run-2");
+        assert_eq!(card(&batch, "open")["atWork"], true);
+
+        // Deleting an experiment takes its finished run off the card.
+        let _ = delete_experiment(State(state.clone()), Path("exp-2".into()))
+            .await
+            .unwrap();
+        let batch = next_batch().await;
+        assert_eq!(card(&batch, "open")["session"]["lastRun"]["id"], "run-1");
+    }
+
+    #[tokio::test]
+    async fn an_agent_answers_only_a_delegates_question() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let state = test_state();
+        let _store = Store::open().unwrap();
+        let connection =
+            rusqlite::Connection::open(crate::store::data_dir().join("orx.db")).unwrap();
+        let question = json!([{
+            "id": "q1", "type": "prompt", "text": "",
+            "prompt": {"kind": "question", "question": "Which backend?",
+                       "options": [{"label": "Modal"}]}
+        }])
+        .to_string();
+        for id in ["chat_agent", "chat_user", "chat_delegate"] {
+            connection
+                .execute(
+                    "INSERT INTO chat_sessions (id, project_id, harness, permission_mode, created_at, updated_at)
+                     VALUES (?1, 'proj', 'opencode', 'manual', 1, 1)",
+                    [id],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO chat_messages (id, session_id, role, parts_json, created_at)
+                     VALUES (?1 || '_msg', ?1, 'assistant', ?2, 1)",
+                    [id, question.as_str()],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO chat_turns (id, session_id, assistant_message_id, client_turn_id,
+                         request_hash, prepared_input, settings_json, state, delivery_state,
+                         created_at, updated_at)
+                     VALUES (?1 || '_turn', ?1, ?1 || '_msg', 'ct', 'h', '', '{}', 'completed',
+                         'sent', 1, 1)",
+                    [id],
+                )
+                .unwrap();
+        }
+        Store::open()
+            .unwrap()
+            .record_chat_delegate("chat_delegate", "chat_agent", false)
+            .unwrap();
+        let answer = |target: &str| {
+            let request = serde_json::from_value(json!({
+                "sessionId": "chat_agent",
+                "token": local::chat::delegation::agent_token("chat_agent"),
+                "method": "tools/call",
+                "params": {"name": "answer", "arguments": {
+                    "chatId": target, "promptId": "q1", "choices": ["Modal"]
+                }},
+            }))
+            .unwrap();
+            let state = state.clone();
+            async move {
+                let Json(reply) = agent_tools::agent_tools(State(state), Json(request))
+                    .await
+                    .unwrap();
+                reply
+            }
+        };
+
+        let refused = answer("chat_user").await;
+        assert_eq!(refused["isError"], true, "{refused}");
+        // No agent holds either turn, so a delegate's answer fails only in delivery.
+        let delegated = answer("chat_delegate").await;
+        assert_ne!(
+            refused["content"], delegated["content"],
+            "the user's chat refuses before delivery"
+        );
     }
 
     #[tokio::test]
@@ -12948,11 +14783,15 @@ mod tests {
                 "id":"codex","agentReady":false,"authState":"needsLogin"
             }]}),
         ));
-        let response = open_side_chat(State(state.clone()), Path("side-parent".into()))
-            .await
-            .err()
-            .unwrap()
-            .into_response();
+        let response = open_side_chat(
+            State(state.clone()),
+            Path("side-parent".into()),
+            Json(OpenSideChatReq { agent: None }),
+        )
+        .await
+        .err()
+        .unwrap()
+        .into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert!(state.harnesses.try_lock().is_ok());
         *state.harnesses.lock().await = Some((
@@ -12961,21 +14800,82 @@ mod tests {
                 "id":"codex","agentReady":true,"defaultModel":"concrete-model"
             }]}),
         ));
-        let Json(response) = open_side_chat(State(state.clone()), Path("side-parent".into()))
-            .await
-            .unwrap_or_else(|error| panic!("{}", error.1));
+        let Json(response) = open_side_chat(
+            State(state.clone()),
+            Path("side-parent".into()),
+            Json(OpenSideChatReq { agent: None }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{}", error.1));
         assert_eq!(response["session"]["model"], "concrete-model");
+        let claude = |permission_mode: &str| crate::store::StoredAgentSelection {
+            profile: None,
+            harness: "claude-code".into(),
+            model: Some("opus".into()),
+            service_tier: None,
+            permission_mode: Some(permission_mode.into()),
+            reasoning_level: Some("high".into()),
+        };
+        *state.harnesses.lock().await = Some((
+            std::time::Instant::now(),
+            json!({"harnesses":[
+                {"id":"codex","agentReady":true,"defaultModel":"concrete-model"},
+                {"id":"claude-code","agentReady":true}
+            ]}),
+        ));
+        let Json(response) = open_side_chat(
+            State(state.clone()),
+            Path("side-parent".into()),
+            Json(OpenSideChatReq {
+                agent: Some(claude("acceptEdits")),
+            }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{}", error.1));
+        let side = &response["session"];
+        assert_eq!(
+            [
+                &side["harness"],
+                &side["model"],
+                &side["permissionMode"],
+                &side["reasoningLevel"],
+                &side["sideParentSessionId"]
+            ],
+            [
+                &json!("claude-code"),
+                &json!("opus"),
+                &json!("acceptEdits"),
+                &json!("high"),
+                &json!("side-parent")
+            ]
+        );
+        let response = open_side_chat(
+            State(state.clone()),
+            Path("side-parent".into()),
+            Json(OpenSideChatReq {
+                agent: Some(claude("never-a-mode")),
+            }),
+        )
+        .await
+        .err()
+        .unwrap()
+        .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         connection
             .execute_batch(
                 "CREATE TRIGGER fail_side_chat BEFORE INSERT ON chat_sessions
                 BEGIN SELECT RAISE(FAIL, 'side chat insert failed'); END;",
             )
             .unwrap();
-        let response = open_side_chat(State(state.clone()), Path("side-parent".into()))
-            .await
-            .err()
-            .unwrap()
-            .into_response();
+        let response = open_side_chat(
+            State(state.clone()),
+            Path("side-parent".into()),
+            Json(OpenSideChatReq { agent: None }),
+        )
+        .await
+        .err()
+        .unwrap()
+        .into_response();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert!(state.harnesses.try_lock().is_ok());
     }
@@ -13476,7 +15376,6 @@ mod tests {
                 r#"{"openai":{"kind":"key","key":"sk-test","name":"Work OpenAI"}}"#,
             )
             .unwrap();
-            std::env::set_var("XAI_API_KEY", "fixture-only");
             let store = Store::open().unwrap();
             store
                 .set_ui_json("hidden_agents", &["opencode:tinker", "opencode:openai", "cursor"])
@@ -13538,6 +15437,16 @@ mod tests {
                        "logo":"thinkingmachines","baseUrl":"https://tinker.example/v1","npm":"@ai-sdk/openai-compatible","sources":["config"]})
             );
             assert_eq!(rows[1]["removable"], true);
+            let refused = http
+                .delete(format!("http://{address}/api/opencode/found-providers/xai"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(refused.status().as_u16(), 400);
+            assert_eq!(
+                refused.json::<Value>().await.unwrap()["error"],
+                "`XAI_API_KEY` in your environment provides xai. Remove it there, or turn this provider off."
+            );
 
             let named = agents::label(&dashboard, "opencode:tinker", json!({"name":"Tinker Prod"}))
                 .await
@@ -13589,7 +15498,6 @@ mod tests {
                     .send()
             };
             for (id, status, error) in [
-                ("xai", 400, "`XAI_API_KEY` in your environment provides xai. Remove it there, or turn this provider off."),
                 ("openai", 400, "OpenResearch added this provider. Remove it from its own row in Settings → Agents."),
                 ("opencode", 400, "Choose a provider your OpenCode has."),
                 ("mistral", 404, "OpenResearch can't find where your OpenCode sets up mistral. Remove it in OpenCode, or turn this provider off."),

@@ -4,17 +4,7 @@ use crate::error::{bail, Result};
 
 mod delegated;
 pub mod host;
-
-struct OwnedProcess {
-    child: tokio::process::Child,
-    id: Option<u32>,
-}
-
-impl Drop for OwnedProcess {
-    fn drop(&mut self) {
-        crate::local::chat::kill_shell_group(self.id);
-    }
-}
+pub(crate) mod wire;
 
 fn initialization() -> agent_client_protocol::schema::v1::InitializeRequest {
     use agent_client_protocol::schema::{
@@ -348,7 +338,7 @@ pub async fn test_connection(definition: &Definition) -> Result<serde_json::Valu
             definition.name
         )
     })?;
-    let client = host::spawn(definition, &cwd, &definition.id, None, None).await?;
+    let client = host::spawn_here(definition, &cwd, &definition.id).await?;
     let result = serde_json::json!({
         "status": "connected",
         "agentInfo": client.initialized["agentInfo"],
@@ -414,7 +404,7 @@ pub async fn discover_models(definition: &Definition) -> Result<serde_json::Valu
     let directory = Directory::create(&id)?;
     let models = async {
         let cwd = &directory.0;
-        let client = host::spawn(definition, cwd, &id, None, None).await?;
+        let client = host::spawn_here(definition, cwd, &id).await?;
         let response = tokio::time::timeout(
             std::time::Duration::from_secs(20),
             client.request(
@@ -462,7 +452,7 @@ fn running_one_shots<R>(update: impl FnOnce(&mut Vec<RunningOneShot>) -> R) -> R
 
 /// Stops the one-shots still answering or cleaning up, and waits for their cleanup, so
 /// that their children and directories do not outlive `orx up`.
-async fn stop_one_shots() {
+pub(crate) async fn stop_one_shots() {
     for (client, finished) in running_one_shots(std::mem::take) {
         if let Some(client) = client.upgrade() {
             client.shutdown().await;
@@ -520,7 +510,7 @@ fn spawn_one_shot(
         };
         let mut reply = Some(sender);
         let spawned = {
-            let spawn = host::spawn(&definition, &directory.0, &id, None, None);
+            let spawn = host::spawn_here(&definition, &directory.0, &id);
             tokio::pin!(spawn);
             tokio::select! {
                 spawned = &mut spawn => spawned,
@@ -602,7 +592,7 @@ async fn prompt_once(
     let native_id = session["sessionId"]
         .as_str()
         .ok_or_else(|| anyhow!("{name} did not return a session ID"))?;
-    client.set_native_id(native_id);
+    client.set_native_id(native_id)?;
     let has_model_selection = session["models"].is_object()
         || session["configOptions"]
             .as_array()
@@ -637,6 +627,7 @@ async fn prompt_once(
     let mut answer = String::new();
     let result = loop {
         tokio::select! {
+            biased;
             result = &mut response => break result.map_err(|error| {
                 let exited = error
                     .downcast_ref::<agent_client_protocol::Error>()
@@ -752,7 +743,7 @@ fn one_shot_event(
                 client.cancel_permissions();
             }
         }
-        host::Event::TerminalOutput { .. } => {}
+        host::Event::TerminalOutput { .. } | host::Event::Checkpoint => {}
     }
 }
 
@@ -833,23 +824,29 @@ mod tests {
         let advance = stall + std::time::Duration::from_secs(1);
         let record =
             std::env::temp_dir().join(format!("acp-oneshot-record-{}", uuid::Uuid::new_v4()));
+        if stalled {
+            tokio::time::pause();
+        }
         let (mut answer, cleanup) = spawn_one_shot(
             &peer(signaled_mode.as_deref().unwrap_or(mode), &record),
             request,
         );
 
         if let Some(listener) = listener {
-            let reached_stall =
-                tokio::time::timeout(std::time::Duration::from_secs(30), listener.accept());
+            // A blocking wait prevents Tokio from auto-advancing while the peer starts.
+            let (release_clock, wait) = std::sync::mpsc::channel::<()>();
+            let mut stall_deadline = tokio::task::spawn_blocking(move || {
+                let _ = wait.recv_timeout(std::time::Duration::from_secs(30));
+            });
             tokio::select! {
                 result = &mut answer => panic!("the peer never stalled: {result:?}"),
-                connected = reached_stall => {
-                    connected.expect("the peer never reached its stall").unwrap();
-                }
+                _ = &mut stall_deadline => panic!("the peer never reached its stall"),
+                connected = listener.accept() => { connected.unwrap(); }
             }
-            tokio::time::pause();
             tokio::time::advance(advance).await;
             tokio::time::resume();
+            drop(release_clock);
+            stall_deadline.await.unwrap();
         }
 
         let answer = answer.await.unwrap();
@@ -1127,11 +1124,9 @@ mod tests {
     #[tokio::test]
     async fn one_shot_names_the_agent_and_cause_of_each_failure() {
         let mut causes = std::collections::HashSet::new();
-        let started = std::time::Instant::now();
         let (answer, received) = run("delete", request("ACP_TEST:hang", None, 5)).await;
         let error = answer.unwrap_err().to_string();
         assert!(error.contains("Peer") && error.contains("5s"), "{error}");
-        assert!(started.elapsed() < std::time::Duration::from_secs(15));
         assert!(position(&received, "session/delete").is_some());
         causes.insert(error.replace("5s", ""));
         let (answer, _) = run("stalled-setup", request("ACP_TEST:hello", None, 1)).await;

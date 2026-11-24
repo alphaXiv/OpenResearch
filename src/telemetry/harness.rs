@@ -87,7 +87,7 @@ pub(crate) fn capture_initial(harnesses: &Value) {
         {
             if let Some(path) = uuid::Uuid::parse_str(&snapshot.event_id)
                 .ok()
-                .and_then(|id| persist_payload(id, &snapshot.payload))
+                .and_then(|id| persist_payload(outbox_dir(), id, &snapshot.payload))
             {
                 snapshot.queued = true;
                 queued.push((path, snapshot.payload.clone()));
@@ -196,7 +196,7 @@ pub(crate) fn capture_detect(
         ready,
         probes,
     );
-    let path = persist_payload(event_id, &payload);
+    let path = persist_payload(outbox_dir(), event_id, &payload);
     register_pending(tokio::spawn(deliver_payload(path, payload)));
 }
 

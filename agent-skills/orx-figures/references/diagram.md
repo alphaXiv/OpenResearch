@@ -29,7 +29,8 @@ mkdir -p figs && orx skill figures/assets/orx-tikz-preamble.tex > figs/method.te
 
 A `.tex` in the working tree compiles where it sits, so `figs/method.tex`
 produces `figs/method.pdf` next to it, ready for `\includegraphics`. See the
-`orx-paper` module for how compilation and engine selection work.
+`orx-paper` module for how compilation works and `orx skill paper/engines` for
+engine selection.
 
 ## Position relatively, always
 

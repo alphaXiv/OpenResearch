@@ -8,7 +8,7 @@ import { find, press, renderApp, serveApp, settle } from "./render.mjs";
 async function updates(releaseChannel = "stable", reply = (status) => status) {
   const requests = [];
   let status = {
-    current: "0.2.21", latest: null, latestTag: null, channel: "app-bundle", releaseChannel, releaseChannelsAvailable: true,
+    current: "0.2.21", build: "0.2.21", latest: null, latestTag: null, channel: "app-bundle", releaseChannel, releaseChannelsAvailable: true,
     waitingForStable: false, waitingForCanary: false, selfUpdates: true, autoUpdate: true, envDisabled: false,
     updateAvailable: false, installedVersion: null, installedTag: null, restartRequired: false,
   };

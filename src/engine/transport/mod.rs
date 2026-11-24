@@ -10,6 +10,7 @@ use orx_host_proto::{Message, Request, Response};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -56,6 +57,8 @@ fn reply_deadline(body: &Request) -> Duration {
             Request::Hello { .. }
             | Request::Inspect { .. }
             | Request::ReadLog { .. }
+            | Request::ReadSignals { .. }
+            | Request::ConfigureSignals { .. }
             | Request::SlurmCancelLegacy { .. }
             | Request::InspectLegacy { .. } => Duration::ZERO,
         }
@@ -223,6 +226,7 @@ pub struct HostConn {
     calls: mpsc::Sender<Call>,
     actions: mpsc::Sender<Action>,
     state: watch::Receiver<HostState>,
+    signals_advertised: Arc<AtomicBool>,
 }
 
 struct Action {
@@ -291,6 +295,7 @@ impl HostConn {
         let (publish, state_rx) = watch::channel(state.clone());
         let (calls, incoming) = mpsc::channel(256);
         let (actions, action_rx) = mpsc::channel(8);
+        let signals_advertised = Arc::new(AtomicBool::new(false));
         let actor = Actor {
             auth,
             config,
@@ -300,17 +305,23 @@ impl HostConn {
             publish,
             incoming,
             unsupported: None,
+            signals_advertised: signals_advertised.clone(),
         };
         tokio::spawn(actor.run(action_rx));
         Ok(Self {
             calls,
             actions,
             state: state_rx,
+            signals_advertised,
         })
     }
 
     pub fn state(&self) -> watch::Receiver<HostState> {
         self.state.clone()
+    }
+
+    pub(super) fn advertises_signals(&self) -> bool {
+        self.signals_advertised.load(Ordering::Relaxed)
     }
 
     pub async fn request(&self, body: Request) -> Result<Response> {
@@ -381,12 +392,13 @@ struct Actor {
     publish: watch::Sender<HostState>,
     incoming: mpsc::Receiver<Call>,
     unsupported: Option<String>,
+    signals_advertised: Arc<AtomicBool>,
 }
 
 fn lane(body: &Request) -> usize {
     match body {
         Request::Changes { .. } | Request::SlurmQueue { .. } => 1,
-        Request::ReadLog { .. } => 2,
+        Request::ReadLog { .. } | Request::ReadSignals { .. } => 2,
         Request::PutBlob { .. } | Request::HasBlob { .. } | Request::PinSource { .. } => 3,
         _ => 0,
     }
@@ -492,6 +504,7 @@ impl Actor {
             let base = steps[self.state.failures.min(steps.len() - 1)];
             let noise =
                 u16::from_le_bytes(uuid::Uuid::new_v4().as_bytes()[..2].try_into().unwrap()) as i64;
+            // A box's outage must still leave collection attempts within its rental's grace.
             let max_delay = if managed { 60_000 } else { 900_000 };
             let delay = (base * (800 + noise % 401) / 1000).min(max_delay);
             self.state.failures = self.state.failures.saturating_add(1);
@@ -817,6 +830,16 @@ impl Actor {
                             last_reply = self.clock.monotonic();
                             self.state.last_live_ms = Some(self.clock.wall_ms());
                             if let Some(call) = pending.remove(&id) {
+                                let advertised = match &body {
+                                    Response::Inspect { summary, .. } => summary.signals.is_some(),
+                                    Response::Changes { runs, .. } => {
+                                        runs.iter().any(|(_, summary)| summary.signals.is_some())
+                                    }
+                                    _ => false,
+                                };
+                                if advertised {
+                                    self.signals_advertised.store(true, Ordering::Relaxed);
+                                }
                                 if let Reply::Call(reply) = call.reply { let _ = reply.send(Ok(body)); }
                             } else if id >= first { disconnect = Some("Unexpected orx-host response id".into()); }
                         }
@@ -934,6 +957,16 @@ impl Actor {
                     if call.reply.is_closed() {
                         continue;
                     }
+                    if matches!(
+                        call.body,
+                        Request::ConfigureSignals { .. } | Request::ReadSignals { .. }
+                    ) && !self.signals_advertised.load(Ordering::Relaxed)
+                    {
+                        let _ = call.reply.send(Err(anyhow!(
+                            "Current orx-host connection has not advertised signals"
+                        )));
+                        continue;
+                    }
                     let timeout = reply_deadline(&call.body);
                     let remaining = pending
                         .values()
@@ -968,6 +1001,7 @@ impl Actor {
                 }
             }
             if disconnect.is_some() || action.is_some() {
+                self.signals_advertised.store(false, Ordering::Relaxed);
                 #[cfg(unix)]
                 let route = self.auth.state.borrow().route.clone().filter(|_| {
                     self.config.sharing_home.is_some()

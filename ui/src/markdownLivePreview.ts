@@ -262,6 +262,8 @@ function collectFormatting(state: EditorState, tree: Tree, ranges: Range<Decorat
         return;
       }
       if (name === "Link") {
+        // A reference link (`[a][b]`) has no definitions to resolve here, and adjacent attachment tokens parse as one.
+        if (!nodeRef.node.getChild("URL")) return;
         const [openBracket, closeBracket] = nodeRef.node.getChildren("LinkMark");
         if (!openBracket || !closeBracket) return;
         const textFrom = openBracket.to;
@@ -437,10 +439,6 @@ const livePreviewTheme = EditorView.theme({
     border: BOX_BORDER,
     borderRadius: "4px",
     padding: "0.1em 0.3em",
-  },
-  ".cm-lp-codeblock, .cm-lp-codefoot": {
-    marginLeft: "var(--editor-pad-x)",
-    marginRight: "var(--editor-pad-x)",
   },
   ".cm-lp-codeblock": {
     fontFamily: "var(--mono)",

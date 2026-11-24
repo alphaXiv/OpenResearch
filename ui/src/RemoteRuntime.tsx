@@ -15,7 +15,7 @@ import {
 } from "react";
 import { Outlet, useLocation } from "@tanstack/react-router";
 import { WifiOff } from "lucide-react";
-import { type RemoteInstallPaths, type RemoteSessionInfo, type RuntimeInfo } from "./api";
+import { type RemoteInstallPaths, type RemoteSessionInfo, type RemoteSessionStatus, type RuntimeInfo } from "./api";
 import { ltr } from "./i18n";
 import { setLocale, useLocale } from "./locale";
 import { m } from "./paraglide/messages.js";
@@ -33,6 +33,8 @@ const REMOTE_FAVICON =
   encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="8" fill="#3b82f6"/><path d="M15.375 16.782v63.843a4 4 0 0 0 4 4h63.843c3.564 0 5.348-4.309 2.829-6.828L22.203 13.953c-2.52-2.52-6.828-.735-6.828 2.829" fill="#fff"/></svg>');
 
 const RuntimeContext = createContext<RuntimeInfo | null>(null);
+
+const usable = (status: RemoteSessionStatus) => status === "connected" || status === "updating";
 
 function workspaceKey(runtime: RuntimeInfo): string {
   return runtime.kind === "local" ? "local" : `${runtime.session.id}:${runtime.session.installPaths?.database ?? ""}`;
@@ -134,7 +136,7 @@ function needsInteractiveSsh(error: string) {
 
 function connectionPhase(session: RemoteSessionInfo, gatewayError: string | null): RemoteConnection["phase"] | null {
   if (gatewayError !== null) return "lost";
-  if (session.status === "connecting" || session.status === "reconnecting") return "reconnecting";
+  if (session.status === "connecting" || session.status === "reconnecting" || session.status === "restarting") return "reconnecting";
   const needsUser = session.repairCommand !== null ||
     (session.error !== null && needsInteractiveSsh(session.error) && !session.canStartNewHost);
   return session.status === "disconnected" && !needsUser ? "lost" : null;
@@ -230,21 +232,22 @@ function RemoteSetup({
   const needsInstall = session.status === "needsInstall";
   const needsUpdate = session.status === "needsUpdate";
   const showInstallPaths = paths && needsInstall;
-  const working = ["connecting", "applying", "reconnecting"].includes(session.status);
+  const working = ["connecting", "applying", "reconnecting", "restarting"].includes(session.status);
   const showSshTerminal = session.status === "disconnected" &&
     session.error !== null &&
     needsInteractiveSsh(session.error) &&
     retriedInteractiveError !== session.error &&
     !session.canStartNewHost;
   const showRepair = session.status === "disconnected" && session.repairCommand !== null;
-  const remoteNewer = session.dashboardProtocol !== null && session.dashboardProtocol > runtime.dashboardProtocol;
   const title = needsInstall
     ? m.remote_install_title()
     : needsUpdate
-      ? remoteNewer ? m.remote_update_local_title() : m.remote_update_title()
+      ? m.remote_update_title()
       : session.status === "applying"
         ? m.remote_applying_title({ host: ltr(session.host) })
-        : session.status === "reconnecting"
+        : session.status === "restarting"
+          ? m.remote_restarting_title({ host: ltr(session.host) })
+          : session.status === "reconnecting"
           ? m.remote_reconnecting_title({ host: ltr(session.host) })
           : session.status === "disconnected"
             ? session.error
@@ -264,7 +267,9 @@ function RemoteSetup({
         ? m.remote_update_description({ host: ltr(session.host) })
         : session.status === "applying"
           ? m.remote_applying_description()
-          : session.status === "reconnecting"
+          : session.status === "restarting"
+            ? m.remote_restarting_description()
+            : session.status === "reconnecting"
             ? m.remote_reconnecting_description()
             : session.status === "disconnected"
               ? m.remote_disconnected_description()
@@ -398,7 +403,7 @@ function RemoteSetup({
               )}
             </div>
           )}
-          {(session.status === "connecting" || session.status === "reconnecting") && (
+          {(session.status === "connecting" || session.status === "reconnecting" || session.status === "restarting") && (
             <div className="mt-6 flex justify-end border-t border-border-variant pt-5">
               <Button disabled={busy} onClick={disconnect}>
                 {m.remote_disconnect()}
@@ -410,14 +415,14 @@ function RemoteSetup({
               <Button disabled={busy} onClick={disconnect}>
                 {m.remote_disconnect()}
               </Button>
-              {session.installPaths !== null &&
-                (session.dashboardProtocol === null || session.dashboardProtocol < runtime.dashboardProtocol) && (
-                  <Button variant="primary" disabled={busy} onClick={() => reconnect()}>
-                    {busy ? <Spinner /> : null}
-                    {m.remote_check_again()}
-                  </Button>
-                )}
-              {session.installPaths === null && session.dashboardProtocol !== null && session.dashboardProtocol < runtime.dashboardProtocol && (
+              {session.installPaths !== null && (
+                <Button variant="primary" disabled={busy} onClick={() => reconnect()}>
+                  {busy ? <Spinner /> : null}
+                  {m.remote_check_again()}
+                </Button>
+              )}
+
+              {session.installPaths === null && (
                 <Button variant="danger" disabled={busy} onClick={() => void prepareStopHost()}>
                   {busy ? <Spinner /> : null}
                   {m.remote_stop_host()}
@@ -484,7 +489,7 @@ export function RuntimeRoot() {
   useQuery({
     ...reportLocaleQuery(locale),
     enabled: !launchPlaceholder && (runtime?.kind === "local" ||
-      (runtime?.kind === "ssh" && runtime.session.status === "connected")),
+      (runtime?.kind === "ssh" && usable(runtime.session.status))),
   });
   useEffect(() => {
     if (launchPlaceholder) return;
@@ -501,7 +506,7 @@ export function RuntimeRoot() {
         preferencesApplied.current = true;
         applyRemotePreferences(next);
       }
-      if (next.session.status === "connected") {
+      if (usable(next.session.status)) {
         everConnected.current = true;
         setRetriedInteractiveError(null);
       }
@@ -530,7 +535,7 @@ export function RuntimeRoot() {
   const keepWorkspace = everConnected.current &&
     workspace.queryClient.getQueryData(workspace.queries.listProjectsQuery().queryKey) !== undefined &&
     workspace.queryClient.getQueryData(workspace.queries.getUiStateQuery().queryKey) !== undefined;
-  if (!keepWorkspace && (runtime.session.status !== "connected" || error !== null)) {
+  if (!keepWorkspace && (!usable(runtime.session.status) || error !== null)) {
     return error
       ? <><GatewayUnavailable host={runtime.session.host} /><WorkspaceConnection runtime={runtime} corner /></>
       : <><RemoteSetup
@@ -541,7 +546,7 @@ export function RuntimeRoot() {
   }
   const { session } = runtime;
   const phase = connectionPhase(session, error);
-  const showOverlay = phase === null && session.status !== "connected";
+  const showOverlay = phase === null && !usable(session.status);
   const connection: RemoteConnection | null = phase && {
     phase,
     title: phase === "lost"

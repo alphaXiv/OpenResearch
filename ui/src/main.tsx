@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { AppRoot } from "./AppRoot";
 import { getLocale } from "./paraglide/runtime.js";
+import "./chatWidth";
 import "./tailwind.css";
 
 const locale = getLocale();
@@ -20,6 +21,20 @@ if (!("randomUUID" in crypto)) {
     },
   });
 }
+
+// A file or link dropped where nothing takes it would replace the app with it; text fields still take dropped text.
+const acceptsNativeDrop = (event: DragEvent) =>
+  !event.dataTransfer?.types.includes("Files")
+  && event.target instanceof Element
+  && event.target.closest("input, textarea, [contenteditable]:not([contenteditable='false'])") !== null;
+window.addEventListener("dragover", (event) => {
+  if (event.defaultPrevented || acceptsNativeDrop(event)) return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "none";
+});
+window.addEventListener("drop", (event) => {
+  if (!event.defaultPrevented && !acceptsNativeDrop(event)) event.preventDefault();
+});
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

@@ -21,6 +21,10 @@ import sys
 started = time.perf_counter()
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import orx_run
+
+orx_run.progress(total=1, unit="environments", phase="install", start=1)
+
 import torch
 from nanochat.gpt import GPT, GPTConfig
 from nanochat.tokenizer import RustBPETokenizer
@@ -37,6 +41,14 @@ def plot(rows, output):
 
 
 def main():
+    steps = 20
+    orx_run.plan([
+        {"phase": "install", "of": 1, "unit": "environments"},
+        {"phase": "tokenizer", "of": 1, "unit": "models"},
+        {"phase": "train", "of": steps, "unit": "steps"},
+        {"phase": "eval", "of": 1, "unit": "reports"},
+    ])
+    setup = orx_run.progress(total=1, unit="models", phase="tokenizer")
     logging.getLogger("rustbpe").setLevel(logging.WARNING)
     torch.set_num_threads(2)
     torch.manual_seed(42)
@@ -63,8 +75,11 @@ def main():
     generator = torch.Generator().manual_seed(123)
     validation = batch(valid, torch.Generator().manual_seed(456))
     rows = []
+    setup.step(1)
+    setup.flush()
+    progress = orx_run.progress(total=steps, unit="steps", phase="train")
     training_started = time.perf_counter()
-    for step in range(21):
+    for step in range(steps + 1):
         x, y = batch(train, generator)
         for lr, item in models.items():
             val_loss = None
@@ -74,7 +89,7 @@ def main():
                     val_loss = item(*validation).item()
                 assert math.isfinite(val_loss)
             train_loss = None
-            if step < 20:
+            if step < steps:
                 item.train()
                 optimizers[lr].zero_grad(set_to_none=True)
                 loss = item(x, y)
@@ -83,7 +98,16 @@ def main():
                 loss.backward()
                 optimizers[lr].step()
             rows.append(dict(step=step, lr=lr, train_loss=train_loss, val_loss=val_loss))
-            print(f"step {step:02d}/20 | lr {lr} | train_loss {train_loss} | val_loss {val_loss}", flush=True)
+            print(f"step {step:02d}/{steps} | lr {lr} | train_loss {train_loss} | val_loss {val_loss}", flush=True)
+        metrics = {}
+        for row in rows[-len(models):]:
+            arm = str(row["lr"]).replace(".", "_")
+            for name in ("train_loss", "val_loss"):
+                if row[name] is not None:
+                    metrics[f"{name}_lr_{arm}"] = row[name]
+        progress.step(step, **metrics)
+    progress.flush()
+    results = orx_run.progress(total=1, unit="reports", phase="eval")
     assert rows[0]["val_loss"] == rows[1]["val_loss"], "Comparison must start from identical weights"
     output = Path("artifacts")
     output.mkdir(exist_ok=True)
@@ -92,13 +116,14 @@ def main():
         writer.writeheader()
         writer.writerows(rows)
     plot(rows, output / "tiny-nanochat-loss.html")
-    summary = dict(parameters=params, steps_per_arm=20, optimizer="AdamW", seed=42,
+    summary = dict(parameters=params, steps_per_arm=steps, optimizer="AdamW", seed=42,
                    training_seconds=time.perf_counter() - training_started,
                    process_seconds=time.perf_counter() - started,
-                   results=[row for row in rows if row["step"] == 20])
+                   results=[row for row in rows if row["step"] == steps])
     (output / "tiny-nanochat-results.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps(summary, indent=2), flush=True)
     print(f"Results and ready-made loss figure: {output.resolve()}", flush=True)
+    results.step(1)
 
 
 if __name__ == "__main__":

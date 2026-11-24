@@ -12,10 +12,11 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use crate::error::{anyhow, Result};
+use crate::error::{anyhow, Context as _, Result};
 use crate::store::data_dir;
 
 use super::model::LocalProject;
@@ -189,17 +190,21 @@ fn followed_metadata(
 /// Check and use are separate syscalls, so a link swapped in between could
 /// still escape — accepted: the API is localhost-only and the artifacts dir is
 /// written by the same user it would expose.
-fn resolve_contained(base: &Path, rel_path: &str) -> Result<PathBuf> {
+pub(crate) fn resolve_contained(base: &Path, rel_path: &str) -> Result<PathBuf> {
     if !is_safe_rel_path(rel_path) {
         return Err(anyhow!("invalid file path: {rel_path}"));
     }
     let canonical_base = crate::paths::canonicalize(base)
-        .map_err(|e| anyhow!("Could not resolve {}: {}", base.display(), e))?;
+        .with_context(|| format!("Could not resolve {}", base.display()))?;
     let path = canonical_base.join(rel_path);
     let canonical = crate::paths::canonicalize(&path)
-        .map_err(|e| anyhow!("Could not read {}: {}", path.display(), e))?;
+        .with_context(|| format!("Could not read {}", path.display()))?;
     if !canonical.starts_with(&canonical_base) {
-        return Err(anyhow!("path escapes the artifacts directory: {rel_path}"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("path escapes the artifacts directory: {rel_path}"),
+        )
+        .into());
     }
     Ok(canonical)
 }
@@ -483,6 +488,14 @@ pub fn file_path(project: &LocalProject, rel_path: &str) -> Result<PathBuf> {
     resolve_contained(&files_dir(project), rel_path)
 }
 
+pub(crate) fn artifact_version(size: u64, modified: SystemTime) -> String {
+    let nanos = match modified.duration_since(UNIX_EPOCH) {
+        Ok(after) => after.as_nanos() as i128,
+        Err(before) => -(before.duration().as_nanos() as i128),
+    };
+    format!("{size}-{nanos}")
+}
+
 /// Delete a file or folder in the artifacts dir.
 ///
 /// The final component is deleted literally — a symlink is removed, never
@@ -494,7 +507,9 @@ pub fn delete_entry(project: &LocalProject, rel_path: &str) -> Result<()> {
     }
     let base = files_dir(project);
     let parent = match rel_path.rsplit_once('/') {
-        Some((parent_rel, _)) => resolve_contained(&base, parent_rel)?,
+        Some((parent_rel, _)) => {
+            resolve_contained(&base, parent_rel).map_err(|error| anyhow!("{error:#}"))?
+        }
         None => crate::paths::canonicalize(&base)
             .map_err(|e| anyhow!("Could not resolve {}: {}", base.display(), e))?,
     };
@@ -545,7 +560,7 @@ fn hash_dir(base: &Path, dir: &Path, hasher: &mut DefaultHasher, seen: &mut usiz
             hash_dir(base, &entry.path(), hasher, seen);
         } else {
             md.len().hash(hasher);
-            mtime_ms(&md).hash(hasher);
+            md.modified().ok().hash(hasher);
         }
     }
 }

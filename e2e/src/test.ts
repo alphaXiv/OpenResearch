@@ -5,16 +5,18 @@
  */
 import { readFileSync, rmSync, statSync } from 'node:fs'
 import { test as base, expect, type Page } from '@playwright/test'
+import { recordApi } from './api-contract.ts'
 import { startAgentScripts, type Agent } from './agent.ts'
 import { startOrx, type Orx, type Project } from './orx.ts'
 import { listedEgress, startOutside, type Outside } from './outside.ts'
 
 export { expect }
 
-export const composer = (page: Page) => page.getByRole('textbox', { name: /^Message/ })
+export const composer = (page: Page) => page.getByRole('textbox', { name: /^(Describe |Ask a follow-up)/ })
 
 /** Types a chat message and sends it with Enter, as a user does. */
 export async function send(page: Page, text: string) {
+  await composer(page).click()
   await composer(page).fill(text)
   await composer(page).press('Enter')
 }
@@ -22,7 +24,7 @@ export async function send(page: Page, text: string) {
 const size = (file: string) => statSync(file, { throwIfNoEntry: false })?.size ?? 0
 const since = (file: string, offset: number) => (size(file) ? readFileSync(file).subarray(offset).toString() : '')
 
-export const test = base.extend<{ launchOrx: () => Promise<Orx>; project: Project }, { agent: Agent; outside: Outside; orx: Orx }>({
+export const test = base.extend<{ launchOrx: (options?: { ownBuild?: boolean; appWindow?: boolean }) => Promise<Orx>; project: Project }, { agent: Agent; outside: Outside; orx: Orx }>({
   agent: [
     async ({}, use) => {
       const agent = await startAgentScripts()
@@ -53,8 +55,8 @@ export const test = base.extend<{ launchOrx: () => Promise<Orx>; project: Projec
 
   launchOrx: async ({ agent, outside }, use, info) => {
     const launched: Orx[] = []
-    await use(async () => {
-      const orx = await startOrx({ agent, outside })
+    await use(async (options) => {
+      const orx = await startOrx({ agent, outside, ...options })
       launched.push(orx)
       return orx
     })
@@ -78,6 +80,7 @@ export const test = base.extend<{ launchOrx: () => Promise<Orx>; project: Projec
     const browser: string[] = []
     page.on('console', (message) => browser.push(`[${message.type()}] ${message.text()}`))
     page.on('pageerror', (error) => browser.push(`[pageerror] ${error.stack ?? error.message}`))
+    if (process.env.ORX_E2E_RECORD_API) recordApi(page, process.env.ORX_E2E_RECORD_API)
 
     await use(page)
 

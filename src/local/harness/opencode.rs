@@ -14,6 +14,10 @@
 //! Auto has orx's reviewer resolve them or surfaces them. Questions always need
 //! a human, so they always surface.
 //!
+//! Restarts: the server is kept, so a turn outlives `orx up`. A resumed turn resubscribes to the
+//! event stream and goes on from the server's export and pending requests, without prompting
+//! again.
+//!
 //! Detection: opencode's `auth.json` is `{provider: {type}}`; the signed-in
 //! providers are its account line, and the served API supplies the model list
 //! and each model's reasoning `variants`.
@@ -30,7 +34,7 @@ use super::options::{
     HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
 };
 use super::{
-    CompactCtx, CompactOutcome, Harness, OneShot, ResumeAction, TurnFailure, TurnOutcome,
+    Adoption, CompactCtx, CompactOutcome, Harness, OneShot, ResumeAction, TurnFailure, TurnOutcome,
     TurnResult,
 };
 use crate::error::{anyhow, Result};
@@ -140,6 +144,7 @@ impl OpenCode {
         if let Err(error) = crate::local::local_models::read() {
             info.agent_note = Some(error.to_string());
         }
+        info.found_providers = found_providers([], &Value::Null);
         Some(info)
     }
 }
@@ -178,7 +183,7 @@ impl Harness for OpenCode {
         Ok(CompactOutcome::Native)
     }
 
-    async fn one_shot(&self, request: OneShot<'_>) -> Result<String> {
+    async fn run_one_shot(&self, request: OneShot<'_>) -> Result<String> {
         let _in_use = super::managed::OPENCODE_IN_USE.read().await;
         let model = selected_generation_model(request.model)?.to_owned();
         let binary = crate::local::opencode::resolve_binary().await?;
@@ -187,16 +192,23 @@ impl Harness for OpenCode {
     }
 
     async fn detect(&self) -> Option<HarnessInfo> {
-        let mut info = self.detect_at(false).await?;
-        info.found_providers =
-            found_providers(info.models.iter().map(|model| model_provider(&model.id)));
-        Some(info)
+        self.detect_at(false).await
     }
 
     async fn detect_snapshot(&self) -> Option<HarnessInfo> {
-        let mut info = self.detect_at(true).await?;
-        info.found_providers = found_providers([]);
-        Some(info)
+        self.detect_at(true).await
+    }
+
+    fn supports_resume(&self) -> bool {
+        true
+    }
+
+    async fn adopt(
+        &self,
+        chat: &std::sync::Arc<crate::local::chat::ChatHost>,
+        adoption: Adoption,
+    ) -> Result<()> {
+        chat.opencode.adopt(adoption).await
     }
 
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
@@ -292,19 +304,6 @@ fn opencode_auth_path() -> Option<PathBuf> {
     ))
 }
 
-/// Built-in providers OpenCode activates from a key in the environment, which writes no auth.json.
-const PROVIDER_KEYS: &[(&str, &str)] = &[
-    ("anthropic", "ANTHROPIC_API_KEY"),
-    ("openai", "OPENAI_API_KEY"),
-    ("openrouter", "OPENROUTER_API_KEY"),
-    ("google", "GEMINI_API_KEY"),
-    ("google", "GOOGLE_API_KEY"),
-    ("groq", "GROQ_API_KEY"),
-    ("xai", "XAI_API_KEY"),
-    ("deepseek", "DEEPSEEK_API_KEY"),
-    ("thinkingmachines", "TINKER_API_KEY"),
-];
-
 /// A provider set up in the user's own OpenCode rather than by OpenResearch.
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -316,7 +315,7 @@ pub struct FoundProvider {
     pub base_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub npm: Option<String>,
-    /// The variables that hold its key: its config's own list, else the ones OpenCode reads.
+    /// The variables that hold its key, from its config and OpenCode, one that is set first.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<String>,
     pub sources: Vec<&'static str>,
@@ -448,9 +447,12 @@ fn outside_strings(
 }
 
 /// Providers set up in the user's own OpenCode that no record or endpoint of OpenResearch's
-/// stands for: its sign-ins, its config's provider blocks, keys in the environment, and any other
-/// provider `catalog` lists models from.
-fn found_providers<'a>(catalog: impl IntoIterator<Item = &'a str>) -> Vec<FoundProvider> {
+/// stands for: its sign-ins, its config's provider blocks, the keys in the environment its served
+/// `integrations` name, and any other provider `catalog` lists models from.
+fn found_providers<'a>(
+    catalog: impl IntoIterator<Item = &'a str>,
+    integrations: &Value,
+) -> Vec<FoundProvider> {
     let (layers, _) = user_configs();
     let records = crate::local::local_models::providers().unwrap_or_default();
     let endpoints = crate::local::local_models::read().unwrap_or_default();
@@ -469,6 +471,7 @@ fn found_providers<'a>(catalog: impl IntoIterator<Item = &'a str>) -> Vec<FoundP
         }
     }
 
+    let catalog: HashSet<&str> = catalog.into_iter().collect();
     let skip = |id: &str| owned(id) || !provider_enabled(&gates, id);
     let mut found = std::collections::BTreeMap::new();
     for id in opencode_providers() {
@@ -505,19 +508,33 @@ fn found_providers<'a>(catalog: impl IntoIterator<Item = &'a str>) -> Vec<FoundP
             }
         }
     }
-    for (id, key) in PROVIDER_KEYS {
-        if !skip(id) && super::detect::api_key(key).is_some() {
+    let env_keys = integrations["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|integration| {
+            let id = integration["id"].as_str();
+            let connections = integration["connections"].as_array().into_iter().flatten();
+            connections
+                .filter(|connection| connection["type"] == "env")
+                .filter_map(move |connection| Some((id?, connection["name"].as_str()?)))
+        });
+    for (id, key) in env_keys {
+        if !skip(id) && (found.contains_key(id) || catalog.contains(id)) {
             let entry = add_source(&mut found, id, "env");
             entry.removable = false;
-            if !entry.sources.contains(&"config") {
-                entry.env.push((*key).to_owned());
-            }
+            entry.env.retain(|name| name != key);
+            entry.env.insert(0, key.to_owned());
         }
     }
     for id in catalog {
         if !skip(id) && !found.contains_key(id) {
             add_source(&mut found, id, "catalog").removable = false;
         }
+    }
+    // Without OpenCode's integrations, a key in the environment may also provide any of these.
+    if integrations.is_null() {
+        found.values_mut().for_each(|entry| entry.removable = false);
     }
     found.into_values().collect()
 }
@@ -560,8 +577,9 @@ fn add_source<'a>(
 }
 
 /// Deletes `found` from the user's own OpenCode: its sign-in in auth.json and its provider block
-/// in each config file. Changes nothing unless every source can go, so a provider that stays set
-/// up by something orx cannot edit keeps its sign-in too.
+/// in each config file. Changes nothing unless every file can go, so a provider that stays set up
+/// by a file orx cannot edit keeps its sign-in too. Keys in the environment are the caller's to
+/// check: only a served OpenCode names them.
 pub(crate) fn delete_found_provider(id: &str) -> Result<()> {
     static REWRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _lock = REWRITE.lock().unwrap_or_else(|error| error.into_inner());
@@ -569,18 +587,10 @@ pub(crate) fn delete_found_provider(id: &str) -> Result<()> {
     if let Some(problem) = unread.into_iter().next() {
         return Err(anyhow!("{problem}"));
     }
-    let found = found_providers([])
+    let found = found_providers([], &Value::Null)
         .into_iter()
         .find(|found| found.id == id)
         .ok_or_else(|| FoundProviderGone(id.to_owned()))?;
-    if let Some((_, var)) = PROVIDER_KEYS
-        .iter()
-        .find(|(provider, key)| *provider == id && super::detect::api_key(key).is_some())
-    {
-        return Err(anyhow!(
-            "`{var}` in your environment provides {id}. Remove it there, or turn this provider off."
-        ));
-    }
     let defines = |config: &Value| {
         CONFIG_GROUPS.iter().any(|(group, ..)| {
             config
@@ -955,10 +965,14 @@ async fn ensure_runtime(
 }
 
 async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
+    let _in_use = super::managed::OPENCODE_IN_USE.read().await;
+    ctx.host.opencode.release_resume(&ctx.session_id).await;
+    if let Some(resume) = ctx.resume.take() {
+        return v2::resume_turn(ctx, resume).await;
+    }
     if let Some(model) = ctx.model.as_deref() {
         crate::commands::up::model_feed::ensure_offered(model)?;
     }
-    let _in_use = super::managed::OPENCODE_IN_USE.read().await;
     // Native permission and question requests die with their turn. Clear any
     // crash/restart leftovers before a new live request can be surfaced.
     ctx.host.resolve_stale_prompts(&ctx.session_id, true)?;
@@ -1030,9 +1044,9 @@ fn opencode_used_tokens(tokens: Option<&Value>) -> Option<u64> {
     (total > 0).then_some(total)
 }
 
-/// Surface a prompt card and flush it so it renders immediately (before the
-/// turn resumes). The card's `native_id` (the reply target) is also its
-/// `WirePart` id, so the user's answer round-trips back to the right request.
+/// Surface a prompt card; the caller commits it so it renders before the turn
+/// resumes. The card's `native_id` (the reply target) is also its `WirePart`
+/// id, so the user's answer round-trips back to the right request.
 fn surface_card(ctx: &mut TurnCtx, card: WirePrompt) {
     // `native_id` is always set by permission_card/question_card (opencode
     // requires the request id); the fallback id only guards a malformed payload.
@@ -1041,7 +1055,6 @@ fn surface_card(ctx: &mut TurnCtx, card: WirePrompt) {
         .clone()
         .unwrap_or_else(|| format!("prompt-{}", ctx.assistant.parts.len()));
     ctx.upsert_part(WirePart::prompt(part_id, card));
-    let _ = ctx.flush();
 }
 
 #[cfg(test)]
@@ -1166,9 +1179,6 @@ mod tests {
             r#"{"orx-local-1":{"name":"Box","baseUrl":"http://127.0.0.1:1234/v1","models":{"m":4096}}}"#,
         )
         .unwrap();
-        std::env::set_var("TINKER_API_KEY", "fixture-only");
-        std::env::set_var("XAI_API_KEY", "fixture-only");
-
         let snapshot = tokio::runtime::Runtime::new()
             .unwrap()
             .block_on(OpenCode.detect_snapshot())
@@ -1177,19 +1187,37 @@ mod tests {
             .found_providers
             .iter()
             .any(|found| found.id == "tinker"));
-        let found = found_providers([
-            "mistral",
-            "opencode",
-            "openresearch-k3v9q2",
-            "orx-local-1",
-            "tinker",
-            "openai",
-        ]);
+        let integrations = json!({"data": [
+            {"id": "alibaba-cn", "methods": [{"type": "key"}, {"type": "env", "names": ["DASHSCOPE_API_KEY"]}],
+             "connections": [{"type": "env", "name": "DASHSCOPE_API_KEY"}]},
+            {"id": "alibaba-coding-plan", "methods": [{"type": "env", "names": ["ALIBABA_CODING_PLAN_API_KEY"]}], "connections": []},
+            {"id": "openai", "connections": [{"type": "env", "name": "OPENAI_API_KEY"}]},
+            {"id": "thinkingmachines", "connections": [{"type": "env", "name": "TINKER_API_KEY"}]},
+            {"id": "xai", "connections": [{"type": "env", "name": "XAI_API_KEY"}]},
+            {"id": "switched-off", "connections": [{"type": "env", "name": "SWITCHED_OFF_KEY"}]},
+            {"id": "exa", "connections": [{"type": "env", "name": "EXA_API_KEY"}]},
+            {"id": "anthropic", "connections": [{"type": "env", "name": "ANTHROPIC_API_KEY"}]}
+        ]});
+        let found = found_providers(
+            [
+                "mistral",
+                "opencode",
+                "openresearch-k3v9q2",
+                "orx-local-1",
+                "tinker",
+                "openai",
+                "alibaba-cn",
+                "thinkingmachines",
+                "xai",
+            ],
+            &integrations,
+        );
         let shown = serde_json::to_value(&found).unwrap();
         assert_eq!(
             shown,
             json!([
-                {"id":"anthropic","sources":["auth"],"removable":true},
+                {"id":"alibaba-cn","env":["DASHSCOPE_API_KEY"],"sources":["env"],"removable":false},
+                {"id":"anthropic","env":["ANTHROPIC_API_KEY"],"sources":["auth","env"],"removable":false},
                 {"id":"commented","name":"Lab, \"quoted\" // not a comment","sources":["config"],"configPath":jsonc,"removable":false},
                 {"id":"github-copilot","sources":["auth"],"removable":true},
                 {"id":"mistral","sources":["catalog"],"removable":false},
@@ -1202,10 +1230,6 @@ mod tests {
         );
 
         let refused = |id: &str| delete_found_provider(id).unwrap_err().to_string();
-        assert_eq!(
-            refused("xai"),
-            "`XAI_API_KEY` in your environment provides xai. Remove it there, or turn this provider off."
-        );
         assert_eq!(
             refused("commented"),
             format!("OpenResearch can't edit {} because it has comments. Remove the `commented` provider there, then re-check OpenCode.", jsonc.display())
@@ -1284,20 +1308,10 @@ mod tests {
             .contains("anthropic"));
         std::env::remove_var("OPENCODE_CONFIG");
 
-        let ids: Vec<_> = found_providers([])
-            .into_iter()
-            .map(|found| found.id)
-            .collect();
-        assert_eq!(
-            ids,
-            [
-                "anthropic",
-                "commented",
-                "github-copilot",
-                "thinkingmachines",
-                "xai"
-            ]
-        );
+        let unchecked = found_providers([], &Value::Null);
+        assert!(unchecked.iter().all(|found| !found.removable));
+        let ids: Vec<_> = unchecked.into_iter().map(|found| found.id).collect();
+        assert_eq!(ids, ["anthropic", "commented", "github-copilot"]);
     }
 
     #[test]

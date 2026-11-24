@@ -32,6 +32,8 @@ Import `test`, `expect`, `send` and `composer` from `src/test.ts`.
 - **One server per worker, one project per test.** The `project` fixture gives the test a
   blank project on the worker's onboarded server; tests share nothing else. A test that needs
   onboarding or a restart takes a server of its own from `launchOrx()`.
+  `launchOrx({ appWindow: true })` starts it as the desktop window does, `orx up --app-window`
+  with the test holding its stdin, so the browser page stands in for the window's.
 - **Script the agent before the prompt.** `agent.script(match, steps)` plays `steps` for the
   next prompt containing `match`: `say`, `think`, `run` (a shell command through orx's terminal),
   `hold` and `exit`. A test fails if a script went unused or a prompt matched none.
@@ -41,8 +43,8 @@ Import `test`, `expect`, `send` and `composer` from `src/test.ts`.
   set up what the test is not about, through the routes the dashboard calls; the journey itself
   clicks and types.
 - **Nothing leaves the machine unlisted.** A test fails on any request off the machine that
-  `listedEgress` in `src/outside.ts` does not name. Adding one is a product decision: list it in
-  [arc/storage.md](../arc/storage.md) first.
+  `listedEgress` in `src/outside.ts` does not name. A new kind of traffic is a product decision: list it in
+  [arc/storage.md](../arc/storage.md) first; a new host for a listed kind goes in `listedEgress` alone.
 
 `lint.ts` rejects the ways a spec hides a race, as alphaXiv's `no-e2e-race-hiding` does: no
 `waitForTimeout` or sleeps, no `toPass` retries, no `networkidle`, no `force: true`, no serial

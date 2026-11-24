@@ -33,6 +33,7 @@ with socket.socket() as sock:
     sock.bind(('127.0.0.1', 0))
     port = sock.getsockname()[1]
 origin = f'http://127.0.0.1:{port}'
+MEDIA_TIMEOUT = 30
 env.update(SHELL='/bin/sh', ORX_APP_RELAUNCH_PORT=str(port), ORX_NO_UPDATE_CHECK='1', ORX_TELEMETRY_ENV='off', APPIMAGE_EXTRACT_AND_RUN='1', TMPDIR=str(state), GTK_THEME='Adwaita:dark', APPIMAGE_GTK_THEME='Adwaita:light', WEBKIT_SHOW_CONSOLE_MESSAGES='1', XDG_DATA_DIRS='/usr/local/share:/usr/share')
 process = None
 log = None
@@ -146,17 +147,25 @@ try:
         assert hung and Path('/proc', hung[1]).exists(), 'Timed-out media check was not given time to finish scanning'
     screenshot = state/'native.png'
     green_pixels = 0
-    for _ in range(100):
+    media_probe_pixels = 0
+    media_failed_pixels = 0
+    # Some X11 captures include only one of the two 160x90 green surfaces.
+    one_surface_pixels = 160 * 90 * 9 // 10
+    media_started = time.monotonic()
+    while time.monotonic() - media_started < MEDIA_TIMEOUT:
         subprocess.run(['import','-window', windows[-1], str(screenshot)], env=actual_env, check=True)
-        # Both the video and the canvas drawn after Web Audio initialization must be green.
         histogram = subprocess.check_output(['convert', str(screenshot), '-depth','8','-format','%c','histogram:info:-'],text=True)
         colors = [tuple(map(int, match)) for match in re.findall(r"^\s*(\d+):\s*\(\s*(\d+),\s*(\d+),\s*(\d+)", histogram, re.MULTILINE)]
         green_pixels = sum(count for count,r,g,b in colors if g>90 and r<20 and b<20)
         blue_pixels = sum(count for count,r,g,b in colors if b>230 and r<20 and g<20)
-        if blue_pixels > 100 and (disabled or green_pixels > 20000):
+        media_probe_pixels = sum(count for count,r,g,b in colors if r>230 and g<20 and b>230)
+        media_failed_pixels = sum(count for count,r,g,b in colors if r>230 and g<20 and b<20)
+        media_ready = green_pixels >= one_surface_pixels and media_probe_pixels > 100
+        if blue_pixels > 100 and (disabled or media_ready):
             break
         assert process.poll() is None, 'App exited while decoding the video'
         time.sleep(0.2)
+    media_seconds = round(time.monotonic() - media_started, 1)
     text = (state/'app.log').read_text(errors='replace')
     assert ('audio/video disabled:' in text) == disabled, text[-4000:]
     if fault:
@@ -172,10 +181,11 @@ try:
         assert ('signal: 6' if fault == 'abort' else 'Media check timed out') in text, text[-4000:]
     assert blue_pixels > 100, 'HTML report did not render'
     if not disabled:
-        assert green_pixels > 20000, f'No decoded video frame: {green_pixels} green pixels'
+        assert media_probe_pixels > 100, f'Video decode probe did not pass: {media_probe_pixels} passed and {media_failed_pixels} failed marker pixels after {MEDIA_TIMEOUT}s'
+        assert green_pixels >= one_surface_pixels, f'Expected one visible 160x90 media surface: {green_pixels} green pixels'
     else:
         assert green_pixels == 0, 'Disabled media unexpectedly decoded a frame'
-    result = {'enabled':not disabled,'decodedGreenPixels':green_pixels,'htmlMarkerPixels':blue_pixels}
+    result = {'enabled':not disabled,'decodedGreenPixels':green_pixels,'mediaProbePixels':media_probe_pixels,'seconds':media_seconds,'htmlMarkerPixels':blue_pixels}
     assert api('/api/health')['ok']
     evidence = os.environ.get('ORX_SMOKE_EVIDENCE_DIR')
     if evidence:

@@ -12,8 +12,11 @@ import type {
   EngineHost,
   QueuedMessage,
   Run,
+  SidebarCard,
+  SidebarChatTotals,
   UpdateStatus,
 } from "./api";
+import type { RunMonitorEvent } from "./runMonitor/types";
 
 export interface RunLogEvent {
   generation?: string;
@@ -30,6 +33,8 @@ export type ChatEvent =
   | { type: "runsChanged" }
   | { type: "session"; session: ChatSession }
   | { type: "sessionDeleted"; sessionId: string }
+  /** The sidebar cards one server read changed, with the counts that read saw. */
+  | { type: "sidebar"; cards: SidebarCard[]; totals: SidebarChatTotals }
   | { type: "message"; sessionId: string; message: ChatMessage }
   | { type: "busy"; sessionId: string; busy: boolean }
   | { type: "background"; sessionId: string }
@@ -82,6 +87,7 @@ type ConnectionListener = () => void;
 export interface OrxEventHandlers {
   onRun: (run: Run) => void;
   onRunLog?: (event: RunLogEvent) => void;
+  onRunMonitor?: (event: RunMonitorEvent) => void;
   onExperiment?: (experiment: Experiment) => void;
   onProject?: (project: Project) => void;
   onReconnect?: () => void;
@@ -353,6 +359,10 @@ export function createEvents(client: WorkspaceClient) {
             ref.current.onRun(d.run);
           }
         });
+        es.addEventListener("run.monitor", (e) => {
+          const d = parse<RunMonitorEvent>(e as MessageEvent);
+          if (d?.runId) ref.current.onRunMonitor?.(d);
+        });
         es.addEventListener("experiment.updated", (e) => {
           const d = parse<{ experiment: Experiment }>(e as MessageEvent);
           if (d?.experiment) {
@@ -389,6 +399,10 @@ export function createEvents(client: WorkspaceClient) {
             emitProjectActivityEvent();
             emitChat({ type: "session", session: d.session });
           }
+        });
+        es.addEventListener("chat.sidebar", (e) => {
+          const d = parse<{ cards: SidebarCard[]; totals: SidebarChatTotals }>(e as MessageEvent);
+          if (Array.isArray(d?.cards) && d.totals) emitChat({ type: "sidebar", cards: d.cards, totals: d.totals });
         });
         es.addEventListener("chat.session.deleted", (e) => {
           const d = parse<{ sessionId: string }>(e as MessageEvent);

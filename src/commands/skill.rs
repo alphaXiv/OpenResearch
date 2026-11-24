@@ -44,7 +44,7 @@ pub async fn run(args: crate::SkillArgs) -> Result<()> {
 
     println!("\nBundled modules (orx skill <name>):");
     for s in agent_skills::skills(current_skill_set()) {
-        println!("  {:<20} {}", s.name, s.description);
+        println!("  {:<20} {}", s.name, s.description());
     }
 
     capture_invocation("overview");

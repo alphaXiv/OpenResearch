@@ -1,6 +1,6 @@
 ---
 name: orx-lit-review
-description: "Explain and compare scientific or technical concepts using original research evidence. Use before answering conceptual or architectural questions, research claims, literature reviews, or related-work requests, even when no paper, citation, or search is requested. Retrieve with relevant alphaXiv, OpenAlex, bioRxiv, and PubMed connectors; scale retrieval to the question."
+description: "Answer from the research literature. Use before explaining or comparing concepts, judging a research claim, or writing related work, even when no paper is named."
 ---
 
 # Literature retrieval
@@ -14,35 +14,27 @@ supplement successful retrieval with a web search for a familiar or preferred
 paper; use a focused connector query or `orx paper`. Opening a selected original
 PDF to extract evidence is source access; opening its abstract first is unnecessary.
 
-## Your library and researchers
+Each `references/<name>.md` below sits beside this skill. If a reference beside
+this skill can't be read, `orx skill lit-review/<name>` prints it.
 
-For "my papers", "my library", "my notes", highlights or folders, use the
-alphaXiv tools `list_library`, `list_annotated_papers` and `get_paper_notes`,
-under whatever server prefix this agent gives them. Library tools need alphaXiv
-sign-in on the computer running this chat. Without alphaXiv tools, read the
-library with `orx alphaxiv library --json`. Save papers or create folders only
-when requested, with `save_papers_to_folder` and `create_folder`.
-For researcher questions, use `find_researchers`, `resolve_researchers`,
-`get_researcher` and `get_researcher_papers`; these work signed out too.
-Keep the literature search and reading flow below for general paper retrieval.
+## Scale retrieval to the question
 
-## Explain with visual evidence
+- A set-of-papers request ("find papers", "top papers", "what is out there",
+  "what should I read") returns the ranked discovery results and stops.
+- Claim-level synthesis, methodological detail or comparison: finish retrieval,
+  then read the 3–5 most load-bearing candidates with `orx paper <id>` (or the
+  number the user requested). Do not narrow to 3–5 papers before retrieval has
+  produced its ranked 5–15 candidate set.
+- Explanations and comparisons lead with original figures, tables and diagrams.
 
-- Prefer explaining through original figures, tables, and diagrams. For
-  comparisons, choose visuals that cover the relevant alternatives; let the
-  reader see the architecture, relationship, or result being explained.
-- Answer as a guided reading of those visuals, presenting them early. Keep
-  prose brief: what to notice, why it matters, and the caveats, grounded in
-  contextual author quotations.
+Read when:
+- `references/library.md`: the user asks about their papers, library, notes,
+  highlights or folders, or about a researcher.
+- `references/reading.md`: you open a selected paper with `orx paper`.
+- `references/visual-evidence.md`: before explaining or comparing, to pick,
+  crop and embed original visuals.
 
-Visual evidence should replace standalone tutorials, generated comparison
-tables, and recitations of data or structure. Choose visuals for explanatory
-value, without a fixed image count. Text is the fallback when relevant sources
-contain no useful visual or extraction remains blocked; explain that gap.
-One unavailable figure is not a reason to omit other accessible visuals.
-
-Each command performs one search against public endpoints and emits its
-structured JSON result. No login is required:
+## Retrieval loop
 
 ```sh
 orx discover keyword "<exact keyword query>"
@@ -52,236 +44,58 @@ orx discover biorxiv "<biology preprint query>"
 orx discover pubmed "<biomedical query>"
 ```
 
-- `keyword` searches title, abstract, and full text. Results include the match
-  snippets that explain why each paper was retrieved. Use short exact terms:
-  method names, acronyms, benchmarks, authors, or title phrases.
-- `embedding` searches titles and abstracts semantically, then reranks by
-  similarity and the requested priority. Use the user's actual question or a
-  concise description of a genuinely missing facet.
-- `openalex` searches the cross-disciplinary OpenAlex scholarly graph. It is
-  especially useful for journal/conference papers, citation context, and work
-  outside arXiv.
-- `biorxiv` searches OpenAlex's bioRxiv source index. bioRxiv has no comparable
-  native search API; the bioRxiv API is used later when reading a selected DOI.
-- `pubmed` searches PubMed's biomedical and life-science journal literature
-  through NCBI E-utilities, ranked by PubMed's Best Match. It
-  accepts PubMed query syntax such as field tags (`[ti]`, `[au]`, `[mh]`).
-  Result ids are PMIDs.
-- Every primitive returns the same JSON shape: `source`, self-routing `id`,
-  title, abstract, and publication date. alphaXiv results may include votes and
-  full-text snippets; OpenAlex and bioRxiv results may include citations.
-  PubMed results carry no votes or citations.
+alphaXiv's tools are connectors too: `discover_papers` ranks candidates for a
+whole request in one call, and `answer_pdf_queries` returns the pages of one
+paper that answer specific questions, for claim-level evidence. Without
+alphaXiv tools, run them with `orx alphaxiv call <tool> '<json>'`.
 
-## Date and ranking controls
+1. Keyword terms use only wording from the user or prior tool results; never
+   guess an acronym expansion, and add no general-purpose padding. Semantic or
+   scholarly-graph retrieval takes one short faithful question in the user's
+   terms rather than a padded reformulation.
+2. Rate retrieval difficulty 1–10. Follow-up budget: 1–3 gets 0 complete
+   rounds, 4–7 gets 1, 8–10 gets 2.
+3. Resolve one publication window and priority. Every initial and follow-up
+   call inherits those exact controls; never widen the window or change priority
+   during the loop. Every candidate already satisfies the window, so rank what
+   is available instead of lamenting well-known work the user excluded.
+4. Initial round: alphaXiv keyword, embedding or both for arXiv-heavy ML, CS,
+   math or physics (exact full-text evidence, semantic coverage, or both);
+   OpenAlex for journal, conference, citation or cross-disciplinary coverage;
+   bioRxiv for biology and life-science preprints; PubMed for biomedical,
+   clinical and life-science journals. Never ritual calls for unrelated topics;
+   query several sources concurrently when the corpus is genuinely ambiguous or
+   interdisciplinary. If an alphaXiv keyword query mixes other terms with
+   acronym tokens (2–10 characters, starting with a letter, only letters,
+   digits or hyphens, at least two uppercase), concurrently run one more keyword
+   call of exactly those tokens joined by spaces; it belongs to the initial round.
+5. Deduplicate every candidate: exact `id`, then a visible DOI or arXiv id, then
+   exact normalized title across sources. Prefer the alphaXiv copy of an arXiv
+   duplicate; it supports full-text reading.
+6. With solid topical coverage, stop immediately and rank 5–15 IDs. Fast and
+   slightly less complete beats an exploratory search; prefer fewer strong
+   papers over padding. Otherwise spend follow-up rounds up to the budget.
+7. Never invent or recall an ID; rank only IDs a successful call returned.
 
-Retrieval is not date-bounded unless you supply a bound. Add the same controls
-to any primitive when the question calls for them:
+Read when:
+- `references/sources.md`: you need what a source searches or returns, PubMed
+  printed `PubMed phrases not found`, or a call says a source is disabled.
+- `references/ranking.md`: the question bounds dates or asks for new, seminal
+  or popular work, and when ordering candidates within or across sources.
+- `references/follow-ups.md`: coverage is thin, a call failed, no selected ID
+  survives, or the turn needs a second retrieval loop.
 
-```sh
-orx discover keyword "<query>" --published-after 2024-01-01 --prioritize recency
-orx discover embedding "<query>" --published-before 2012-01-01 --prioritize historical
-orx discover openalex "<query>" --published-after 2024-01-01 --prioritize recency
-orx discover biorxiv "<query>" --limit 20
-orx discover pubmed "<query>" --published-after 2020-01-01 --prioritize recency
-```
+## Citation contract
 
-- `--published-after` and `--published-before` are inclusive `YYYY-MM-DD`
-  bounds. Do not invent a cutoff merely to favour newer work.
-- Older or narrow `--published-before` embedding searches can return a thin or
-  empty candidate set because the upper bound is applied after vector retrieval.
-  Report what comes back; do not treat an empty set as proof that no literature
-  exists or retry the identical query and window.
-- `--prioritize` is `default`, `recency`, `historical`, or `popular`.
-- `--limit` can narrow alphaXiv output but cannot widen alphaXiv's fixed
-  server-side candidate pools. For OpenAlex, bioRxiv, and PubMed it also
-  controls the requested pool size.
-- OpenAlex and bioRxiv implement these controls with OpenAlex publication-date
-  filters, then rerank the returned relevance pool by date or citations. Their
-  ranking is best-effort and is not identical to alphaXiv's semantic,
-  vote-aware ranking.
-- PubMed applies the window as a publication-date filter and reranks its
-  relevance pool by date for `recency` and `historical`. It has no citation
-  counts, so `popular` keeps PubMed's relevance order.
-- Use `recency` for explicitly new/latest work. Use `historical` for seminal or
-  foundational work. Use `popular` only when the user asks about votes,
-  popularity, or community standing.
+- Read a paper before using it as claim-level support. Discovery lists may link
+  candidate titles, but must not imply that methods or findings were verified
+  from snippets alone.
+- Ground claims in original evidence and distinguish your interpretation. Quote
+  only original text you actually read; cite immediately after a quote. Never
+  fabricate evidence or present a paraphrase as a quotation.
+- The app lists every paper your answer links below the answer, so end without
+  a sources or references list.
 
-## Main-agent retrieval loop
-
-### Set up the retrieval query
-
-1. If using keyword retrieval, build focused terms using only wording from the
-   user or prior tool results. Never guess an acronym expansion. General-purpose
-   padding reduces result quality.
-2. For semantic or scholarly-graph retrieval, build one short faithful question
-   in the user's terms rather than a padded reformulation.
-3. Estimate retrieval difficulty from 1–10. This controls a budget of complete
-   follow-up rounds: difficulty 1–3 gets 0 rounds, 4–7 gets 1, and 8–10 gets 2.
-4. Resolve one publication window and priority for the request. Every initial
-   and follow-up call must inherit those exact controls; never widen a window or
-   change priority during the loop. Every returned candidate already satisfies
-   that window, so rank what is available instead of lamenting well-known work
-   that the user excluded.
-
-### Run and rank
-
-1. Choose the initial sources and strategies that fit the query. For arXiv-heavy
-   ML, CS, math, or physics questions, use alphaXiv keyword, embedding, or both
-   according to whether exact full-text evidence, semantic coverage, or both are
-   useful. Add OpenAlex for broader journal, conference, citation, or
-   cross-disciplinary coverage. Use bioRxiv for biology and adjacent
-   life-science preprints and PubMed for biomedical, clinical, and
-   life-science journal literature, not as ritual calls for unrelated topics.
-   When the corpus is genuinely ambiguous or interdisciplinary, query multiple
-   relevant sources concurrently. If the initial round includes alphaXiv
-   keyword and its terms mix other terms with one or more 2–10 character tokens
-   that start with a letter, contain only letters, digits, or hyphens, and have
-   at least two uppercase letters, concurrently run one additional keyword call
-   whose query is exactly those acronym tokens joined by spaces and nothing
-   else. This recovery call is part of the initial round.
-2. Treat initial calls independently: retain every successful result set when
-   another call fails. If none returns results and follow-up budget remains,
-   use a round only when a focused recovery query is likely to work.
-3. Inspect and deduplicate every candidate. Match exact `id` first, then a DOI
-   or arXiv id visible in the metadata, then exact normalized title as a
-   cross-source fallback. Prefer the alphaXiv representation of an arXiv
-   duplicate because it supports full-text reading. bioRxiv is a subset of
-   OpenAlex, and PubMed journal records largely overlap OpenAlex, so overlap
-   between those calls is expected. Within each source,
-   the API order already blends topical relevance with the requested priority:
-   - With `recency`, freshness is already upranked and old accumulated votes
-     are damped. Reorder only for topical fit; do not exclude an older but much
-     better match.
-   - With `popular`, votes or citations dominate among topically plausible
-     results. Keep high-impact relevant papers, but drop off-topic ones.
-   - Otherwise, topical relevance remains primary with freshness and votes
-     already nudging the order. Do not apply those preferences a second time.
-4. If the initial candidates provide solid topical coverage, stop immediately
-   and rank 5–15 IDs. Fast and slightly less complete is better than an
-   exploratory search. Prefer fewer strong papers over padding.
-5. Otherwise, spend at most the difficulty-derived number of follow-up rounds.
-   One round targets one concrete missing acronym, method, benchmark,
-   organization, title phrase, venue, or subtopic. Choose one or more sources
-   based on the gap: alphaXiv keyword for exact/full-text evidence, alphaXiv
-   embedding for a semantic arXiv angle, OpenAlex for broad scholarly or
-   citation coverage, bioRxiv for recent biology preprints, and PubMed for
-   biomedical or clinical journal literature. Later rounds do
-   **not** need to query all sources. Calls for the same missing angle count
-   together as one round. Never spend a round merely rephrasing an existing
-   search. Re-evaluate after each round and stop as soon as coverage is
-   sufficient. The budget is a hard cap, not a target.
-6. Drop each selected ID that did not appear in a successful initial or
-   follow-up result, retaining the surviving IDs in your chosen rank order. If
-   no selected ID survives, fall back to the first 15 unique IDs in observation
-   order, with initial results before follow-up results. Never invent or recall
-   an ID.
-
-Batch all facets into one broad retrieval loop and plan against a cap of two
-complete loops per user turn. If a genuinely distinct topic still forces a
-third or fourth loop, run it in shallow mode: initial searches only, with zero
-follow-up rounds. This degradation is a backstop, not permission to plan extra
-loops. Refuse a fifth loop and answer from the papers already found.
-
-For a set-of-papers request such as “find papers,” “top papers,” “what is out
-there,” or “what should I read,” return the ranked discovery results and stop.
-Depth on individual papers is not part of the discovery loop. When the request
-instead needs claim-level synthesis, methodological details, or comparison,
-finish retrieval first and then read the 3–5 most load-bearing candidates with
-`orx paper <id>` (or the number the user requested). Do not narrow to 3–5
-papers before retrieval has produced its ranked 5–15 candidate set.
-
-Do not compare alphaXiv votes numerically with OpenAlex citations; they measure
-different things. Topical fit is the cross-source ranking signal.
-
-## Reading selected papers
-
-`orx paper` auto-detects an arXiv id/URL, bioRxiv DOI, other DOI, OpenAlex
-`W…` id, or PubMed PMID/URL.
-For alphaXiv it returns a compact structured report; use `--full` for
-exact wording and surrounding context, even when a report exists. Without
-`--full`, a missing report automatically falls back to extracted full text in the same
-command. `--full` skips the report entirely rather than acting as a superset of
-the default. If extracted text is also unavailable, locate the original PDF
-through the returned paper link.
-
-`orx paper` prints the alphaXiv link before the content. When alphaXiv has an
-associated repository, it then prints `GitHub: <url>`. This is the most-starred
-associated repository and can be a framework rather than the paper's own code,
-so sanity-check it before treating it as the implementation.
-
-All discovery and paper commands honor the user's disabled literature-source
-settings; do not work around an error saying a source is disabled.
-
-Read a paper before using it as claim-level support. Discovery lists may link
-candidate titles, but must not imply that methods or findings were verified
-from snippets alone.
-
-## Original visuals
-
-Crop directly from the verified original PDF, using alphaXiv's linked PDF for
-alphaXiv papers. For a verified arXiv ID, download the source PDF from
-`https://arxiv.org/pdf/<id>`. The alphaXiv `/pdf/` URL serves a viewer page,
-not the PDF asset; keep user-facing citations pointed at that viewer.
-Preserve panel titles, axes, legends, and table headings; exclude the printed
-caption and surrounding prose. Render legibly and inspect
-the crop. Do not substitute thumbnails, redraw results, or generate lookalikes.
-If extraction fails, inspect the error and try available PDF tooling; report
-an unresolved obstacle rather than silently omitting the figure.
-
-Save crops durably in the session working tree. Use the figure component with
-brief accessible alt text and a contextual caption in the Markdown title:
-
-```markdown
-![Architecture overview](paper/figure1.png "Figure 1. What this shows and why it matters. [p. 6](https://www.alphaxiv.org/pdf/PAPER_ID?page=6)")
-```
-
-Replace example values with verified paths, IDs, and pages. Base your caption
-on the original, tailor it to the question, and preserve important qualifications.
-It is your explanation, not an author quote. Do not bake it into the image or
-repeat it below the component.
-
-Embed each underlying file once per conversation. Later references use
-`[Figure 1](paper/figure1.png)` or `[Table 1](paper/table1.png)` to open the same
-local file in the right pane. Different crops/edits may be embedded; renaming an
-unchanged image does not make it new. Keep paper-provenance links separate.
-
-## Quotes and citations
-
-Ground claims in original evidence and distinguish your interpretation.
-Use direct quotations to ground authors' reasoning, methods, assumptions, and
-limitations instead of paraphrasing them all. Choose complete sentences or
-self-contained passages. Read surrounding context; isolated
-numbers and clipped phrases are not sufficient. Do not quote values already
-clear in a displayed visual. Cite immediately after a quote.
-
-Quote only original text you actually read, including full-text snippets with
-sufficient context—not generated reports or summaries. Preserve wording and
-qualifications; mark omissions and never join separate snippets into a continuous
-quote. Respect quotation limits by selecting fewer complete passages, not by
-clipping context. If exact evidence is unavailable, say so; never fabricate it
-or present a paraphrase as a quotation.
-
-Prefer `https://www.alphaxiv.org/pdf/<paper-id>?page=N` when alphaXiv contains
-the cited version and evidence. N is the verified one-based PDF page index;
-omit it when unknown. Do not substitute different preprint results for a journal
-version. Use another verified paper viewer when alphaXiv lacks that evidence
-or is disabled. Raw PDFs are for extraction, not user-facing citations.
-Do not cite abstract pages or invent exact-passage highlighting URL parameters.
-For discovery results without an alphaXiv representation, link a DOI to
-`https://doi.org/<doi>`, a bare OpenAlex `W…` ID to
-`https://openalex.org/<id>`, or a PMID to
-`https://pubmed.ncbi.nlm.nih.gov/<pmid>/`. Never substitute an arXiv link for
-an available alphaXiv representation.
-
-| Reference | Label | Destination |
-| --- | --- | --- |
-| One paper, page known | `p. N` | Paper viewer at that PDF page |
-| Multiple papers | `Short title, p. N` | Corresponding paper/page |
-| Page unknown | `Paper` or consistent short title | Paper viewer without page |
-| Embedded visual | `Figure N` / `Table N` | Existing local image file |
-
-Use these labels consistently, not vague labels such as "Source" or descriptions
-of the claim. The app lists every paper your answer links below the answer, so
-end without a sources or references list. Disambiguate figures by paper when needed. Introductory paper-title links can
-retain their titles. Discovery and figure-provenance links provide navigation;
-they do not imply every claim in a paper has been verified.
+Read when:
+- `references/citations.md`: before writing quotes or citation links, for
+  quotation rules, link destinations and labels.

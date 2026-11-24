@@ -25,7 +25,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -37,8 +37,8 @@ use super::options::{
     HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
 };
 use super::{
-    CompactCtx, CompactOutcome, Harness, OneShot, OneShotQuality, ResumeAction, TurnFailure,
-    TurnOutcome, TurnResult, Waited, ORX_MAX_ATTEMPTS,
+    CompactCtx, CompactOutcome, Harness, OneShot, OneShotQuality, OneShotReply, OneShotUsage,
+    ResumeAction, TurnFailure, TurnOutcome, TurnResult, Waited, ORX_MAX_ATTEMPTS,
 };
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
@@ -78,6 +78,8 @@ pub(crate) struct AuthProbe {
     pub sequence: u64,
     pub failed_check: bool,
     reported_method_present: bool,
+    /// Signed in with a token from the environment, which may bill a plan or the API.
+    token: bool,
     /// The CLI answered with a saved login that an environment credential
     /// overrides — proven, not inferred from an `Unknown` a timeout also
     /// produces. No login or update command can repair it.
@@ -103,6 +105,7 @@ impl AuthProbe {
             sequence,
             failed_check: true,
             reported_method_present: false,
+            token: false,
             credential_conflict: false,
         }
     }
@@ -171,6 +174,7 @@ pub(crate) fn parse_auth_status(exit_code: Option<i32>, stdout: &[u8], sequence:
         sequence,
         failed_check: state == HarnessAuthState::Unknown,
         reported_method_present: reported_method.is_some(),
+        token: reported_method == Some("oauth_token"),
         credential_conflict: false,
     }
 }
@@ -211,8 +215,10 @@ pub(crate) async fn profile_auth(bin: Option<&Path>, home: &Path, version: Optio
         }
         _ => None,
     };
-    let account = read_json(home.join(".claude.json")).and_then(|v| v.get("oauthAccount").cloned());
-    let credentials = read_json(home.join(".credentials.json"));
+    let account = read_json(home.join(".claude.json"))
+        .and_then(|v| v.get("oauthAccount").cloned())
+        .filter(|_| !probe.token);
+    let credentials = read_json(home.join(".credentials.json")).filter(|_| !probe.token);
     let tier = credentials
         .as_ref()
         .and_then(|v| v.get("claudeAiOauth"))
@@ -250,7 +256,11 @@ pub(crate) async fn profile_auth(bin: Option<&Path>, home: &Path, version: Optio
 /// gives ANTHROPIC_* credentials precedence over a saved subscription login.
 /// If status still reports OAuth in that environment, it has only verified
 /// leftover OAuth metadata, not the credential the worker will actually send.
-fn apply_env_credential_override(mut probe: AuthProbe) -> AuthProbe {
+fn apply_env_credential_override(mut probe: AuthProbe, home: Option<&Path>) -> AuthProbe {
+    if probe.token {
+        probe.method = token_method(home);
+        return probe;
+    }
     if has_api_credential()
         && probe.state == HarnessAuthState::Ready
         && probe.method == Some("oauth")
@@ -266,8 +276,32 @@ fn apply_env_credential_override(mut probe: AuthProbe) -> AuthProbe {
     probe
 }
 
+/// Claude reports a `claude setup-token` and an ANTHROPIC_AUTH_TOKEN alike, so the variables
+/// it reads, its user settings' `env` included, tell a plan from the API; neither found is unknown.
+fn token_method(home: Option<&Path>) -> Option<&'static str> {
+    let home = home.map_or_else(
+        || native_store::claude_home(NativeStore::Legacy),
+        Path::to_path_buf,
+    );
+    let settings = read_json(home.join("settings.json"));
+    let set = |key: &str| {
+        super::detect::api_key(key).is_some()
+            || settings
+                .as_ref()
+                .and_then(|settings| settings["env"][key].as_str())
+                .is_some_and(|value| !value.trim().is_empty())
+    };
+    if CLAUDE_CREDENTIAL_VARS.iter().any(|key| set(key)) {
+        Some("apiKey")
+    } else if set("CLAUDE_CODE_OAUTH_TOKEN") {
+        Some("oauth")
+    } else {
+        None
+    }
+}
+
 async fn effective_auth_probe(bin: &Path, sequence: u64) -> AuthProbe {
-    apply_env_credential_override(probe_auth(bin, sequence).await)
+    apply_env_credential_override(probe_auth(bin, sequence).await, None)
 }
 
 fn has_oauth_credentials() -> bool {
@@ -373,7 +407,7 @@ async fn probe_auth_and_ultracode(
         // The parser rejected `--effort` and never reached `auth status`.
         probe = probe_auth_at(bin, sequence, home).await;
     }
-    (apply_env_credential_override(probe), ultracode)
+    (apply_env_credential_override(probe, home), ultracode)
 }
 
 /// Points a probe at a profile's home and its own Keychain entry.
@@ -501,11 +535,11 @@ async fn claude_control(
 
 /// The account's plan limits from `get_usage`, which Claude Code marks
 /// experimental: a shape this can't read is a failed read, never a guess.
-pub(crate) async fn read_plan(bin: PathBuf, home: Option<PathBuf>) -> Read {
+pub(crate) async fn read_plan(bin: PathBuf, home: Option<PathBuf>, subscription: bool) -> Read {
     let request = json!({ "subtype": "get_usage", "skip_behaviors": true });
     match claude_control(bin.clone(), home, request).await {
         Err(unanswered) => Read::Failed(unanswered.message("Claude Code", &bin)),
-        Ok(Ok(usage)) => parse_plan(&usage),
+        Ok(Ok(usage)) => parse_plan(&usage, subscription),
         Ok(Err(error)) => {
             let message = error.get("error").and_then(Value::as_str).unwrap_or("");
             if error.get("error_code").and_then(Value::as_str) == Some("unsupported_request")
@@ -576,12 +610,20 @@ struct ExtraUsage {
     currency: Option<String>,
 }
 
-fn parse_plan(usage: &Value) -> Read {
+fn parse_plan(usage: &Value, subscription: bool) -> Read {
     let Ok(usage) = GetUsage::deserialize(usage) else {
         return Read::Failed("Claude Code reported usage in a form orx can't read yet.".into());
     };
     if !usage.rate_limits_available {
-        return Read::NoPlan;
+        // A subscription whose limits can't be read, such as a `claude setup-token`'s, is still a plan.
+        return if subscription {
+            Read::Plan(Snapshot {
+                plan: billing_label(usage.subscription_type.as_deref(), None, None),
+                ..Snapshot::default()
+            })
+        } else {
+            Read::NoPlan
+        };
     }
     let Some(limits) = usage.rate_limits else {
         return Read::Failed("Claude Code couldn't reach claude.ai for this plan's limits.".into());
@@ -669,8 +711,8 @@ mod plan_tests {
             },
             "behaviors": null
         });
-        let Read::Plan(snapshot) = parse_plan(&usage) else {
-            panic!("{:?}", parse_plan(&usage));
+        let Read::Plan(snapshot) = parse_plan(&usage, true) else {
+            panic!("{:?}", parse_plan(&usage, true));
         };
         let week = "2026-11-17T08:00:00.000Z";
         assert_eq!(
@@ -694,7 +736,7 @@ mod plan_tests {
 
         let mut off = usage.clone();
         off["rate_limits"]["extra_usage"]["is_enabled"] = json!(false);
-        let Read::Plan(snapshot) = parse_plan(&off) else {
+        let Read::Plan(snapshot) = parse_plan(&off, true) else {
             panic!()
         };
         assert_eq!(snapshot.extra_usage, None);
@@ -707,7 +749,20 @@ mod plan_tests {
             "total_duration_ms": 312, "total_lines_added": 0, "total_lines_removed": 0,
             "model_usage": {}}, "subscription_type": null, "rate_limits_available": false,
             "rate_limits": null, "behaviors": null});
-        assert_eq!(parse_plan(&usage), Read::NoPlan);
+        assert_eq!(parse_plan(&usage, false), Read::NoPlan);
+    }
+
+    /// A `claude setup-token` answers as an API key does, but it bills a plan.
+    #[test]
+    fn a_setup_token_is_a_plan_without_limits() {
+        let usage = json!({"subscription_type": "max", "rate_limits_available": false,
+            "rate_limits": null});
+        let Read::Plan(snapshot) = parse_plan(&usage, true) else {
+            panic!("{:?}", parse_plan(&usage, true));
+        };
+        assert_eq!(snapshot.plan.as_deref(), Some("Max"));
+        assert!(snapshot.windows.is_empty());
+        assert_eq!(parse_plan(&usage, false), Read::NoPlan);
     }
 
     #[test]
@@ -721,18 +776,24 @@ mod plan_tests {
             json!({"rate_limits_available": true, "rate_limits": {"model_scoped": [{"utilization": 3}]}}),
             json!({"rate_limits_available": true, "rate_limits": {"five_hour": {"utilization": 1, "resets_at": 5}}}),
         ] {
-            assert!(matches!(parse_plan(&usage), Read::Failed(_)), "{usage}");
+            assert!(
+                matches!(parse_plan(&usage, true), Read::Failed(_)),
+                "{usage}"
+            );
         }
         // Rate limits apply, but claude.ai didn't answer this time.
         let unreachable = json!({"rate_limits_available": true, "rate_limits": null});
-        assert!(matches!(parse_plan(&unreachable), Read::Failed(_)));
+        assert!(matches!(parse_plan(&unreachable, true), Read::Failed(_)));
         // A plan with limits is never shown with none.
         for limits in [
             json!({}),
             json!({"five_hour": null, "seven_day": {"utilization": null, "resets_at": null}}),
         ] {
             let usage = json!({"rate_limits_available": true, "rate_limits": limits});
-            assert!(matches!(parse_plan(&usage), Read::Failed(_)), "{usage}");
+            assert!(
+                matches!(parse_plan(&usage, true), Read::Failed(_)),
+                "{usage}"
+            );
         }
     }
 
@@ -767,21 +828,21 @@ mod plan_tests {
             "old",
             r#"{"type":"control_response","response":{"subtype":"error","request_id":"orx_control","error":"Unsupported control request subtype: get_usage"}}"#,
         );
-        assert_eq!(read_plan(old, None).await, Read::Unsupported);
+        assert_eq!(read_plan(old, None, true).await, Read::Unsupported);
 
         let refused = fake(
             "refused",
             r#"{"type":"control_response","response":{"subtype":"error","request_id":"orx_control","error":"get_usage is not supported in this context"}}"#,
         );
         assert!(
-            matches!(read_plan(refused, None).await, Read::Failed(message) if message.contains("not supported in this context"))
+            matches!(read_plan(refused, None, true).await, Read::Failed(message) if message.contains("not supported in this context"))
         );
 
         let api_key = fake(
             "api-key",
             r#"{"type":"control_response","response":{"subtype":"success","request_id":"orx_control","response":{"rate_limits_available":false,"rate_limits":null}}}"#,
         );
-        assert_eq!(read_plan(api_key, None).await, Read::NoPlan);
+        assert_eq!(read_plan(api_key, None, false).await, Read::NoPlan);
     }
 
     /// A named pipe the test and a fake agent hand signals through, so neither waits on the clock.
@@ -832,7 +893,7 @@ mod plan_tests {
         );
         orx_test_support::write_executable(&fake, script, 0o755).unwrap();
 
-        assert_eq!(read_plan(fake, None).await, Read::NoPlan);
+        assert_eq!(read_plan(fake, None, false).await, Read::NoPlan);
 
         // The answer comes back first; the child goes on to exit on its own.
         assert_eq!(read_fifo(&saved).await, "refreshed\n");
@@ -855,7 +916,7 @@ mod plan_tests {
         );
         orx_test_support::write_executable(&fake, script, 0o755).unwrap();
 
-        let read = tokio::spawn(read_plan(fake, None));
+        let read = tokio::spawn(read_plan(fake, None, true));
         assert_eq!(read_fifo(&started).await, "started\n");
         read.abort();
         write_fifo(&go).await;
@@ -868,7 +929,7 @@ mod plan_tests {
     async fn a_claude_that_is_gone_or_silent_says_which() {
         let dir = crate::local::git::TemporaryDirectory::new("orx-claude-silent").unwrap();
         let missing = dir.path().join("claude");
-        let Read::Failed(message) = read_plan(missing.clone(), None).await else {
+        let Read::Failed(message) = read_plan(missing.clone(), None, true).await else {
             panic!("a missing binary is a failed read");
         };
         assert!(
@@ -879,7 +940,7 @@ mod plan_tests {
 
         let exits = dir.path().join("exits");
         orx_test_support::write_executable(&exits, "#!/bin/sh\nread request\n", 0o755).unwrap();
-        let Read::Failed(message) = read_plan(exits, None).await else {
+        let Read::Failed(message) = read_plan(exits, None, true).await else {
             panic!("an agent that exits is a failed read");
         };
         assert!(message.contains("exited"), "{message}");
@@ -1090,7 +1151,7 @@ pub(crate) const CLAUDE_ENTRYPOINT: &str = "openresearch";
 /// Either credential Claude Code accepts. `ANTHROPIC_AUTH_TOKEN` is the one a
 /// custom `ANTHROPIC_BASE_URL` gateway uses, so detecting only the api key
 /// reports those working setups as signed out.
-const CLAUDE_CREDENTIAL_VARS: [&str; 2] = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
+pub(super) const CLAUDE_CREDENTIAL_VARS: [&str; 2] = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
 
 fn has_api_credential() -> bool {
     CLAUDE_CREDENTIAL_VARS
@@ -1129,6 +1190,52 @@ fn billing_label(
 /// through from the catalog; a CLI too old to know them exits non-zero, and
 /// the error carries what it printed.
 async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
+    let out = claude_one_shot_output(bin, request, &[]).await?;
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// A one-shot's reply and usage from `-p --output-format json`: one result object.
+async fn claude_one_shot_reply(bin: &Path, request: OneShot<'_>) -> Result<OneShotReply> {
+    let out = claude_one_shot_output(bin, request, &["--output-format", "json"]).await?;
+    claude_result_reply(&out)
+}
+
+fn claude_result_reply(out: &[u8]) -> Result<OneShotReply> {
+    let result: Value = serde_json::from_slice(out).map_err(|error| {
+        anyhow!(
+            "Claude Code answered something other than its JSON result ({error}): {}",
+            super::one_line(&String::from_utf8_lossy(out), 200)
+        )
+    })?;
+    let text = result["result"].as_str().unwrap_or_default().to_owned();
+    if result["error"] == "authentication_failed" {
+        return Err(super::OneShotAuthError.into());
+    }
+    if result["is_error"] == true {
+        return Err(super::one_shot_request_error(&super::one_line(&text, 300)));
+    }
+    let usage = &result["usage"];
+    let input = [
+        "input_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    ]
+    .iter()
+    .filter_map(|key| usage[key].as_u64())
+    .sum();
+    let usage = usage.is_object().then(|| OneShotUsage {
+        input_tokens: input,
+        output_tokens: usage["output_tokens"].as_u64().unwrap_or_default(),
+        cost_usd: result["total_cost_usd"].as_f64(),
+    });
+    Ok(OneShotReply { text, usage })
+}
+
+async fn claude_one_shot_output(
+    bin: &Path,
+    request: OneShot<'_>,
+    extra: &[&str],
+) -> Result<Vec<u8>> {
     let model = match request.quality {
         OneShotQuality::Cheap => "haiku",
         OneShotQuality::Standard => "sonnet",
@@ -1150,6 +1257,13 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
         "--strict-mcp-config",
         "--tools",
         "",
+        // Only the home's own settings: a project's, found in any folder above the working
+        // directory (a `.claude` in the user's home among them), would bring its memory along.
+        "--setting-sources",
+        "user",
+        // Nor the user's hooks: a sound, a notification or a hook's output on every look.
+        "--settings",
+        r#"{"disableAllHooks":true}"#,
         // Replace the agent system prompt: the default hauls ~8.5k tokens of
         // Claude Code scaffolding into a request that ignores it (measured
         // 8.5k → 1.9k input for titles). Latency is unchanged — the ~3s is
@@ -1157,6 +1271,7 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
         "--system-prompt",
         request.system,
     ])
+    .args(extra)
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
@@ -1166,19 +1281,32 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
     .current_dir(std::env::temp_dir());
     prepare_env(&mut cmd);
     cmd.env("CLAUDE_CODE_ENTRYPOINT", CLAUDE_ENTRYPOINT);
-    if let Some(profile) = request.profile {
+    let (home, name) = if let Some(profile) = request.profile {
         crate::local::agent_profiles::home(profile, "claude-code")?;
-        cmd.envs(crate::local::agent_profiles::login_env(profile)?);
+        let env = crate::local::agent_profiles::login_env(profile)?;
+        let home = env
+            .iter()
+            .find(|(key, _)| *key == "CLAUDE_CONFIG_DIR")
+            .map(|(_, home)| PathBuf::from(home))
+            .ok_or_else(|| anyhow!("agent account {profile} has no Claude Code home"))?;
+        cmd.envs(env);
+        (home, profile)
     } else {
-        cmd.env(
-            "CLAUDE_CONFIG_DIR",
-            native_store::prepare_claude(NativeStore::Isolated)?,
-        );
         cmd.env(
             "CLAUDE_SECURESTORAGE_CONFIG_DIR",
             native_store::claude_secure_storage_config_dir(),
         );
-    }
+        (
+            native_store::prepare_claude(NativeStore::Isolated)?,
+            "claude",
+        )
+    };
+    // A one-shot brings its own context: the user's memory, skills and plugins would add
+    // thousands of tokens to every request.
+    cmd.env(
+        "CLAUDE_CONFIG_DIR",
+        native_store::prepare_claude_one_shot(&home, name)?,
+    );
     // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR) would
     // otherwise write escape codes straight into the reply.
     cmd.env("NO_COLOR", "1");
@@ -1187,13 +1315,26 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
         .await
         .ok_or_else(|| anyhow!("timed out after {}s", request.timeout.as_secs()))??;
     if !out.status.success() {
+        // A JSON result says why in its own words.
+        let said = serde_json::from_slice::<Value>(&out.stdout).ok();
+        if said
+            .as_ref()
+            .is_some_and(|said| said["error"] == "authentication_failed")
+        {
+            return Err(super::OneShotAuthError.into());
+        }
+        if let Some(why) = said
+            .as_ref()
+            .and_then(|said| said["result"].as_str())
+            .filter(|why| !why.trim().is_empty())
+        {
+            return Err(super::one_shot_request_error(&super::one_line(why, 300)));
+        }
         // `-p` prints request failures (bad model, signed out) on stdout; stderr is diagnostics.
-        return Err(super::one_shot_exit_error(
-            out.status,
-            &[&out.stdout, &out.stderr],
-        ));
+        let error = super::one_shot_exit_error(out.status, &[&out.stdout, &out.stderr]);
+        return Err(super::one_shot_request_error(&error.to_string()));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    Ok(out.stdout)
 }
 
 /// Every `claude` install, in preference order.
@@ -1278,7 +1419,8 @@ impl ClaudeCode {
             info.needs_config_repair = probe.credential_conflict;
             if info.auth_state == HarnessAuthState::Ready {
                 info.authenticated = true;
-                if probe.method == Some("oauth") {
+                // A token's account is not the saved login's, whose files may be left over.
+                if probe.method == Some("oauth") && !probe.token {
                     let credential_tier = if cfg!(target_os = "macos") {
                         None
                     } else {
@@ -1387,6 +1529,18 @@ impl Harness for ClaudeCode {
         true
     }
 
+    fn supports_resume(&self) -> bool {
+        true
+    }
+
+    async fn adopt(
+        &self,
+        chat: &std::sync::Arc<crate::local::chat::ChatHost>,
+        adoption: super::Adoption,
+    ) -> Result<()> {
+        chat.claude.adopt(chat, adoption).await
+    }
+
     async fn compact(&self, ctx: &CompactCtx) -> Result<CompactOutcome> {
         let Some(native_id) = ctx.native_session_id.clone() else {
             return Ok(CompactOutcome::Fallback);
@@ -1456,13 +1610,23 @@ impl Harness for ClaudeCode {
             .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()))
     }
 
-    async fn one_shot(&self, request: OneShot<'_>) -> Result<String> {
+    async fn run_one_shot(&self, request: OneShot<'_>) -> Result<String> {
         let bin = find_claude().ok_or_else(|| anyhow!("{} is not installed", self.name()))?;
         claude_one_shot(&bin, request).await
     }
 
     fn one_shot_honours_model(&self) -> bool {
         false
+    }
+
+    /// `--tools ""` leaves the child no tool to call, and `--strict-mcp-config` no server.
+    fn runs_without_tools(&self) -> bool {
+        true
+    }
+
+    async fn one_shot_without_tools(&self, request: OneShot<'_>) -> Result<OneShotReply> {
+        let bin = find_claude().ok_or_else(|| anyhow!("{} is not installed", self.name()))?;
+        claude_one_shot_reply(&bin, request).await
     }
 
     fn options(&self) -> HarnessOptions {
@@ -1571,6 +1735,7 @@ impl Harness for ClaudeCode {
                 // bridge request is denied into the dying child, harmlessly.
                 ("plan", true) => {
                     let (text, mode) = synthesize_resume("plan", answer);
+                    check_full_access(mode)?;
                     Ok(ResumeAction::SendMessage {
                         text,
                         mode,
@@ -1607,6 +1772,16 @@ impl Harness for ClaudeCode {
             return Ok(ResumeAction::Nothing);
         }
         let (text, mode) = synthesize_resume(&prompt.kind, answer);
+        let session_mode = || -> Result<Option<PermissionMode>> {
+            let session = crate::store::Store::open()?.get_chat_session(&ctx.session_id)?;
+            Ok(session
+                .and_then(|session| session.permission_mode)
+                .and_then(|id| PermissionMode::from_id(&id)))
+        };
+        check_full_access(match mode {
+            Some(mode) => Some(mode),
+            None => session_mode()?,
+        })?;
         // Reject an empty resume (e.g. a question answered with no selection and
         // no note) so `respond` leaves the card actionable.
         if text.trim().is_empty() {
@@ -1772,6 +1947,64 @@ pub(crate) fn claude_permission_mode(mode: Option<PermissionMode>) -> &'static s
     }
 }
 
+/// Whether Claude may run with full access on this machine. Claude Code refuses
+/// its skip-permissions flags as root unless `IS_SANDBOX=1` declares the machine
+/// disposable, so as root that needs the user's confirmation first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FullAccess {
+    Allowed,
+    NeedsRootConsent,
+    RootConsented,
+}
+
+pub(crate) fn full_access() -> FullAccess {
+    if !runs_as_root() {
+        FullAccess::Allowed
+    } else if crate::telemetry::claude_root_full_access() {
+        FullAccess::RootConsented
+    } else {
+        FullAccess::NeedsRootConsent
+    }
+}
+
+/// Bypass permissions was asked for as root before the user confirmed it.
+#[derive(Debug)]
+pub(crate) struct RootBypassUnconfirmed;
+
+impl std::fmt::Display for RootBypassUnconfirmed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "Bypass permissions needs your confirmation on this machine because OpenResearch \
+             runs as root. Choose Bypass permissions in the permissions menu to confirm, or pick \
+             another mode.",
+        )
+    }
+}
+
+impl std::error::Error for RootBypassUnconfirmed {}
+
+/// Refuses `mode` when it is bypass and Claude may not bypass permissions here yet.
+pub(crate) fn check_full_access(mode: Option<PermissionMode>) -> Result<()> {
+    if mode == Some(PermissionMode::Bypass) && full_access() == FullAccess::NeedsRootConsent {
+        return Err(RootBypassUnconfirmed.into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) static TEST_RUNS_AS_ROOT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn runs_as_root() -> bool {
+    #[cfg(test)]
+    return TEST_RUNS_AS_ROOT.load(std::sync::atomic::Ordering::Relaxed);
+    // SAFETY: getuid has no failure mode. Claude checks the real uid too.
+    #[cfg(all(unix, not(test)))]
+    return unsafe { libc::getuid() } == 0;
+    #[cfg(all(not(unix), not(test)))]
+    false
+}
+
 pub(crate) fn uses_permission_bridge(mode: Option<PermissionMode>) -> bool {
     matches!(
         mode.unwrap_or(PermissionMode::Auto),
@@ -1793,7 +2026,6 @@ const PLAN_SETTINGS_REL: &str = ".openresearch/agent/claude-plan-settings.json";
 /// and each config names its own chat. Same git-excluded agent dir.
 const MCP_CONFIG_DIR_REL: &str = ".openresearch/agent";
 
-// Attribution updates input without granting permission; plan decisions stay separate.
 pub(crate) fn write_settings(repo: &std::path::Path, plan: bool) -> Result<PathBuf> {
     let orx = crate::paths::spawnable_exe()
         .map_err(|e| anyhow!("cannot resolve orx binary path for native hooks: {e}"))?;
@@ -1804,9 +2036,7 @@ pub(crate) fn write_settings(repo: &std::path::Path, plan: bool) -> Result<PathB
             crate::jobs::ssh::sh_quote(&orx.to_string_lossy())
         ),
     }]);
-    let mut hooks = vec![
-        serde_json::json!({"matcher":"Bash","hooks":[{"type":"command","command":format!("{} invocation-gate", crate::jobs::ssh::sh_quote(&orx.to_string_lossy()))}]}),
-    ];
+    let mut hooks = Vec::new();
     if plan {
         hooks.push(serde_json::json!({"matcher":"Bash","hooks":hook}));
         hooks.push(serde_json::json!({"matcher":"ExitPlanMode","hooks":hook}));
@@ -2133,8 +2363,9 @@ fn observe_turn_boundary(event: &Value, text: &str, saw_user_echo: &mut bool) ->
 /// store-free so the caller (not the fold) owns every side effect — the native
 /// session id is committed only after an accepted attempt, and every flush happens there
 /// too, which is what lets the fold run against a bare `TurnCtx::test_stub()` in
-/// the fixture tests.
-#[derive(Default)]
+/// the fixture tests. A checkpoint saves it, so its fields only grow.
+#[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 struct TurnState {
     /// Whether this child was spawned with the `orx mcp` bridge active. With the
     /// bridge on, ExitPlanMode / AskUserQuestion come from the bridge (held,
@@ -2156,7 +2387,8 @@ struct TurnState {
     /// Any real output or tool activity makes transparent resubmission unsafe.
     had_activity: bool,
     /// The last non-empty assistant text block — the plan, if the model wrote
-    /// one as plain text.
+    /// one as plain text. A resumed turn reads it back from the transcript.
+    #[serde(skip)]
     last_text: String,
     /// The provisional native session id from the latest `system/init` or
     /// `result`. An auth-failed attempt never commits it to the store.
@@ -2193,6 +2425,8 @@ struct TurnState {
     saw_background_task: bool,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PendingTask {
     tool_use_id: Option<String>,
 }
@@ -2446,9 +2680,6 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
             _ => {}
         },
         Some("assistant") => {
-            if let Some(message) = event.get("message") {
-                ctx.record_native_invocations(message);
-            }
             if let Some(message) = event.get("message") {
                 record_message(ctx, message);
             }
@@ -2967,12 +3198,74 @@ const FIRST_EVENT_TIMEOUT: Duration = Duration::from_secs(120);
 /// by the CLI, so it arrives within milliseconds when it exists at all.
 const BACKGROUND_RESUME_GRACE: Duration = Duration::from_secs(3);
 
+/// How far a Claude turn has got, saved with each checkpoint for a successor to go on from.
+/// Stored with the turn, so its fields only grow.
+#[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct Progress {
+    turn: TurnState,
+    saw_user_echo: bool,
+    saw_event: bool,
+    folds_before_echo: bool,
+    /// The prompt, until Claude echoes it back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt: Option<String>,
+    /// The turn's result is applied; only a segment already under way can extend it.
+    finishing: bool,
+    /// Steers written to the child that it may not have read yet.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    steers: Vec<crate::local::chat::SteerMessage>,
+}
+
+/// Commits the transcript with a checkpoint at `applied`.
+fn checkpoint(
+    ctx: &mut TurnCtx,
+    keeper: &crate::keep::KeptHandle,
+    applied: u64,
+    progress: &Progress,
+) {
+    if let Err(error) = ctx.flush_at(keeper, applied, progress) {
+        eprintln!("orx up: could not save turn {}: {error:#}", ctx.turn_id);
+    }
+}
+
 async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u64)> {
+    let resume = ctx.resume.take();
     let resumed_alone = ctx.continuation;
     let forking = spec.fork_at.is_some();
-    let (route, mut rx) = loop {
-        if resumed_alone {
-            break ctx
+    let (route, mut rx, progress) = match resume {
+        Some(resume) => {
+            let mut progress: Progress = serde_json::from_value(resume.state).map_err(|error| {
+                anyhow!("Claude Code's checkpoint for this turn is unreadable: {error}")
+            })?;
+            progress.turn.last_text = ctx
+                .assistant
+                .parts
+                .iter()
+                .rev()
+                .filter(|part| part.kind == "text")
+                .find_map(|part| part.text.clone().filter(|text| !text.trim().is_empty()))
+                .unwrap_or_default();
+            let (route, rx) = ctx
+                .host
+                .claude
+                .resume_turn(&ctx.session_id, &resume.keep_id)
+                .await
+                .ok_or_else(|| anyhow!("Claude Code stopped before this turn could resume"))?;
+            let sent = std::mem::take(&mut progress.steers);
+            match ctx.host.hold_steers(&ctx.session_id, sent) {
+                Ok(held) => progress.steers = held,
+                // They run as queued messages instead.
+                Err(error) => eprintln!(
+                    "orx up: could not hold the steers turn {} sent before the restart: {error:#}",
+                    ctx.turn_id
+                ),
+            }
+            route.client().hold_steers(&progress.steers);
+            (route, rx, Some(progress))
+        }
+        None if resumed_alone => {
+            let (route, rx) = ctx
                 .host
                 .claude
                 .take_continuation(&ctx.session_id)
@@ -2980,51 +3273,87 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                 .ok_or_else(|| {
                     anyhow!("Claude Code stopped before what it wrote on its own could be recorded")
                 })?;
+            (route, rx, None)
         }
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let acquire = ctx.host.claude.acquire_turn(spec.clone(), tx);
-        let result = match ctx.orx_retry_remaining() {
-            Some(remaining) => tokio::time::timeout(remaining, acquire)
-                .await
-                .map_err(|_| anyhow!("Claude Code setup exceeded the ORX retry budget"))?,
-            None => acquire.await,
-        };
-        match result {
-            Ok(route) => {
-                ctx.clear_retry_status();
-                break (route, rx);
+        None => loop {
+            // Outside the retry budget: the check's own timeout bounds it.
+            let settling = std::time::Instant::now();
+            ctx.host.claude.settle_auth(&spec).await;
+            if let Some(started) = ctx.orx_retry_started.as_mut() {
+                *started += settling.elapsed();
             }
-            Err(error) => {
-                ctx.host.claude.kill_session(&ctx.session_id).await;
-                let signed_out = error.downcast_ref::<super::SignedOut>().is_some();
-                let retry = (!signed_out)
-                    .then(|| ctx.schedule_orx_retry(None))
-                    .flatten();
-                let Some((retry_number, delay)) = retry else {
-                    let kind = if signed_out {
-                        "claude_signed_out"
-                    } else {
-                        "claude_setup"
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let acquire = ctx.host.claude.acquire_turn(spec.clone(), tx);
+            let result = match ctx.orx_retry_remaining() {
+                Some(remaining) => tokio::time::timeout(remaining, acquire)
+                    .await
+                    .map_err(|_| anyhow!("Claude Code setup exceeded the ORX retry budget"))?,
+                None => acquire.await,
+            };
+            match result {
+                Ok(route) => {
+                    ctx.clear_retry_status();
+                    break (route, rx, None);
+                }
+                Err(error) => {
+                    ctx.host.claude.kill_session(&ctx.session_id).await;
+                    let signed_out = error.downcast_ref::<super::SignedOut>().is_some();
+                    let refused = error.downcast_ref::<RootBypassUnconfirmed>().is_some();
+                    let retry = (!signed_out && !refused)
+                        .then(|| ctx.schedule_orx_retry(None))
+                        .flatten();
+                    let Some((retry_number, delay)) = retry else {
+                        let kind = if signed_out {
+                            "claude_signed_out"
+                        } else {
+                            "claude_setup"
+                        };
+                        ctx.mark_setup_failure(kind, &error);
+                        return Err(error);
                     };
-                    ctx.mark_setup_failure(kind, &error);
-                    return Err(error);
-                };
-                ctx.show_retry_status(
-                    "orx",
-                    "Restarting Claude Code",
-                    retry_number as i64 + 1,
-                    Some(ORX_MAX_ATTEMPTS as i64),
-                    Some(crate::store::now_ms() + delay.as_millis() as i64),
-                );
-                tokio::time::sleep(delay).await;
+                    eprintln!(
+                        "orx up: Claude Code setup for turn {} failed, retrying: {error:#}",
+                        ctx.turn_id
+                    );
+                    ctx.show_retry_status(
+                        "orx",
+                        "Restarting Claude Code",
+                        retry_number as i64 + 1,
+                        Some(ORX_MAX_ATTEMPTS as i64),
+                        Some(crate::store::now_ms() + delay.as_millis() as i64),
+                    );
+                    tokio::time::sleep(delay).await;
+                }
             }
-        }
+        },
     };
     let client = route.client();
+    let keeper = client.keeper();
+    let mut applied = route.start();
     let auth_generation = client.auth_generation();
-    let bridge_active = client.config().bridge_active;
-    ctx.begin_native_usage_attempt(&format!("claude-{}:", ctx.attempt_count_for_usage()))?;
-    if !resumed_alone {
+    let resumed = progress.is_some();
+    let mut progress = progress.unwrap_or_else(|| Progress {
+        turn: TurnState {
+            bridge_active: client.config().bridge_active,
+            ..Default::default()
+        },
+        // A continuation has no prompt: everything the child writes is the turn.
+        saw_user_echo: resumed_alone,
+        // On a child that has served a turn, a segment it starts on its own before
+        // the prompt's echo, held or not, is folded in; its `result` ends nothing.
+        folds_before_echo: route.served() && !resumed_alone,
+        prompt: (!resumed_alone).then(|| ctx.text.clone()),
+        ..Default::default()
+    });
+    if let Some(execution) = ctx.usage_execution_id().filter(|_| !resumed) {
+        crate::store::Store::open()?.begin_native_usage_attempt(
+            execution,
+            &format!("claude-{}:", ctx.attempt_count_for_usage()),
+            "claude-code",
+            ctx.native_session_id.as_deref(),
+        )?;
+    }
+    if !resumed && !resumed_alone {
         ctx.persist_delivery(DeliveryState::Unknown)?;
         if let Err(e) = client.send_user_message(&ctx.text).await {
             ctx.host.claude.kill_session(&ctx.session_id).await;
@@ -3037,25 +3366,72 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                 log.display()
             ));
         }
+        // A successor waits for the prompt's echo instead of sending it again.
+        checkpoint(ctx, keeper, applied, &progress);
     }
 
-    let mut state = TurnState {
-        bridge_active,
-        ..Default::default()
-    };
-    let mut saw_event = false;
-    // A continuation has no prompt: everything the child writes is the turn.
-    let mut saw_user_echo = resumed_alone;
-    // On a child that has served a turn, a segment it starts on its own before
-    // the prompt's echo, held or not, is folded in; its `result` ends nothing.
-    let folds_before_echo = route.served() && !resumed_alone;
     // Absolute, so steering can't push it back: a wedged child that the user
     // keeps typing at must still trip the detector.
-    let mut deadline = tokio::time::Instant::now() + FIRST_EVENT_TIMEOUT;
+    let mut deadline = tokio::time::Instant::now()
+        + if progress.saw_event {
+            super::TURN_WATCHDOG
+        } else {
+            FIRST_EVENT_TIMEOUT
+        };
     // An event received during the post-result grace wait below, replayed at
     // the top of the next iteration.
     let mut queued: Option<TurnEvent> = None;
     loop {
+        if progress.finishing {
+            // The turn goes on only into another segment's `init`: one
+            // already waiting (a second held segment) or, after background
+            // sub-agents, the report the CLI queues as a fresh segment
+            // right after the result. A quiet window means the report was
+            // already delivered in this segment; a failed turn has nothing
+            // to resume. Task updates before that `init` are applied, and
+            // a closed child just ends the finished turn. The route ends
+            // only once nothing more is queued for it, so a segment that
+            // starts as the turn ends is held for another turn, not lost.
+            let grace = progress.turn.saw_background_task && !progress.turn.turn_errored;
+            if grace {
+                checkpoint(ctx, keeper, applied, &progress);
+            }
+            let until = tokio::time::Instant::now()
+                + if grace {
+                    BACKGROUND_RESUME_GRACE
+                } else {
+                    Duration::ZERO
+                };
+            let next_segment = loop {
+                let event = match tokio::time::timeout_at(until, rx.recv()).await {
+                    Ok(event) => event,
+                    Err(_) => {
+                        // What the turn applied is durable before the reader takes over.
+                        checkpoint(ctx, keeper, applied, &progress);
+                        route.end(&mut rx)
+                    }
+                };
+                match event {
+                    Some(TurnEvent::Line(line, offset)) if starts_segment(&line) => {
+                        break Some(TurnEvent::Line(line, offset))
+                    }
+                    Some(TurnEvent::Line(line, offset)) => {
+                        apply_event(ctx, &mut progress.turn, &line);
+                        applied = offset;
+                    }
+                    Some(TurnEvent::Closed) => {
+                        ctx.host.claude.kill_session(&ctx.session_id).await;
+                        break None;
+                    }
+                    None => break None,
+                }
+            };
+            let Some(init) = next_segment else {
+                break;
+            };
+            progress.finishing = false;
+            queued = Some(init);
+        }
         // A continuation stashed by the grace wait replays without waiting.
         // Otherwise `steering` is borrowed out of `ctx` so the borrow ends with
         // the select — the steer arm's handler needs `&mut ctx`.
@@ -3073,17 +3449,26 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
         };
         let event = match waited {
             Waited::Flush => {
-                let _ = ctx.flush();
+                checkpoint(ctx, keeper, applied, &progress);
                 continue;
             }
             Waited::Steer(steer) => {
                 // Released steers already run as queued messages. The child
                 // replays one when the model reads it, which records it; a
                 // failed write means the child is gone and the turn errors out.
-                if ctx.host.steer_pending(&ctx.session_id, &steer.id)
-                    && client.send_steer(&steer).await.is_err()
-                {
-                    ctx.host.release_steer(&ctx.session_id, &steer.id);
+                // Checkpointed before the write, so a hand-off that cuts it short
+                // leaves the successor holding the steer, released if never read.
+                if ctx.host.steer_pending(&ctx.session_id, &steer.id) {
+                    let host = ctx.host.clone();
+                    progress
+                        .steers
+                        .retain(|sent| host.steer_pending(&ctx.session_id, &sent.id));
+                    progress.steers.push(steer.clone());
+                    checkpoint(ctx, keeper, applied, &progress);
+                    if client.send_steer(&steer).await.is_err() {
+                        ctx.host.release_steer(&ctx.session_id, &steer.id);
+                        progress.steers.retain(|sent| sent.id != steer.id);
+                    }
                 }
                 continue;
             }
@@ -3095,7 +3480,7 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
             // absolute deadline would spin this arm instead of waiting.
             Waited::Event(Err(_)) if ctx.host.has_pending_permission(&ctx.session_id) => {
                 deadline = tokio::time::Instant::now()
-                    + if saw_event {
+                    + if progress.saw_event {
                         super::TURN_WATCHDOG
                     } else {
                         FIRST_EVENT_TIMEOUT
@@ -3103,10 +3488,10 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                 continue;
             }
             Waited::Event(Err(_)) => {
-                commit_attempt_session(ctx, &state);
+                commit_attempt_session(ctx, &progress.turn);
                 ctx.host.claude.interrupt_session(&ctx.session_id).await;
                 let _ = ctx.flush();
-                let (what, hint) = if saw_event {
+                let (what, hint) = if progress.saw_event {
                     (
                         format!(
                             "went quiet for {} minutes",
@@ -3131,86 +3516,47 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
             break;
         };
         match event {
-            TurnEvent::Line(value) => {
+            TurnEvent::Line(value, offset) => {
+                let prompt = progress.prompt.as_deref().unwrap_or_default();
                 let (belongs, accepted_now) =
-                    observe_turn_boundary(&value, &ctx.text, &mut saw_user_echo);
+                    observe_turn_boundary(&value, prompt, &mut progress.saw_user_echo);
                 if accepted_now {
+                    progress.prompt = None;
                     ctx.mark_delivery(DeliveryState::Accepted);
                 }
-                if accepted_now && folds_before_echo {
+                if accepted_now && progress.folds_before_echo {
                     // A folded segment's failure was its own; the prompt's result decides this turn.
-                    state.turn_errored = false;
-                    state.usage_limited = false;
-                    state.auth_failed = false;
+                    progress.turn.turn_errored = false;
+                    progress.turn.usage_limited = false;
+                    progress.turn.auth_failed = false;
                     ctx.terminal_error = None;
                 }
-                let folded = folds_before_echo && !accepted_now;
+                let folded = progress.folds_before_echo && !accepted_now;
+                progress.saw_event = true;
+                applied = offset;
                 if !belongs && !folded {
-                    saw_event = true;
                     if starts_segment(&value) {
                         if let Some(sid) = value.get("session_id").and_then(Value::as_str) {
-                            state.native_session_id = Some(sid.to_string());
+                            progress.turn.native_session_id = Some(sid.to_string());
                         }
                     }
                     continue;
                 }
-                saw_event = true;
-                let done = apply_event(ctx, &mut state, &value) && saw_user_echo;
-                if state.had_activity {
-                    commit_attempt_session(ctx, &state);
+                progress.finishing =
+                    apply_event(ctx, &mut progress.turn, &value) && progress.saw_user_echo;
+                if progress.turn.had_activity {
+                    commit_attempt_session(ctx, &progress.turn);
                 }
-                ctx.maybe_flush();
-                if done {
-                    // The turn goes on only into another segment's `init`: one
-                    // already waiting (a second held segment) or, after background
-                    // sub-agents, the report the CLI queues as a fresh segment
-                    // right after the result. A quiet window means the report was
-                    // already delivered in this segment; a failed turn has nothing
-                    // to resume. Task updates before that `init` are applied, and
-                    // a closed child just ends the finished turn. The route ends
-                    // only once nothing more is queued for it, so a segment that
-                    // starts as the turn ends is held for another turn, not lost.
-                    let grace = state.saw_background_task && !state.turn_errored;
-                    if grace {
-                        let _ = ctx.flush();
-                    }
-                    let until = tokio::time::Instant::now()
-                        + if grace {
-                            BACKGROUND_RESUME_GRACE
-                        } else {
-                            Duration::ZERO
-                        };
-                    let next_segment = loop {
-                        let event = match tokio::time::timeout_at(until, rx.recv()).await {
-                            Ok(event) => event,
-                            Err(_) => route.end(&mut rx),
-                        };
-                        match event {
-                            Some(TurnEvent::Line(line)) if starts_segment(&line) => {
-                                break Some(line)
-                            }
-                            Some(TurnEvent::Line(line)) => {
-                                apply_event(ctx, &mut state, &line);
-                            }
-                            Some(TurnEvent::Closed) => {
-                                ctx.host.claude.kill_session(&ctx.session_id).await;
-                                break None;
-                            }
-                            None => break None,
-                        }
-                    };
-                    let Some(init) = next_segment else {
-                        break;
-                    };
-                    queued = Some(TurnEvent::Line(init));
-                }
+                // A card answered before a restart is not posted again to set this anew.
+                progress.turn.saw_prompt |= ctx.host.bridge_prompted(&ctx.session_id);
+                ctx.maybe_flush_at(keeper, applied, &progress);
             }
             TurnEvent::Closed => {
-                commit_attempt_session(ctx, &state);
+                commit_attempt_session(ctx, &progress.turn);
                 ctx.host.claude.kill_session(&ctx.session_id).await;
                 let _ = ctx.flush();
                 let log = crate::store::data_dir().join("agent-claude.log");
-                if forking && !saw_user_echo {
+                if forking && !progress.saw_user_echo {
                     return Err(abandon_fork(ctx, &spec, &log));
                 }
                 return Err(anyhow!("claude exited mid-turn; see {}", log.display()));
@@ -3218,6 +3564,7 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
         }
     }
 
+    let state = progress.turn;
     if !state.saw_result {
         commit_attempt_session(ctx, &state);
         ctx.host.claude.kill_session(&ctx.session_id).await;
@@ -3228,7 +3575,7 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
         ));
     }
 
-    if state.auth_failed && !saw_user_echo {
+    if state.auth_failed && !progress.saw_user_echo {
         ctx.mark_delivery(DeliveryState::Rejected);
     }
     commit_attempt_session(ctx, &state);
@@ -3308,8 +3655,11 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     // Sweep zombie HELD cards (native_id) a crashed/restarted process left
     // unresolved: they can never be answered again, and once this turn makes the
     // session busy one could capture the composer's typed-text routing. End-turn
-    // cards are deliberately left alone — they resume via --resume.
-    let _ = ctx.host.resolve_stale_prompts(&ctx.session_id, true);
+    // cards are deliberately left alone — they resume via --resume. A resumed
+    // turn's held cards are still live: their requests are posted again.
+    if ctx.resume.is_none() {
+        let _ = ctx.host.resolve_stale_prompts(&ctx.session_id, true);
+    }
 
     let native_session = match ctx.native_session_id.clone() {
         Some(id) => tokio::task::spawn_blocking(move || native_store::claude_session(&id))
@@ -3328,7 +3678,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         .clone()
         .filter(|_| native_session.is_some());
     let fork_at = ctx.native_fork_at.clone().filter(|_| resume.is_some());
-    if ctx.native_session_id.is_some() && resume.is_none() {
+    if ctx.native_session_id.is_some() && resume.is_none() && ctx.resume.is_none() {
         if let Some(recovery) = super::native_recovery_context(ctx, "Claude Code")? {
             ctx.text = format!("{recovery}\n\n{}", ctx.text);
         }
@@ -3530,6 +3880,262 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(5), run_attempt(&mut ctx, spec)).await;
         claude.shutdown().await;
         (ctx, attempt.expect("the turn ends"))
+    }
+
+    /// A turn on `chat` that runs and resumes in the store, as a durable one would.
+    #[cfg(unix)]
+    fn resumable_ctx(
+        chat: &Arc<crate::local::chat::ChatHost>,
+        session: &str,
+        text: &str,
+    ) -> TurnCtx {
+        let mut ctx = TurnCtx::test_stub();
+        ctx.host = chat.clone();
+        ctx.session_id = session.into();
+        ctx.turn_id = format!("turn-{session}");
+        ctx.assistant.id = format!("msg-{session}");
+        ctx.text = text.into();
+        ctx
+    }
+
+    #[cfg(unix)]
+    fn worker_spec(ctx: &TurnCtx, client: &crate::local::claude::ClaudeClient) -> SpawnSpec {
+        SpawnSpec {
+            chat: ctx.host.clone(),
+            session_id: ctx.session_id.clone(),
+            repo: PathBuf::new(),
+            playbook: PathBuf::new(),
+            resume: None,
+            fork_at: None,
+            config: client.config(),
+        }
+    }
+
+    /// Runs a turn on a fake Claude until `ready` holds for what the store has saved, then
+    /// types `then` to it and stops this server mid-turn; a new server adopts the child,
+    /// resumes the turn from its checkpoint and types `resume`.
+    #[cfg(unix)]
+    async fn turn_across_restart(
+        script: &str,
+        ready: impl Fn(&crate::store::StoredTurnCheckpoint, &[WirePart]) -> bool,
+        then: Option<&str>,
+        resume: &str,
+    ) -> (TurnCtx, Result<(TurnState, u64)>) {
+        use crate::local::claude::tests::{
+            adopt_in, chat_with, leave_for_successor, ready_host, scripted_worker, type_line,
+        };
+        let session = format!("resume-{}", uuid::Uuid::new_v4());
+        let host = ready_host();
+        let chat = chat_with(&host);
+        let worker = scripted_worker(&host, &session, script, Arc::downgrade(&chat)).await;
+        let mut ctx = resumable_ctx(&chat, &session, "the prompt");
+        let spec = worker_spec(&ctx, &worker);
+        let (turn_id, message_id) = (ctx.turn_id.clone(), ctx.assistant.id.clone());
+        let first = tokio::spawn(async move { run_attempt(&mut ctx, spec).await.map(|_| ()) });
+
+        let store = crate::store::Store::open().unwrap();
+        let saved = || {
+            let checkpoint = store.chat_turn_checkpoint(&turn_id).unwrap()?;
+            let parts: Vec<WirePart> = store
+                .get_chat_message(&message_id)
+                .unwrap()
+                .map(|message| serde_json::from_str(&message.parts_json).unwrap())
+                .unwrap_or_default();
+            Some((checkpoint, parts))
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !saved().is_some_and(|(checkpoint, parts)| ready(&checkpoint, &parts)) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the turn reaches its checkpoint");
+        if let Some(then) = then {
+            type_line(&worker, then).await;
+        }
+        first.abort();
+        let _ = first.await;
+        leave_for_successor(&worker);
+
+        let (checkpoint, parts) = saved().unwrap();
+        let successor = chat_with(&ready_host());
+        let adopted = adopt_in(&successor, &worker, Some(checkpoint.offset))
+            .await
+            .unwrap();
+        let mut ctx = resumable_ctx(&successor, &session, "the prompt, rendered anew");
+        ctx.assistant.parts = parts;
+        ctx.restore_checkpoint(&checkpoint).unwrap();
+        type_line(&adopted, resume).await;
+        let spec = worker_spec(&ctx, &adopted);
+        let attempt =
+            tokio::time::timeout(Duration::from_secs(10), run_attempt(&mut ctx, spec)).await;
+        successor.claude.shutdown().await;
+        (ctx, attempt.expect("the resumed turn ends"))
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_turn_resumes_mid_stream_on_the_next_server_without_losing_or_repeating_parts() {
+        let script = r#"while IFS= read -r line; do
+            case "$line" in
+            *'"type":"user"'*)
+                printf '%s\n' "$line" '{"type":"system","subtype":"init","session_id":"native"}' '{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}' ;;
+            STEP)
+                printf '%s\n' '{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"BETWEEN"}]}}' ;;
+            GO)
+                printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"files"}]}}' '{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"DONE"}]}}' '{"type":"result","subtype":"success","session_id":"native"}' ;;
+            esac
+        done"#;
+        let (ctx, attempt) = turn_across_restart(
+            script,
+            |_, parts| parts.iter().any(|part| part.id == "t1"),
+            Some("STEP"),
+            "GO",
+        )
+        .await;
+        let (state, _) = attempt.unwrap();
+        assert!(state.saw_result);
+        assert_eq!(texts(&ctx), ["BETWEEN", "DONE"]);
+        let tools: Vec<_> = ctx
+            .assistant
+            .parts
+            .iter()
+            .filter(|part| part.kind == "tool")
+            .collect();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].state.as_ref().unwrap().status, "completed");
+        assert_eq!(ctx.native_session_id.as_deref(), Some("native"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_steer_the_child_had_not_read_before_a_restart_is_recorded_once_where_it_reads_it() {
+        use crate::local::claude::tests::{
+            adopt_in, chat_with, leave_for_successor, ready_host, scripted_worker, type_line,
+        };
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        // The steer waits unread in the child's input until GO.
+        let script = r#"while IFS= read -r line; do
+            case "$line" in
+            *'"type":"user"'*)
+                if [ -z "$prompt" ]; then
+                    prompt="$line"
+                    printf '%s\n' "$line" '{"type":"system","subtype":"init","session_id":"native"}' '{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}'
+                fi ;;
+            GO)
+                printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"files"}]}}' '{"type":"user","isReplay":true,"message":{"role":"user","content":[{"type":"text","text":"stop"}]}}' '{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"STOPPED"}]}}' '{"type":"result","subtype":"success","session_id":"native"}' ;;
+            esac
+        done"#;
+        let session = format!("resume-{}", uuid::Uuid::new_v4());
+        let store = crate::store::Store::open().unwrap();
+        crate::local::chat::steering_tests::add_chat_session(&store, &session);
+        let host = ready_host();
+        let chat = chat_with(&host);
+        let worker = scripted_worker(&host, &session, script, Arc::downgrade(&chat)).await;
+        let mut ctx = resumable_ctx(&chat, &session, "the prompt");
+        let (steer_tx, steering) =
+            crate::local::chat::SteerReceiver::for_test(chat.clone(), &session);
+        ctx.steering = Some(steering);
+        let spec = worker_spec(&ctx, &worker);
+        let (turn_id, message_id) = (ctx.turn_id.clone(), ctx.assistant.id.clone());
+        let first = tokio::spawn(async move { run_attempt(&mut ctx, spec).await.map(|_| ()) });
+        type Saved = (crate::store::StoredTurnCheckpoint, Vec<WirePart>);
+        let saved = || -> Option<Saved> {
+            let checkpoint = store.chat_turn_checkpoint(&turn_id).unwrap()?;
+            let parts: Vec<WirePart> = store
+                .get_chat_message(&message_id)
+                .unwrap()
+                .map(|message| serde_json::from_str(&message.parts_json).unwrap())
+                .unwrap_or_default();
+            Some((checkpoint, parts))
+        };
+        async fn reaches(saved: impl Fn() -> Option<Saved>, ready: impl Fn(&Saved) -> bool) {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while !saved().is_some_and(|saved| ready(&saved)) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("the turn reaches its checkpoint");
+        }
+        reaches(&saved, |(_, parts)| {
+            parts.iter().any(|part| part.id == "t1")
+        })
+        .await;
+        let steer = crate::local::chat::SteerMessage {
+            id: format!("q_{}", uuid::Uuid::new_v4().simple()),
+            display: "stop".into(),
+            text: "stop".into(),
+            client_turn_id: None,
+            orx: None,
+            sent_at: 1,
+        };
+        chat.queue_steer(&session, &steer, &store).unwrap();
+        steer_tx.send(steer).unwrap();
+        reaches(&saved, |(checkpoint, _)| {
+            checkpoint.state_json.contains("\"steers\"")
+        })
+        .await;
+        first.abort();
+        let _ = first.await;
+        leave_for_successor(&worker);
+
+        let (checkpoint, parts) = saved().unwrap();
+        let successor = chat_with(&ready_host());
+        let adopted = adopt_in(&successor, &worker, Some(checkpoint.offset))
+            .await
+            .unwrap();
+        let mut ctx = resumable_ctx(&successor, &session, "the prompt, rendered anew");
+        ctx.assistant.parts = parts;
+        ctx.restore_checkpoint(&checkpoint).unwrap();
+        type_line(&adopted, "GO").await;
+        let spec = worker_spec(&ctx, &adopted);
+        let attempt =
+            tokio::time::timeout(Duration::from_secs(10), run_attempt(&mut ctx, spec)).await;
+        successor.claude.shutdown().await;
+        attempt.expect("the resumed turn ends").unwrap();
+
+        let steers: Vec<_> = ctx
+            .assistant
+            .parts
+            .iter()
+            .filter(|part| part.kind == "steer")
+            .map(|part| part.text.as_deref())
+            .collect();
+        assert_eq!(steers, [Some("stop")]);
+        assert_eq!(texts(&ctx), ["stop", "STOPPED"]);
+        assert!(successor.queued_items(&session).is_empty());
+        assert!(store
+            .list_queued_chat_messages_for_session(&session)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_turn_checkpointed_before_its_echo_resumes_without_sending_the_prompt_again() {
+        // The prompt waits unread until GO, as a slow --resume start up would leave it.
+        let script = r#"while IFS= read -r line; do
+            case "$line" in
+            *'"type":"user"'*)
+                [ -n "$prompt" ] && reply="SENT TWICE" || reply="REPLY"
+                prompt="$line"
+                printf '%s\n' '{"type":"user","message":{"content":"replayed history"}}' ;;
+            GO) printf '%s\n' "$prompt" "{\"type\":\"assistant\",\"message\":{\"id\":\"m\",\"content\":[{\"type\":\"text\",\"text\":\"$reply\"}]}}" '{"type":"result","subtype":"success"}' ;;
+            esac
+        done"#;
+        let (ctx, attempt) = turn_across_restart(
+            script,
+            |checkpoint, _| checkpoint.state_json.contains("the prompt"),
+            None,
+            "GO",
+        )
+        .await;
+        attempt.unwrap();
+        assert_eq!(texts(&ctx), ["REPLY"]);
+        assert_eq!(ctx.delivery_state(), DeliveryState::Accepted);
     }
 
     #[tokio::test(start_paused = true)]
@@ -4098,6 +4704,59 @@ mod tests {
         assert!(uses_permission_bridge(Some(PermissionMode::Auto)));
         assert!(uses_permission_bridge(None));
         assert!(uses_permission_bridge(Some(PermissionMode::Bypass)));
+    }
+
+    #[tokio::test]
+    async fn as_root_an_answer_resuming_in_bypass_is_refused_until_confirmed() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        TEST_RUNS_AS_ROOT.store(true, std::sync::atomic::Ordering::Relaxed);
+        let ctx = ResumeCtx {
+            host: TurnCtx::test_stub().host.clone(),
+            session_id: "s".into(),
+            native_session_id: None,
+        };
+        let permission = WirePrompt {
+            kind: "permission".into(),
+            ..Default::default()
+        };
+        let plan = WirePrompt {
+            kind: "plan".into(),
+            ..Default::default()
+        };
+        let resume = |prompt, mode| {
+            let answer = answer(true, mode, &[], None);
+            let ctx = &ctx;
+            async move { ClaudeCode.resume_from_prompt(ctx, prompt, &answer).await }
+        };
+
+        for (prompt, mode) in [(&permission, None), (&plan, Some("bypassPermissions"))] {
+            let refused = resume(prompt, mode).await.err().unwrap();
+            assert!(refused.downcast_ref::<RootBypassUnconfirmed>().is_some());
+        }
+        assert!(resume(&plan, None).await.is_ok());
+
+        let mut session = crate::store::tests::chat_session_fixture("s");
+        session.permission_mode = Some("bypassPermissions".into());
+        crate::store::Store::open()
+            .unwrap()
+            .create_chat_session(&session)
+            .unwrap();
+        let question = WirePrompt {
+            kind: "question".into(),
+            ..Default::default()
+        };
+        let answered = answer(true, None, &["Yes"], None);
+        let refused = ClaudeCode
+            .resume_from_prompt(&ctx, &question, &answered)
+            .await
+            .err()
+            .unwrap();
+        assert!(refused.downcast_ref::<RootBypassUnconfirmed>().is_some());
+
+        crate::telemetry::set_claude_root_full_access(true).unwrap();
+        assert!(resume(&permission, None).await.is_ok());
     }
 
     #[test]
@@ -5131,6 +5790,42 @@ mod tests {
             gate_oauth_version(legacy, Some("2.0.0")).state,
             HarnessAuthState::Unsupported
         );
+    }
+
+    #[test]
+    fn an_env_token_is_a_subscription_unless_an_api_credential_is_set() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let home = crate::local::git::TemporaryDirectory::new("orx-claude-token").unwrap();
+        let method = || {
+            let status =
+                br#"{"loggedIn":true,"authMethod":"oauth_token","apiProvider":"firstParty"}"#;
+            let probe = apply_env_credential_override(
+                parse_auth_status(Some(0), status, 1),
+                Some(home.path()),
+            );
+            assert!(!probe.credential_conflict);
+            let probe = gate_oauth_version(probe, Some("9.0.0"));
+            assert_eq!(probe.state, HarnessAuthState::Ready);
+            probe.method
+        };
+        assert_eq!(method(), None, "no token orx can see");
+
+        std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-test");
+        assert_eq!(method(), Some("oauth"), "a `claude setup-token`");
+
+        let settings = home.path().join("settings.json");
+        std::fs::write(&settings, r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"gateway"}}"#).unwrap();
+        assert_eq!(
+            method(),
+            Some("apiKey"),
+            "a gateway token in Claude's settings"
+        );
+
+        std::fs::remove_file(&settings).unwrap();
+        std::env::set_var("ANTHROPIC_AUTH_TOKEN", "sk-test");
+        assert_eq!(method(), Some("apiKey"), "an ANTHROPIC_AUTH_TOKEN");
     }
 
     #[test]

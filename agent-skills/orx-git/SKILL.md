@@ -1,6 +1,6 @@
 ---
 name: orx-git
-description: "Read, edit, commit, and diff experiment code; coordinate shared worktrees and preserve frozen branch history. Use before branch work, when starting work alongside other sessions, comparing nodes, preparing a run, repairing a provisional node, or diagnosing stale code."
+description: "Work with experiment branches and shared worktrees. Use before committing, branching, comparing experiments, or editing a worktree another chat shares."
 ---
 
 Git records every experiment. GitHub publication may be enabled for collaborator
@@ -9,7 +9,7 @@ playbook's publication status; do not push merely to launch compute and do not
 fetch from or publish back to the paper's upstream repository.
 
 Other chat sessions may work in sibling worktrees of the same clone. Before
-starting, inspect `git branch -a`, `orx runs <projectId>`, and relevant `orx exp
+starting, inspect `git branch -a`, `orx runs`, and relevant `orx exp
 desc <expId>` notes so you do not duplicate their work. Branches and remotes are
 shared even though worktrees are separate. Keep experiment notes current as you
 learn so sibling sessions can orient from them.

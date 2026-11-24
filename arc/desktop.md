@@ -16,16 +16,16 @@ Each platform's package wraps one `orx` binary that is the CLI an agent shells o
 Anything but `app`, `app <openresearch: link>` or `app <file.orx>` is a CLI invocation. A file becomes a `file:` link, so both travel one path, including to a running app.
 
 - **Windows** would flash a window for every console program a GUI process starts, so `windows/launcher/` starts `orx.exe app` in a hidden console shared by orx and everything it runs. **The launcher changes only with a new installer**, so `orx app [link]` is a contract with every installed launcher. `windows/OpenResearch.iss` installs per user, so `orx.exe` can replace itself without elevation.
-- **Linux** keeps a bundled WebKitGTK fallback at the Ubuntu builder's glibc floor. AppRun finds the system WebKitGTK 4.1 directory through `ldconfig` and verifies that it can load the desktop binary; otherwise it applies the bundled GTK hooks. Before loading a page, the app checks media elements in an isolated Rust child. Missing or incompatible plugins disable media, Web Audio and MediaSource in the webview while leaving the dashboard and HTML usable. Previews give installation instructions; [Linux runtime dependencies](../linux/README.md) lists the packages. GStreamer plugins and codecs stay on the host. Package tests open the media fixture in the app's own HTML preview and cover both runtimes and missing plugins. Stable rebuilds take packaging tools from the workflow revision and the desktop binary from the release revision. AppRun records the session's values before changing library or GTK paths; orx restores those values for host programs (`src/local/shell_env.rs`, in step with AppRun's list). The session chooses Wayland or X11 unless the user sets `GDK_BACKEND`. Each start points a desktop entry at the AppImage's current path, which also claims `openresearch:` links and `.orx` files.
+- **Linux** ships one AppImage for every distribution: `linux/AppRun` prefers the system's WebKitGTK when the binary loads against it and falls back to the bundled one, and records the session's environment first so programs orx opens get the user's own back (`src/local/shell_env.rs`). Codecs stay on the host, so the app checks media support in a child before loading a page and turns media off when plugins are missing, leaving the rest usable ([Linux runtime dependencies](../linux/README.md)). Each start registers the AppImage's current path for `openresearch:` links and `.orx` files.
 
 ## App mode
 
-The main thread owns the window's run loop, as every desktop toolkit requires, while the server runs on the async runtime's workers; a single-threaded runtime would deadlock.
+The main thread owns the window's run loop, as every desktop toolkit requires. The server is a child, `orx up --app-window`, which the window starts and controls over HTTP, so an update can replace the server under a window that stays open ([below](#keeping-the-window-through-an-update)).
 
 - **A fixed port.** The window's local storage is keyed by origin, so the app binds the same port every time, falls back to a free one if something holds it, and keeps its port across an update relaunch.
 - **One server per data directory.** If an `orx up` already owns the data directory, the window opens on it instead of starting a second engine.
 - **One app per user.** macOS enforces this itself; on Windows and Linux a second launch signals the first, which comes forward and takes any link.
-- **The lifecycle lock.** App mode takes it itself, so `orx delete` from a terminal cannot remove the store under a running app ([storage](storage.md)).
+- **The lifecycle lock.** The server takes it, as every `orx up` does, so `orx delete` from a terminal cannot remove the store under a running app ([storage](storage.md)).
 - **The user's shell environment.** On macOS and Linux an app started by launchd or a desktop session sees a bare `PATH` and none of the user's exports, so it would miss shell-installed agents and open a different database than a terminal `orx`. Before touching storage it asks the interactive login shell for a short list of variables (`src/local/shell_env.rs`). A late answer supplies `PATH` alone, because switching directories in use would split state. Every child is built in `src/process.rs`, so it gets those values, and "installed" on the dashboard and "found" at spawn cannot disagree.
 
 ## Closing and quitting
@@ -33,9 +33,9 @@ The main thread owns the window's run loop, as every desktop toolkit requires, w
 **Work never stops without the user choosing it.** When the app runs its own server, a close and a quit take the same path:
 
 - **Nothing pending:** the app quits. Pending work is a chat the sidebar shows working, read from the turns the server holds in memory, an unfinished run, or a run whose result no chat has received. A store that cannot be read is a bug to log, not a question for the user, so the app quits.
-- **Work pending:** the page lists each running chat and pending run under what quitting does to it, following them as they finish and dropping the close once none is left, and opening one cancels the close and shows it. The user chooses between quitting, keeping the work running and going back. Only the page is themed and translated and can open what it lists, so a windowless close brings the window back to ask there; when the page cannot ask, or does not load or show the dialog in time, a native alert names the same work.
-- **Some runs keep the app from quitting.** Most backends finish a run and keep its outcome without the app, and a run under a 0.2.x supervisor is finished by it. A run on this machine, Tinker included, would outlive the app on a machine the user believes is free to shut down; a Vercel sandbox bills until its session ends and loses its log unless the engine stops it; an OpenResearch box releases itself, with any uncollected outcome, a bounded grace after the run ([experiments](experiments.md)). While one of these is pending, Quit becomes Force Quit: the window goes, each such run is asked to stop, and the app quits once all have answered or ten seconds have passed, asking any launched meanwhile to stop as well.
-- **Keeping it running:** on macOS the window hides, the page unloads and the engine runs windowless, with the Dock icon to bring it back; a fullscreen window leaves fullscreen first, because hiding it in place strands its Space. Windows and Linux have nothing that shows a hidden app, so the window minimizes instead.
+- **Work pending:** the page lists each running chat and pending run under what quitting does to it, and the user chooses between quitting, keeping the work running and going back. Only the page is themed and translated and can open what it lists, so a windowless close brings the window back to ask there; when the page cannot ask in time, a native alert names the same work.
+- **Some runs keep the app from quitting.** Most backends finish a run and keep its outcome without the app. A run whose backend needs the engine alive, such as one on this machine or in a sandbox that bills until the engine stops it, would outlive the app or lose its outcome ([experiments](experiments.md)). While one of these is pending, Quit becomes Force Quit, which asks each such run to stop and waits a bounded time before quitting (`src/commands/app.rs`).
+- **Keeping it running:** on macOS the window hides, the page unloads and the engine runs windowless, with the Dock icon to bring it back. Windows and Linux have nothing that shows a hidden app, so the window minimizes instead.
 - **Quit:** agents stop.
 - **Windowless and idle:** the app quits after the idle wait of a headless `orx up` ([experiments](experiments.md)).
 - **Windowless, then a second launch, a link or a macOS Dock reopen:** the window returns on a fresh page load.
@@ -47,7 +47,7 @@ A window opened on another process's server just closes.
 
 The page reaches the window through a small message bridge: zoom; on macOS and Windows, a titlebar the page draws and the appearance; on macOS, a native menu the page specifies. The window never runs commands on the page's behalf.
 
-The sidebar is transparent over the window's material, the sidebar blur on macOS and Mica on Windows 11 22H2 and later. Linux and older Windows have none, and the page stays opaque.
+The sidebar is transparent over the window's material where the system has one, the sidebar blur on macOS and Mica on Windows 11; elsewhere the page stays opaque.
 
 - `http:`, `https:` and `mailto:` pop-ups go to the system browser; any other scheme is dropped, because the browser would ask before launching another app and a direct open would not.
 - `openresearch:` links become in-page navigation, so the page's guards against losing unsaved work still apply. A published project's link carries only its slug, and the app downloads the file from its own API, so a link can never make it fetch from anywhere else.
@@ -72,6 +72,23 @@ How an update applies depends on the install (`src/updates.rs`, `src/updates/`, 
 **An update never swaps the binary under a running `orx up`.** Each server holds a shared lock on its install for its whole life, and an updater needs it exclusively, because agents would otherwise get a different `orx` than the server running them. Under a running server a desktop install stages the verified release beside itself and a CLI install only records it. A terminal or headless server relaunches into it once idle; the desktop app's server only when its page asks ([dashboard](dashboard.md)). The page asks before a restart that would stop working agents, and lists them; runs carry on through it, since the engine catches up with them when it starts again ([experiments](experiments.md)).
 
 **Channels.** The desktop apps follow stable releases (`v1.2.3`) or canary builds (`canary-YYYYMMDD.N`). A build moves to a canary, or from a canary to stable, only when the target's history contains its own commit, so a switch never moves an install backward. Switching is refused while an installed update waits for a restart.
+
+## Keeping the window through an update
+
+**An update never closes the window.** The window starts its server as a child and holds a lease on it, the server's stdin, which it never writes:
+
+```
+orx app (stays on its own build until the user quits)
+├── window ── http://127.0.0.1:PORT ─────────────────────────────┐
+└── orx up --app-window --port PORT   stdin: the window's lease   │
+      restart into an update: hand off, then exec the new build   │
+      (Windows: start it, which inherits the lease, then exit)    │
+      the new build on PORT ── update status reports it ──────────┘── page reloads
+```
+
+A restart hands the kept agents and terminals to the new server ([restarts](restarts.md)), and the window stays: the same window, Space, size and Dock or taskbar slot, now in front of a newer server. Both talk across builds, so what one promises the other only grows. A window that goes away without quitting drops the lease, and its server hands its work off and exits for the next launch to adopt; a quit asks the server to stop everything first. A server that stops with nothing to take over, an update that fails to start included, leaves the window open on a notice that says why and offers to start it again or quit. The server shows no alert of its own: the window reads its stderr, and the server's last line before an error exit is the reason, the rest under the error's details. A page restarting into an update reloads only once the next server answers, so an update that fails to start leaves the old page up to say so. Only when no page can answer, at launch or with the window closed to the background, does the window ask in a native alert with the reason and the end of the log; until a server answers again it holds every load, and then opens the page it showed.
+
+The page that restarts the server into an update covers itself with an overlay that hides the page entirely, then reloads under it once the next server answers. WebKit keeps showing the old page until the new document first paints, and the next build's `index.html` draws the same overlay from a record in session storage before that paint, so the swap never shows; the next build's app then takes the overlay down, or says the update did not install and that it will try again later. A dialog drawn by the app's own code would come too late and leave a frame of bare background. [FROZEN.md](../src/commands/app/FROZEN.md) holds what each build must keep doing for the next.
 
 ## The build channel
 

@@ -1,6 +1,6 @@
-import { useMutate } from "@clo/react-mutation";
 import { useWorkspace } from "../workspace";
 import { mutCancelRun } from "../queries/projects";
+import { confirmStop } from "./run/confirmStop";
 import { m } from "../paraglide/messages.js";
 import { ChartLine, ChevronDown, CircleStop, ExternalLink, ScrollText } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -13,6 +13,7 @@ import {
 import { ExperimentOverview } from "./ExperimentOverview";
 import type { CodeView } from "./CodeTab";
 import { LogTerminal } from "./LogTerminal";
+import type { LogSeek } from "../logWindow";
 import { RunContactNotice } from "./RunContactNotice";
 import { StatusBadge } from "./StatusBadge";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
@@ -37,6 +38,9 @@ export function DetailDrawer({
   onOpenView,
   onOpenCode,
   onOpenExperiment,
+  onOpenFile,
+  logSeek = null,
+  onLogSeekTaken,
 }: {
   experiment: Experiment;
   experiments: Experiment[];
@@ -50,6 +54,10 @@ export function DetailDrawer({
   onOpenView: (view: ExperimentView, runId: string | undefined, intent: TabOpenIntent) => void;
   onOpenCode: (view: CodeView, intent: TabOpenIntent) => void;
   onOpenExperiment: (id: string, intent: TabOpenIntent) => void;
+  onOpenFile: (path: string, sessionId: string | null | undefined, line: number | undefined, exp: string | undefined, ref: string | undefined, intent: TabOpenIntent) => void;
+  /** Where the user asked a run's log to open; the log of that run takes it. */
+  logSeek?: (LogSeek & { runId: string }) | null;
+  onLogSeekTaken?: (seek: LogSeek) => void;
 }) {
   const expRuns = runs
     .filter((r) => r.experimentId === experiment.id)
@@ -61,10 +69,13 @@ export function DetailDrawer({
       <ExperimentOverview
         lineageNode={node ?? null}
         onOpenExperiment={onOpenExperiment}
+        onOpenFile={onOpenFile}
         experiment={experiment}
         parentExperiment={parentExperiment}
         project={project}
         runs={expRuns}
+        selectedRunId={selectedRunId}
+        onOpenRun={(runId, intent) => onOpenView("overview", runId, intent)}
         onOpenLogs={(runId, intent) => onOpenView("terminal", runId, intent)}
         onOpenTrackio={(runId, intent) => onOpenView("trackio", runId, intent)}
         onOpenCode={(intent) => onOpenCode("files", intent)}
@@ -81,6 +92,8 @@ export function DetailDrawer({
       selectedRunId={selectedRunId}
       onSelectRun={onSelectRun}
       onOpenView={onOpenView}
+      logSeek={logSeek}
+      onLogSeekTaken={onLogSeekTaken}
    />
   );
 }
@@ -97,6 +110,8 @@ function TerminalView({
   selectedRunId,
   onSelectRun,
   onOpenView,
+  logSeek,
+  onLogSeekTaken,
 }: {
   experiment: Experiment;
   expRuns: Run[];
@@ -104,11 +119,12 @@ function TerminalView({
   selectedRunId: string | null;
   onSelectRun: (id: string | null) => void;
   onOpenView: (view: ExperimentView, runId: string | undefined, intent: TabOpenIntent) => void;
+  logSeek: (LogSeek & { runId: string }) | null;
+  onLogSeekTaken?: (seek: LogSeek) => void;
 }) {
   const { useTrackioRuns } = useWorkspace().queries;
   const workspace = useWorkspace();
   const { trackioRunUrl } = workspace.api;
-  const cancel = useMutate(mutCancelRun);
   const [historyOpen, setHistoryOpen] = useState(false);
   const historyRef = useRef<HTMLDivElement>(null);
 
@@ -124,7 +140,6 @@ function TerminalView({
     ? trackioRunUrl(trackio, selectedRun.id, { theme })
     : null;
   const display = selectedRun && runDisplay(selectedRun);
-  const error = cancel.error === undefined ? null : cancel.error instanceof Error ? cancel.error.message : String(cancel.error);
   // expRuns is newest-first, so the oldest run is #1. Number a run by its
   // position from the end of the list.
   const runNumber = (id: string) => {
@@ -143,21 +158,16 @@ function TerminalView({
   }, [historyOpen]);
 
   function stop() {
-    if (selectedRun) cancel.run(workspace, selectedRun);
+    if (selectedRun) confirmStop(workspace.dialogs, experiment.title || experiment.slug, () => mutCancelRun.runAsHeadlessPromise(workspace, selectedRun, {}));
   }
 
   return (
     <div className="term-view absolute inset-0 flex flex-col bg-background z-20">
-      <div className="term-bar flex items-center gap-2 h-10 py-0 px-2.5 border-b border-b-border shrink-0 [&_.error]:text-sm [&_.error]:text-accent-red [&_.btn]:inline-flex [&_.btn]:items-center [&_.btn]:gap-1">
+      <div className="term-bar flex items-center gap-2 h-10 py-0 px-2.5 border-b border-b-border shrink-0 [&_.btn]:inline-flex [&_.btn]:items-center [&_.btn]:gap-1">
         <div className="term-title min-w-0 text-sm font-semibold text-text overflow-hidden text-ellipsis whitespace-nowrap" title={experiment.title || experiment.slug}>
           {experiment.title || experiment.slug}
         </div>
         <span className="flex-1" />
-        {error && (
-          <span className="error" role="alert">
-            {error}
-          </span>
-        )}
         {view === "trackio" ? (
           <>
             {trackioUrl && (
@@ -194,7 +204,7 @@ function TerminalView({
           </Button>
         )}
         {selectedRun && runStoppable(selectedRun) && (
-          <Button size="small" variant="ghost" onClick={stop}>
+          <Button size="small" variant="ghost" aria-haspopup="dialog" onClick={stop}>
             <CircleStop size={14} />
             {m.common_stop()}
           </Button>
@@ -254,7 +264,7 @@ function TerminalView({
         ) : selectedRun ? (
           // Key by run id so switching runs in the history dropdown remounts
           // the terminal with the selected run's output.
-          <LogTerminal key={selectedRun.id} run={selectedRun} />
+          <LogTerminal key={selectedRun.id} run={selectedRun} seek={logSeek?.runId === selectedRun.id ? logSeek : null} onSeekTaken={onLogSeekTaken} />
         ) : (
           <div className="term-empty h-full flex items-center justify-center p-6 text-center text-sm text-muted">{selectedRunId ? m.model_picker_unavailable() : m.detail_drawer_no_runs_yet_ask_the_agent_to_launch()}</div>
         )}

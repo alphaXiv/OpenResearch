@@ -33,7 +33,6 @@ use serde_json::{json, Value};
 /// subcommand can turn them into a write). Kept in lockstep with `main.rs`'s `Command`
 /// enum; `readonly_verbs_are_real_commands` guards against a rename.
 const WHOLE_VERB_READS: &[&str] = &[
-    "alphaxiv",
     "projects",
     "orgs",
     "runs",
@@ -335,9 +334,27 @@ fn is_readonly_orx(tokens: &[&str], stage: &str) -> bool {
         ),
         // Verbs with a write subcommand: allow only the read-only subcommand(s).
         "project" => matches!(subcommand(&mut rest), Some("view")),
+        "alphaxiv" => match subcommand(&mut rest) {
+            Some("library" | "tools") => true,
+            Some("call") => rest.next().is_some_and(|tool| {
+                use crate::commands::alphaxiv_mcp::{LIBRARY_READ_TOOLS, RESEARCH_TOOLS};
+                RESEARCH_TOOLS.contains(&tool) || LIBRARY_READ_TOOLS.contains(&tool)
+            }),
+            _ => false,
+        },
         "exp" => match subcommand(&mut rest) {
+            Some("run") => {
+                use clap::Parser;
+                matches!(crate::Cli::try_parse_from(tokens), Ok(crate::Cli {
+                    command: Some(crate::Command::Exp(crate::ExpArgs {
+                        command: crate::ExpCommand::Run(args),
+                    })), ..
+                }) if args.estimate)
+            }
             // Pure reads.
             Some("status" | "wait") => true,
+            // A view is read and checked against a run freely; saving one changes the node.
+            Some("view") => matches!(subcommand(&mut rest), Some("get" | "show" | "check")),
             // `desc` views the node's notes, but writes them with
             // `--set`/`--stdin`. Allow only the read form.
             Some("desc") => !stage.contains("--set") && !stage.contains("--stdin"),
@@ -485,6 +502,14 @@ mod tests {
     }
 
     #[test]
+    fn estimates_are_reads_but_launches_and_embedded_flags_are_gated() {
+        assert!(allowed("orx exp run child --estimate"));
+        assert!(!allowed("orx exp run child"));
+        assert!(!allowed("orx exp run child --host=--estimate"));
+        assert!(!allowed("orx exp run child --estimate && touch marker"));
+    }
+
+    #[test]
     fn compute_reads_are_allowed_but_setup_and_instruction_writes_are_gated() {
         for command in [
             "orx compute",
@@ -540,6 +565,11 @@ mod tests {
         // The playbook's core orientation reads (view form).
         assert!(allowed("orx exp desc e-1"));
         assert!(allowed("orx exp wait e-1"));
+        assert!(allowed("orx exp view get e-1 --json"));
+        assert!(allowed("orx exp view check r-1 --file view.xml"));
+        assert!(allowed("orx exp view show r-1"));
+        assert!(!allowed("orx exp view set e-1 --file view.xml"));
+        assert!(!allowed("orx exp view e-1"));
     }
 
     #[test]
@@ -571,6 +601,18 @@ mod tests {
         ] {
             assert!(!allowed(c), "should gate: {c}");
         }
+    }
+
+    #[test]
+    fn alphaxiv_reads_freely_and_gates_library_writes() {
+        assert!(allowed("orx alphaxiv library --json"));
+        assert!(allowed("orx alphaxiv tools discover_papers"));
+        assert!(allowed(
+            "orx alphaxiv call answer_pdf_queries '{\"paper\": \"1706.03762\", \"queries\": [\"warmup\"]}'"
+        ));
+        assert!(!allowed("orx alphaxiv call save_papers_to_folder '{}'"));
+        assert!(!allowed("orx alphaxiv call create_folder '{}'"));
+        assert!(!allowed("orx alphaxiv call"));
     }
 
     #[test]
@@ -809,7 +851,7 @@ mod tests {
             );
         }
         // The verbs with mixed read/write subcommands must also be real.
-        for verb in ["project", "exp", "agents"] {
+        for verb in ["project", "exp", "agents", "alphaxiv"] {
             assert!(real.contains(verb), "`{verb}` is not a real orx command");
         }
     }

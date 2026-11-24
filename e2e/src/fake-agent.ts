@@ -13,7 +13,7 @@ const control = process.env.ORX_E2E_AGENT
 const log = process.env.ORX_E2E_AGENT_LOG
 const reverse = new Map<string, (message: Message) => void>()
 let nextReverse = 0
-let turn: { abort: AbortController } | undefined
+let turn: { abort: AbortController; onCancel?: 'exit' } | undefined
 // orx gives every chat session its MCP servers and a one-shot (title, starter prompts, summary) none. One-shots end with
 // no text, so they keep orx's fallbacks and never take a script meant for a chat turn.
 const oneShots = new Set<string>()
@@ -69,8 +69,10 @@ async function prompt(request: Message) {
     for (const step of await script(text)) {
       if ('say' in step) update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: step.say } })
       else if ('think' in step) update(sessionId, { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: step.think } })
-      else if ('hold' in step) await fetch(`${control}/hold/${encodeURIComponent(step.hold)}`, { method: 'POST', signal: abort.signal })
-      else if ('run' in step) await run(sessionId, step)
+      else if ('hold' in step) {
+        turn.onCancel = step.onCancel
+        await fetch(`${control}/hold/${encodeURIComponent(step.hold)}`, { method: 'POST', signal: abort.signal })
+      } else if ('run' in step) await run(sessionId, step)
       else if ('permissionAfterReply' in step) {
         send({ id: request.id, result: { stopReason: 'end_turn' } })
         await ask('session/request_permission', {
@@ -103,6 +105,17 @@ async function prompt(request: Message) {
   }
 }
 
+async function start(request: Message) {
+  const sessionId = `e2e-${crypto.randomUUID()}`
+  if (!request.params?.mcpServers?.length) oneShots.add(sessionId)
+  else if (control) {
+    const { hold } = (await (await fetch(`${control}/session`, { method: 'POST' })).json()) as { hold?: string }
+    if (hold) await fetch(`${control}/hold/${encodeURIComponent(hold)}`, { method: 'POST' })
+  }
+  const models = { currentModelId: 'e2e', availableModels: [{ modelId: 'e2e', name: 'E2E Model' }] }
+  send({ id: request.id, result: { sessionId, models } })
+}
+
 function handle(message: Message) {
   if (message.method === undefined) {
     reverse.get(String(message.id))?.(message)
@@ -115,18 +128,15 @@ function handle(message: Message) {
         id: message.id,
         result: { protocolVersion: 1, agentInfo: { name: 'orx e2e agent', version: '1.0.0' }, agentCapabilities: { loadSession: true } },
       })
-    case 'session/new': {
-      const sessionId = `e2e-${crypto.randomUUID()}`
-      if (!message.params?.mcpServers?.length) oneShots.add(sessionId)
-      const models = { currentModelId: 'e2e', availableModels: [{ modelId: 'e2e', name: 'E2E Model' }] }
-      return send({ id: message.id, result: { sessionId, models } })
-    }
+    case 'session/new':
+      return void start(message)
     case 'session/load':
     case 'session/set_model':
       return send({ id: message.id, result: {} })
     case 'session/prompt':
       return void prompt(message)
     case 'session/cancel':
+      if (turn?.onCancel === 'exit') process.exit(0)
       return turn?.abort.abort()
     default:
       if (message.id !== undefined) send({ id: message.id, error: { code: -32601, message: `${message.method} is not scripted` } })

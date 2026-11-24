@@ -12,7 +12,7 @@ OpenResearch turns the coding agents a researcher already has (Claude Code, Code
 | `src/client.rs`, `src/config.rs` | The openresearch.sh client, credentials, settings paths. |
 | `src/updates*` | Self-update for the CLI and the desktop apps. |
 | `ui/` | The dashboard: React, TanStack Router and Query, Paraglide messages. |
-| `agent-skills/`, `SKILL.md`, `SYSTEM_PROMPT.md` | What orx tells agents, compiled into the binary. |
+| `agent-skills/`, `agent-playbook/`, `SKILL.md`, `SYSTEM_PROMPT.md` | What orx tells agents, compiled into the binary; `node scripts/agent-surface.mjs` maps it. |
 | `macos/`, `windows/`, `linux/`, `demo/` | Packaging and the onboarding demo. |
 
 ## Rules that matter most
@@ -48,7 +48,7 @@ A message reaches `orx up`, which starts or reuses the chat's agent in the chat'
 
 ## Architecture
 
-These documents describe how the pieces of OpenResearch work. We try to keep them timeless so they don't churn, letting code comments describe the exact implementation details. Read these before planning your changes to these components, and keep architecture changes in sync when changing how the app works.
+These documents introduce how the pieces of OpenResearch fit together: the reasons, invariants and boundaries a reader can't recover from the code. Exact behavior, numbers, flags, UI states and per-agent quirks live in the code and its comments. Read these before planning a change to a component. A change edits one only when it makes something the document says untrue, which is a deliberate architecture change the PR names; when an ordinary fix seems to need a doc edit, the detail belongs in a comment beside the code.
 
 - [Where state lives](arc/storage.md): directories, the store, locks, egress.
 - [Chats and agents](arc/agents.md): harnesses, isolation, permissions, recovery.
@@ -56,6 +56,7 @@ These documents describe how the pieces of OpenResearch work. We try to keep the
 - [Remote machines](arc/remote.md): the persistent host, `orx-host` and SSH transport.
 - [The dashboard](arc/dashboard.md): the guard, live state, the React app.
 - [The desktop app and releases](arc/desktop.md): app mode, updates, shipping.
+- [Surviving restarts](arc/restarts.md): keepers, checkpoints, handing work to the next server.
 
 ## Running it
 
@@ -98,3 +99,5 @@ CI runs what the changed files need: `cargo fmt --all`, `cargo clippy --all-targ
 ## Commits, issues and pull requests
 
 Before you commit, open an issue or pull request, or comment on GitHub, it's required for you to follow the rules in [arc/contributing.md](arc/contributing.md). For example, you MUST NOT add `Co-authored-by` to your commits, instead following the rules in that document.
+
+On the OpenResearch team (you can reach the ORX team in Linear), follow [Linear](arc/contributing.md#linear) before the first edit, without asking.

@@ -128,7 +128,7 @@ test("a plan that can't be read is a dotted ring, and its row says why with the 
 
 test("on a remote machine there is no update button, since setup runs where the agent does", async () => {
   const unsupported = plan("claude-code", "Claude Pro", [], { error: { kind: "unsupported", version: "2.0.9" } });
-  await strip(report({ plans: [unsupported] }), { runtime: { ...local, kind: "ssh", dashboardProtocol: 1, session: remoteSession } });
+  await strip(report({ plans: [unsupported] }), { runtime: { ...local, kind: "ssh", session: remoteSession } });
   await click(usageTrigger());
   assert.match(text(panel()), /2\.0\.9/);
   assert.equal(find('[role="dialog"] button', m.usage_update_agent({ agent: "Claude Code" })), null);
@@ -160,6 +160,17 @@ test("the graph's switch appears only when both AI and compute have data; estima
   assert.match(text(panel()), /~\$9\.75/);
   assert.match(text(panel()), new RegExp(m.usage_cost_unavailable()));
   assert.doesNotMatch(text(panel()), /\$0\.00/);
+});
+
+test("the graph opens on AI spend once the plans are read, though it opened on compute while they were", async () => {
+  let plans = null;
+  await strip(() => report({ plans, agents: plans ? [opencodeSpend] : [], compute: [modalSpend] }), { events: true });
+  await click(usageTrigger());
+  assert.ok(panel().querySelector('[data-spend-graph="compute"]'));
+  plans = [];
+  await act(async () => streams[0].dispatchEvent(new Event("usage.changed")));
+  await settle();
+  assert.ok(panel().querySelector('[data-spend-graph="ai"]'));
 });
 
 test("a backend with priced and unpriced runs says so beside its partial amount", async () => {
@@ -225,7 +236,7 @@ test("signed out, the strip offers sign-in in the account's place", async () => 
 });
 
 test("a remote machine fills blue and names itself in the usage segment", async () => {
-  const { container } = await strip(report({ plans: [claudeMax] }), { runtime: { ...local, kind: "ssh", dashboardProtocol: 1, session: remoteSession } });
+  const { container } = await strip(report({ plans: [claudeMax] }), { runtime: { ...local, kind: "ssh", session: remoteSession } });
   const machine = container.querySelector("[data-machine-switcher]");
   assert.match(machine.className, /bg-accent-blue-subtle/);
   assert.match(usageTrigger().getAttribute("aria-label"), /gpu-box/);

@@ -25,7 +25,7 @@
         var saved = null;
         try { saved = localStorage.getItem("orx:locale"); } catch (e) {}
         var browserPreferences = navigator.languages || [navigator.language];
-        var supported = ["en", "zh-CN", "fa", "ar", "es", "hi", "ko", "ja", "pl", "ru", "tr", "vi"];
+        var supported = ["en", "zh-CN", "fa", "ar", "es", "hi", "ko", "ja", "pl", "ru", "tr", "vi", "te"];
         var match = function (tag) {
           if (!tag) return null;
           var normalized = String(tag).toLowerCase();
@@ -55,6 +55,8 @@
       id="root"
       class="[&_:where([data-tip])]:relative [&_:where([data-tip])::after]:content-[attr(data-tip)] [&_:where([data-tip])::after]:absolute [&_:where([data-tip])::after]:top-[calc(100%_+_6px)] [&_:where([data-tip])::after]:left-1/2 [&_:where([data-tip])::after]:-translate-x-1/2 [&_:where([data-tip])::after]:w-max [&_:where([data-tip])::after]:max-w-none [&_:where([data-tip])::after]:bg-text [&_:where([data-tip])::after]:text-background [&_:where([data-tip])::after]:text-xs [&_:where([data-tip])::after]:font-medium [&_:where([data-tip])::after]:leading-none [&_:where([data-tip])::after]:py-[5px] [&_:where([data-tip])::after]:px-2 [&_:where([data-tip])::after]:rounded-sm [&_:where([data-tip])::after]:whitespace-nowrap [&_:where([data-tip])::after]:opacity-0 [&_:where([data-tip])::after]:invisible [&_:where([data-tip])::after]:pointer-events-none [&_:where([data-tip])::after]:z-[9999] [&_:where([data-tip]):is(:hover,:focus-visible)::after]:opacity-100 [&_:where([data-tip]):is(:hover,:focus-visible)::after]:visible [&_[data-tip-align='start']::after]:start-0 [&_[data-tip-align='start']::after]:translate-none [&_[data-tip-align='end']::after]:end-0 [&_[data-tip-align='end']::after]:start-auto [&_[data-tip-align='end']::after]:translate-none"
     ></div>
+    <!-- Before the first paint: a page reloading into an update shows the same overlay throughout. -->
+    <script src="/update-overlay.js"></script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -53,12 +53,7 @@ impl SearchRequest {
             return Err(anyhow!("Search is limited to 256 characters."));
         }
         // FTS5 folds case itself; lowercasing first breaks letters like `İ` that Rust and FTS5 fold differently.
-        let terms: Vec<_> = self
-            .q
-            .split_whitespace()
-            .take(16)
-            .map(str::to_owned)
-            .collect();
+        let terms: Vec<_> = self.q.split_whitespace().map(str::to_owned).collect();
         let filter = match self.scope {
             SearchScope::Chat => SearchFilter::Chat(
                 self.session_id
@@ -111,16 +106,16 @@ impl SearchRequest {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SearchPage {
-    hits: Vec<SearchHit>,
-    cursor: Option<String>,
-    indexing: bool,
-    requires_longer_query: bool,
+    pub(crate) hits: Vec<SearchHit>,
+    pub(crate) cursor: Option<String>,
+    pub(crate) indexing: bool,
+    pub(crate) requires_longer_query: bool,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SearchHit {
-    session_id: String,
+pub(crate) struct SearchHit {
+    pub(crate) session_id: String,
     project_id: String,
     message_id: String,
     part_id: Option<String>,
@@ -130,14 +125,7 @@ struct SearchHit {
     chat_title: Option<String>,
     archived: bool,
     on_active_branch: bool,
-    snippet: String,
-}
-
-pub(super) fn initialize(conn: &Connection) -> Result<()> {
-    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    tx.execute_batch(include_str!("search.sql"))?;
-    tx.commit()?;
-    Ok(())
+    pub(crate) snippet: String,
 }
 
 impl Store {
@@ -872,7 +860,7 @@ mod tests {
                     .upsert_chat_message(&message(&format!("message-{i}"), "chat", "older history"))
                     .unwrap();
             }
-            initialize(&store.conn).unwrap();
+            let store = Store::open_at(store.data_dir.clone()).unwrap();
             assert!(store.backfill_chat_search().unwrap());
             let through: i64 = store
                 .conn
@@ -921,7 +909,7 @@ mod tests {
                     .unwrap(),
                 249
             );
-            initialize(&reopened.conn).unwrap();
+            let reopened = Store::open_at(reopened.data_dir.clone()).unwrap();
             assert!(!reopened.backfill_chat_search().unwrap());
             assert_eq!(
                 reopened
@@ -973,8 +961,24 @@ mod tests {
         req = request("warmup", SearchScope::All, "");
         req.cursor = Some("bad-cursor".into());
         assert!(req.prepare().is_err());
-        let selection = request(&"word ".repeat(17), SearchScope::All, "");
-        assert_eq!(selection.prepare().unwrap().terms.len(), 16);
+    }
+
+    #[test]
+    fn every_query_word_must_match() {
+        with_store(|store| {
+            session(&store, "chat", "project");
+            let words: Vec<_> = (0..16).map(|i| format!("word{i:02}")).collect();
+            store
+                .upsert_chat_message(&message("message", "chat", &words.join(" ")))
+                .unwrap();
+            let hits = |q: &str| {
+                let query = request(q, SearchScope::Chat, "chat").prepare().unwrap();
+                store.search_chat_messages(&query).unwrap().hits.len()
+            };
+            assert_eq!(hits(&words.join(" ")), 1);
+            assert_eq!(hits(&format!("{} absent", words.join(" "))), 0);
+            assert_eq!(hits(&format!("{} a", words.join(" "))), 0);
+        });
     }
 
     #[test]
@@ -992,7 +996,7 @@ mod tests {
                 .conn
                 .execute("UPDATE chat_messages SET parts_json = 'not json'", [])
                 .unwrap();
-            initialize(&store.conn).unwrap();
+            let store = Store::open_at(store.data_dir.clone()).unwrap();
             for (id, parts) in [
                 ("string", "[\"abc\"]"),
                 ("children", "[{\"type\":\"tool\",\"children\":\"x\"}]"),
@@ -1093,7 +1097,7 @@ mod tests {
                     .unwrap();
             }
             tx.commit().unwrap();
-            initialize(&store.conn).unwrap();
+            let store = Store::open_at(store.data_dir.clone()).unwrap();
             let start = std::time::Instant::now();
             let mut longest = std::time::Duration::ZERO;
             loop {

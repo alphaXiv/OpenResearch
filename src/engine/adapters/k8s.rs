@@ -159,6 +159,7 @@ impl Api for K8sAccount {
             )
             .await?;
             return Ok(Observation::Failed {
+                started_at: None,
                 finished_at: None,
                 reason,
             });

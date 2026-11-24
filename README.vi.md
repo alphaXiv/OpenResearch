@@ -11,7 +11,7 @@ Bộ công cụ và không gian làm việc ưu tiên chạy cục bộ cho agen
 <a href="https://github.com/alphaXiv/OpenResearch/blob/main/LICENSE"><img src="https://img.shields.io/github/license/alphaXiv/OpenResearch?style=flat-square" alt="License" /></a>
 </p>
 
-<p><a href="README.md">English</a> · <a href="README.es.md">Español</a> · <a href="README.ko.md">한국어</a> · <a href="README.zh.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ru.md">Русский</a> · <a href="README.tr.md">Türkçe</a> · <a href="README.vi.md">Tiếng Việt</a></p>
+<p><a href="README.md">English</a> · <a href="README.es.md">Español</a> · <a href="README.ko.md">한국어</a> · <a href="README.zh.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ru.md">Русский</a> · <a href="README.tr.md">Türkçe</a> · <a href="README.vi.md">Tiếng Việt</a> · <a href="README.hi.md">हिन्दी</a> · <a href="README.te.md">తెలుగు</a></p>
 
 <p><img src=".github/readme-assets/openresearch-demo.gif" alt="Ứng dụng OpenResearch tìm kiếm trên alphaXiv để phân tích một lượt huấn luyện, sau đó mở biểu đồ Trackio và các hình kết quả" width="680" /></p>
 
@@ -20,9 +20,9 @@ Bộ công cụ và không gian làm việc ưu tiên chạy cục bộ cho agen
 <p>Dù bạn cần một trợ lý lập trình hay công cụ tự động hóa nghiên cứu, OpenResearch giúp đẩy nhanh công việc nghiên cứu. Khởi chạy các agent nghiên cứu để đọc tài liệu, phát triển giả thuyết, chạy thí nghiệm và tạo tệp đầu ra như báo cáo, biểu đồ và hình ảnh.</p>
 
 <p>
-<a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch.dmg"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-macos-dark.svg"><img src=".github/readme-assets/download-macos.svg" alt="Tải OpenResearch cho macOS" width="220" height="44" /></picture></a>
-<a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-Setup.exe"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-windows-dark.svg"><img src=".github/readme-assets/download-windows.svg" alt="Tải OpenResearch cho Windows (Beta)" width="220" height="44" /></picture></a>
-<a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-x86_64.AppImage"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-linux-dark.svg"><img src=".github/readme-assets/download-linux.svg" alt="Tải OpenResearch cho Linux" width="220" height="44" /></picture></a>
+<a href="https://openresearch.sh/dl/macos?src=github"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-macos-dark.svg"><img src=".github/readme-assets/download-macos.svg" alt="Tải OpenResearch cho macOS" width="220" height="44" /></picture></a>
+<a href="https://openresearch.sh/dl/windows?src=github"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-windows-dark.svg"><img src=".github/readme-assets/download-windows.svg" alt="Tải OpenResearch cho Windows (Beta)" width="220" height="44" /></picture></a>
+<a href="https://openresearch.sh/dl/linux_x64?src=github"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-linux-dark.svg"><img src=".github/readme-assets/download-linux.svg" alt="Tải OpenResearch cho Linux" width="220" height="44" /></picture></a>
 </p>
 
 <p>
@@ -41,9 +41,9 @@ Bộ công cụ và không gian làm việc ưu tiên chạy cục bộ cho agen
 
 **Khuyến nghị: dùng ứng dụng desktop OpenResearch.** Tải ứng dụng cho nền tảng của bạn:
 
-- [macOS](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch.dmg)
-- [Windows (Beta)](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-Setup.exe)
-- Linux: [x86_64](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-x86_64.AppImage) · [ARM64](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-aarch64.AppImage)
+- [macOS](https://openresearch.sh/dl/macos?src=github)
+- [Windows (Beta)](https://openresearch.sh/dl/windows?src=github)
+- Linux: [x86_64](https://openresearch.sh/dl/linux_x64?src=github) · [ARM64](https://openresearch.sh/dl/linux_arm64?src=github)
 
 <details>
 <summary>Bạn thích CLI độc lập hơn? Cài đặt trên macOS hoặc Linux</summary>

@@ -26,7 +26,8 @@ pub(crate) fn harnesses() -> impl Iterator<Item = &'static str> {
     )
 }
 
-/// The agent `harness` installs as its runtime, which comes and goes with it.
+/// The agent `harness` installs as its runtime, which comes and goes with it. Node.js stays
+/// when an agent goes: it also runs agents the user installed.
 pub(crate) fn runtime(harness: &str) -> Option<&'static str> {
     (harness == "pi-acp").then_some("pi")
 }
@@ -457,10 +458,16 @@ pub(crate) async fn install(
     tokio::fs::create_dir_all(&parent)
         .await
         .with_context(|| format!("Could not create {}", parent.display()))?;
-    sweep_staging(&parent).await;
+    let swept = parent.clone();
+    let _ = tokio::task::spawn_blocking(move || sweep_staging(&swept)).await;
     let staging = parent.join(format!(".staging-{}", uuid::Uuid::new_v4().simple()));
     let result = async {
         tokio::fs::create_dir_all(&staging).await?;
+        let lock = staging.join(STAGING_LOCK);
+        let lock = std::fs::File::create(&lock)
+            .and_then(|file| file.lock().map(|()| file))
+            .with_context(|| format!("Could not lock {}", lock.display()))?;
+        let _claim = crate::file_lock::FileLock::new(lock);
         let download = staging.join("download");
         let unpacked = staging.join("release");
         if matches!(release.format, Format::Npm) {
@@ -591,25 +598,44 @@ async fn copies(harness: &str) -> Vec<(semver::Version, PathBuf)> {
     releases
 }
 
-/// Staging folders an interrupted install left behind. Recent ones may be
-/// another orx process's install in progress.
-async fn sweep_staging(parent: &Path) {
-    let Ok(mut entries) = tokio::fs::read_dir(parent).await else {
+/// Held by an install for its whole run, inside its staging folder.
+const STAGING_LOCK: &str = "install.lock";
+
+/// Remove the staging folders interrupted installs left behind. A folder whose lock nobody holds
+/// is abandoned; one without a lock is an older orx's, perhaps still installing, so it gets an hour.
+fn sweep_staging(parent: &Path) {
+    let Ok(entries) = std::fs::read_dir(parent) else {
         return;
     };
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        if !entry.file_name().to_string_lossy().starts_with(".staging-") {
-            continue;
-        }
-        let stale = entry
-            .metadata()
-            .await
+    let older_than = |path: &Path, limit: Duration| {
+        std::fs::metadata(path)
             .and_then(|metadata| metadata.modified())
             .ok()
             .and_then(|modified| modified.elapsed().ok())
-            .is_some_and(|age| age > Duration::from_secs(60 * 60));
-        if stale {
-            let _ = tokio::fs::remove_dir_all(entry.path()).await;
+            .is_some_and(|age| age > limit)
+    };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with(".staging-") {
+            continue;
+        }
+        let staging = entry.path();
+        let lock = staging.join(STAGING_LOCK);
+        let abandoned = match std::fs::File::open(&lock) {
+            Ok(file) => match file.try_lock() {
+                Ok(()) => {
+                    drop(crate::file_lock::FileLock::new(file));
+                    // An install creates its lock a moment before taking it.
+                    older_than(&lock, Duration::from_secs(10))
+                }
+                Err(_) => false,
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                older_than(&staging, Duration::from_secs(60 * 60))
+            }
+            Err(_) => false,
+        };
+        if abandoned {
+            let _ = std::fs::remove_dir_all(&staging);
         }
     }
 }
@@ -742,11 +768,10 @@ pub(crate) async fn verify(harness: &str, bin: &Path, version: &semver::Version)
         command
             .arg("--version")
             .env("NO_COLOR", "1")
-            .stdin(std::process::Stdio::null())
-            .kill_on_drop(true);
-        let output = tokio::time::timeout(Duration::from_secs(60), command.output())
+            .stdin(std::process::Stdio::null());
+        let output = super::detect_spawn_output_timed(command, Duration::from_secs(60))
             .await
-            .map_err(|_| anyhow!("The downloaded {harness} did not answer `--version`."))?
+            .ok_or_else(|| anyhow!("The downloaded {harness} did not answer `--version`."))?
             .with_context(|| format!("Could not run the downloaded {harness}"))?;
         if !output.status.success() {
             bail!(
@@ -819,6 +844,37 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn sweeping_removes_staging_only_an_interrupted_install_left() {
+        let directory =
+            Directory(std::env::temp_dir().join(format!("orx-sweep-{}", uuid::Uuid::new_v4())));
+        let staging = |name: &str| {
+            let path = directory.0.join(name);
+            std::fs::create_dir_all(&path).unwrap();
+            path
+        };
+        let claim = |path: &Path| {
+            let lock = std::fs::File::create(path.join(STAGING_LOCK)).unwrap();
+            let earlier = std::time::SystemTime::now() - Duration::from_secs(60);
+            lock.set_modified(earlier).unwrap();
+            lock.lock().unwrap();
+            crate::file_lock::FileLock::new(lock)
+        };
+        let abandoned = staging(".staging-abandoned");
+        drop(claim(&abandoned));
+        let installing = staging(".staging-installing");
+        let _held = claim(&installing);
+        let older_orx = staging(".staging-older-orx");
+        let release = staging("1.0.0");
+
+        sweep_staging(&directory.0);
+
+        assert!(!abandoned.exists());
+        assert!(installing.is_dir());
+        assert!(older_orx.is_dir());
+        assert!(release.is_dir());
     }
 
     #[test]

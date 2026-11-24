@@ -3,14 +3,14 @@ import { useMutate } from "@clo/react-mutation";
 import { WorkspaceDomContext } from "../WorkspaceDom";
 import { useWorkspace } from "../workspace";
 import { useMachines } from "../machineSelection";
-import { showRemoteHostDialog } from "./RemoteHostDialog";
+import { forgetMachine, showRemoteHostDialog } from "./RemoteHostDialog";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 
-import { Check, ChevronsUpDown, CloudOff, Info, Laptop, Plus, Power, Server, Unplug } from "lucide-react";
-import { type RemoteSessionStatus, type RuntimeInfo } from "../api";
+import { Check, ChevronsUpDown, CircleArrowUp, CloudOff, Info, Laptop, Plus, Power, Server, Trash2, Unplug } from "lucide-react";
+import { type RemoteSessionInfo, type RemoteSessionStatus, type RuntimeInfo } from "../api";
 import { autoDir, ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
-import { mutDisconnectRemote, mutStopRemoteHost } from "../queries/settings";
+import { mutDisconnectRemote, mutStopRemoteHost, mutUpdateRemote } from "../queries/settings";
 import { Menu } from "@base-ui/react/menu";
 import { RemoteIcon } from "./RemoteIcon";
 
@@ -22,9 +22,13 @@ const ICON = "shrink-0 text-subtext";
 
 function connection(status: RemoteSessionStatus) {
   if (status === "connected") return { state: "connected", label: m.remote_machine_connected() } as const;
-  if (status === "connecting" || status === "reconnecting" || status === "applying") return { state: "connecting", label: m.remote_machine_connecting() } as const;
+  if (status === "updating") return { state: "updating", label: m.remote_machine_updating() } as const;
+  if (status === "connecting" || status === "reconnecting" || status === "applying" || status === "restarting") return { state: "connecting", label: m.remote_machine_connecting() } as const;
   return { state: "disconnected", label: m.remote_machine_disconnected() } as const;
 }
+
+const canUpdate = (session: RemoteSessionInfo) =>
+  session.updateAvailable && (session.status === "connected" || session.status === "needsUpdate");
 
 /** Holds the check's width on every row so statuses line up. */
 function Selected() {
@@ -41,8 +45,8 @@ function SessionStatus({ status }: { status: RemoteSessionStatus }) {
   const { state, label } = connection(status);
   return (
     <StatusIndicator
-      tone={state === "connected" ? "success" : state === "connecting" ? "info" : "neutral"}
-      live={state === "connecting"}
+      tone={state === "connected" ? "success" : state === "disconnected" ? "neutral" : "info"}
+      live={state === "connecting" || state === "updating"}
       stale={state === "disconnected"}
       className="text-xs font-normal text-subtext"
     >
@@ -80,7 +84,13 @@ export function WorkspaceConnection({
   const machine = runtime.kind === "ssh" ? autoDir(label) : label;
   // In the strip, a machine that can't be reached is the offline notice: the cloud and its name in amber.
   const offline = !corner && (current?.state === "disconnected" || !live);
-  const status = offline ? m.remote_machine_disconnected() : current?.state === "connected" ? null : current?.label;
+  const session = runtime.kind === "ssh"
+    ? machines.sessions.find((entry) => entry.id === runtime.session.id) ?? runtime.session
+    : null;
+  const outdated = session !== null && session.status === "connected" && session.updateAvailable;
+  const status = offline ? m.remote_machine_disconnected()
+    : current?.state === "connected" ? outdated ? m.remote_machine_update_available() : null
+      : current?.label;
   const caption = offline ? null : status;
   const triggerName = status
     ? m.remote_machine_switcher_status({ machine, status })
@@ -98,6 +108,19 @@ export function WorkspaceConnection({
   const { getRemoteStopPreview } = workspace.api;
 
   const disconnect = useMutate(mutDisconnectRemote);
+  const update = useMutate(mutUpdateRemote);
+  const updateItem = (session: RemoteSessionInfo, onClick: () => void) => (
+    <Menu.Item
+      nativeButton
+      key={`update:${session.id}`}
+      render={<MenuItem className={ITEM} />}
+      disabled={update.isMutating}
+      onClick={onClick}
+    >
+      <CircleArrowUp size={14} className="shrink-0 text-accent-blue" aria-hidden="true" />
+      <span className="min-w-0 flex-1 truncate">{m.remote_update_on_machine({ machine: autoDir(session.host) })}</span>
+    </Menu.Item>
+  );
   const [loadingStopPreview, setLoadingStopPreview] = useState(false);
   const [open, setOpen] = useState(false);
   const switching = useRef(false);
@@ -158,29 +181,35 @@ export function WorkspaceConnection({
                           <span className="min-w-0 flex-1 truncate">{m.projects_local()}</span>
                           <Selected />
                         </Menu.RadioItem>
-                        {machines.sessions.map((session) => (
-                          <Menu.RadioItem
-                            nativeButton
-                            key={session.id}
-                            value={session.id}
-                            closeOnClick
-                            render={<MenuItem className={ITEM} />}
-                            onClick={() => {
-                              switching.current =
-                                machines.activeId !== session.id;
-                              setOpen(false);
-                              machines.selectRemote(session);
-                            }}
-                          >
-                            <Server size={14} className={ICON} aria-hidden="true" />
-                            <span className="min-w-0 flex-1 truncate">
-                              {session.host}
-                            </span>
-                            <SessionStatus status={session.status} />
-                            <Selected />
-                          </Menu.RadioItem>
-                        ))}
+                        {machines.hosts.map((host) => {
+                          const session = machines.sessions.find((entry) => entry.host === host);
+                          return [
+                            <Menu.RadioItem
+                              nativeButton
+                              key={host}
+                              value={session?.id ?? `host:${host}`}
+                              closeOnClick
+                              render={<MenuItem className={ITEM} />}
+                              onClick={() => {
+                                setOpen(false);
+                                machines.connect(host).catch((error: unknown) =>
+                                  showAlert(error instanceof Error ? error.message : String(error), "error"),
+                                );
+                              }}
+                            >
+                              <Server size={14} className={ICON} aria-hidden="true" />
+                              <span className="min-w-0 flex-1 truncate">{host}</span>
+                              <SessionStatus status={session?.status ?? "disconnected"} />
+                              <Selected />
+                            </Menu.RadioItem>,
+                            session && canUpdate(session) &&
+                              updateItem(session, () => update.run(machines.owner, session.id)),
+                          ];
+                        })}
                       </Menu.RadioGroup>
+                      {machines.hostsError && (
+                        <p role="alert" className="m-0 px-2 py-1.5 text-xs text-accent-red">{machines.hostsError}</p>
+                      )}
                       <Menu.Item
                         nativeButton
                         render={<MenuItem className={ITEM} />}
@@ -208,6 +237,8 @@ export function WorkspaceConnection({
                           {ltr(runtime.session.buildId ?? runtime.session.version ?? runtime.version)}
                         </span>
                       </Menu.GroupLabel>
+                      {!machines.canSwitch && canUpdate(runtime.session) &&
+                        updateItem(runtime.session, () => update.run(workspace, null))}
                       <div className="flex items-center rounded-sm hover:bg-surface">
                         <Menu.Item
                           nativeButton
@@ -248,6 +279,16 @@ export function WorkspaceConnection({
                           <Info size={14} />
                         </Tooltip>
                       </div>
+                      {machines.canSwitch && (
+                        <Menu.Item
+                          nativeButton
+                          render={<MenuItem className={ITEM} />}
+                          onClick={() => forgetMachine(workspace.dialogs, machines.owner, runtime.session.host)}
+                        >
+                          <Trash2 size={14} className={ICON} aria-hidden="true" />
+                          {m.remote_forget_machine()}
+                        </Menu.Item>
+                      )}
                       <Menu.Item
                         nativeButton
                         render={
@@ -268,7 +309,7 @@ export function WorkspaceConnection({
                                 host: runtime.session.host,
                                 preview,
                                 currentClientAttached:
-                                  runtime.session.status === "connected",
+                                  runtime.session.status === "connected" || runtime.session.status === "updating",
                               },
                               onConfirm: () => mutStopRemoteHost.runAsHeadlessPromise(workspace, preview, {}),
                               onCancel: "close",
@@ -301,7 +342,7 @@ export function WorkspaceConnection({
                 className={`flex min-w-0 items-center border text-start transition-[background,border-color] duration-120 ease-standard focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2 ${triggerShape} ${triggerTone}`}
               >
                 {offline ? <CloudOff size={corner ? 14 : 16} className="shrink-0" aria-hidden="true" />
-                  : current?.state === "connecting" ? <Spinner className={`${corner ? "size-3.5" : "size-4"} border-accent-blue-border border-t-accent-blue-strong`} />
+                  : current?.state === "connecting" || current?.state === "updating" ? <Spinner className={`${corner ? "size-3.5" : "size-4"} border-accent-blue-border border-t-accent-blue-strong`} />
                   : current?.state === "disconnected" ? <Unplug size={corner ? 14 : 16} className="shrink-0" aria-hidden="true" />
                     : <RemoteIcon size={corner ? 14 : 16} className={`shrink-0 ${current ? "" : "text-subtext"}`} />}
                 {corner ? <span className="flex min-w-0 flex-col">

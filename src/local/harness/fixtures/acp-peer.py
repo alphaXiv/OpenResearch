@@ -64,10 +64,10 @@ def reverse(method, params):
     return response
 
 
-def note(method, params):
+def note(method, params, id=None):
     if record:
         with open(record, "a", encoding="utf-8") as file:
-            file.write(json.dumps(dict(method=method, params=params, cwd=os.getcwd())) + "\n")
+            file.write(json.dumps(dict(method=method, params=params, id=id, cwd=os.getcwd())) + "\n")
 
 
 def signal_stall():
@@ -97,7 +97,7 @@ for line in sys.stdin:
     method = request.get("method")
     params = request.get("params", {})
     if method:
-        note(method, params)
+        note(method, params, request.get("id"))
     if mode.startswith("alphaxiv-") and method in ["session/new", "session/load", "session/resume"]:
         [server] = params["mcpServers"]
         assert server["name"] == "alphaxiv", server

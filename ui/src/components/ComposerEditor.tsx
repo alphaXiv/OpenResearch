@@ -18,7 +18,7 @@ import {
   placeholder as placeholderText,
   type DecorationSet,
 } from "@codemirror/view";
-import { FileText, Folder, MessageSquare } from "lucide-react";
+import { Folder, MessageSquare } from "lucide-react";
 import {
   useContext,
   useEffect,
@@ -34,15 +34,15 @@ import { createPortal } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
 import { type CitedMessage, type HarnessId, type SkillInfo } from "../api";
-import { fmtBytes } from "../i18n";
+import { fmtBytes, ltr } from "../i18n";
 import { CITED_ID, refLabel } from "../agentMessages";
 import { commandDisplayName } from "../composerCommands";
-import type { ComposerAttachment } from "../composerStash";
+import { ATTACHMENT_KINDS, ATTACHMENT_TOKEN, isPictureType, type ComposerAttachment } from "../composerStash";
 import { PAPER_LINK, splitMentionPath } from "../fileMentions";
 import { livePreview, pointerSelection, revealChanged, revealedSpan } from "../markdownLivePreview";
 import { m } from "../paraglide/messages.js";
 import { WorkspaceDomContext } from "../WorkspaceDom";
-import { FileTypeIcon } from "./FileTypeIcon";
+import { FILE_CARD_CLASS, FileCardContent, FileTypeIcon } from "./FileTypeIcon";
 import { HarnessLogo } from "./HarnessLogo";
 import { LitSourceLogo } from "./LitSourceLogo";
 import { ResizeHandle } from "./ResizeHandle";
@@ -71,7 +71,7 @@ type Chip =
 
 const CHIP_TOKEN = new RegExp(
   [
-    String.raw`\[(?:Image|PDF) #(?<attachment>\d+)\]`,
+    String.raw`\[(?:${ATTACHMENT_KINDS}) #(?<attachment>\d+)\]`,
     PAPER_LINK.source,
     `(?<cited>${CITED_ID.source})`,
     String.raw`(?<=^|\s)(?:\/(?<command>[^\s/]+)|@"(?<quotedPath>[^"\n]+)"|@(?<path>\S+))(?=\s|$)`,
@@ -119,6 +119,13 @@ function chipKey(chip: Chip): string {
 const CHIP_CLASS =
   "mx-px mt-[3px] inline-flex h-5 max-w-64 cursor-default items-center gap-1 rounded-md border px-1.5 align-top text-sm leading-4.5 whitespace-nowrap";
 
+const IMAGE_CHIP_CLASS =
+  "group relative mx-px my-1 inline-flex max-w-full cursor-default overflow-hidden rounded-lg border border-border bg-surface align-bottom";
+
+const FILE_CHIP_CLASS = `group relative mx-px my-1 cursor-default align-bottom ${FILE_CARD_CLASS}`;
+
+const isImageChip = (chip: Chip) => chip.kind === "attachment" && isPictureType(chip.attachment.mediaType);
+
 function ChipContent({ chip }: { chip: Chip }) {
   if (chip.kind === "command") {
     return (
@@ -164,17 +171,7 @@ function ChipContent({ chip }: { chip: Chip }) {
     );
   }
   const { attachment } = chip;
-  return (
-    <>
-      {attachment.mediaType.startsWith("image/") ? (
-        <img src={attachment.dataUrl} alt="" className="size-4 shrink-0 rounded-xs object-cover" />
-      ) : (
-        <FileText size={14} className="shrink-0 text-subtext" aria-hidden="true" />
-      )}
-      <span className="min-w-0 truncate">{attachment.name ?? m.chat_pasted_image()}</span>
-      <span className="shrink-0 text-muted">{fmtBytes(attachment.size)}</span>
-    </>
-  );
+  return <FileCardContent name={attachment.name ?? m.chat_pasted_image()} size={fmtBytes(attachment.size)} />;
 }
 
 const chipRoots = new WeakMap<HTMLElement, Root>();
@@ -195,13 +192,17 @@ class ChipWidget extends WidgetType {
     return this.chip.kind === "command" && this.chip.previewable;
   }
 
-  override toDOM() {
+  override toDOM(view: EditorView) {
     const span = document.createElement("span");
-    span.className = `${CHIP_CLASS} ${
-      this.chip.kind === "command"
-        ? "border-transparent bg-skill-blue-subtle text-skill-blue"
-        : "border-border bg-surface text-text"
-    }`;
+    span.className = isImageChip(this.chip)
+      ? IMAGE_CHIP_CLASS
+      : this.chip.kind === "attachment"
+        ? FILE_CHIP_CLASS
+        : `${CHIP_CLASS} ${
+          this.chip.kind === "command"
+            ? "border-transparent bg-skill-blue-subtle text-skill-blue"
+            : "border-border bg-surface text-text"
+        }`;
     span.dataset.chip = chipKey(this.chip);
     if (this.chip.kind === "file") span.title = this.chip.path;
     if (this.chip.kind === "message") span.title = this.chip.cited.preview;
@@ -211,6 +212,28 @@ class ChipWidget extends WidgetType {
       span.tabIndex = 0;
       span.role = "button";
       span.ariaLabel = m.a11y_preview_skill({ name: this.chip.name });
+    }
+    if (this.chip.kind === "attachment") {
+      const name = this.chip.attachment.name ?? m.chat_pasted_image();
+      let root: Root | undefined;
+      if (isImageChip(this.chip)) {
+        // Built directly rather than through a React root, which would mount a frame after the chip.
+        const img = document.createElement("img");
+        img.src = this.chip.attachment.dataUrl;
+        img.alt = name;
+        img.className = "block h-auto max-h-24 w-auto max-w-60";
+        span.append(img);
+      } else {
+        span.title = name;
+        const card = document.createElement("span");
+        card.className = "contents";
+        span.append(card);
+        root = createRoot(card);
+        root.render(<ChipContent chip={this.chip} />);
+        chipRoots.set(span, root);
+      }
+      span.append(removeButton(view, span, name));
+      return span;
     }
     const root = createRoot(span);
     root.render(<ChipContent chip={this.chip} />);
@@ -224,10 +247,37 @@ class ChipWidget extends WidgetType {
     queueMicrotask(() => root?.unmount());
   }
 
-  /** Pointer events place the caret; keys typed on a focused chip stay with it. */
+  /** Pointer events place the caret, except on the remove button; keys typed on a focused chip stay with it. */
   override ignoreEvent(event: Event) {
-    return event.type.startsWith("key");
+    return event.type.startsWith("key") || (event.target instanceof Element && event.target.closest("[data-chip-remove]") !== null);
   }
+}
+
+const ATTACHMENT_AT = new RegExp(`^${ATTACHMENT_TOKEN.source} ?`);
+
+/** The corner X on an attachment chip: deletes its token, and with it the attachment. */
+function removeButton(view: EditorView, chip: HTMLElement, name: string) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.tabIndex = -1;
+  button.dataset.chipRemove = "";
+  const label = m.chat_remove_attachment({ name: ltr(name) });
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  button.className =
+    "absolute end-1 top-1 flex size-6 cursor-pointer items-center justify-center rounded-full border border-border bg-background text-subtext opacity-0 shadow-control-subtle group-hover:opacity-100 hover:text-text motion-safe:transition-opacity motion-safe:duration-120 motion-safe:ease-standard";
+  // Lucide's X, inlined: an image chip has no React root to render one into.
+  button.innerHTML =
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
+  // Keeps focus and the caret where they are.
+  button.addEventListener("mousedown", (event) => event.preventDefault());
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    const from = view.posAtDOM(chip);
+    const token = ATTACHMENT_AT.exec(view.state.doc.sliceString(from, from + 32));
+    if (token) view.dispatch({ changes: { from, to: from + token[0].length } });
+  });
+  return button;
 }
 
 const refreshChips = StateEffect.define<null>();
@@ -279,8 +329,9 @@ const composerTheme = EditorView.theme({
   // WebKit can retain an empty horizontal scrollbar gutter after the draft shrinks.
   ".cm-scroller::-webkit-scrollbar": { height: "0" },
   // `minWidth` lets WebKit shrink the content below the placeholder's one-line width.
-  ".cm-content": { padding: "0", caretColor: "var(--text)", minWidth: "0" },
-  ".cm-line": { padding: "0 var(--editor-pad-x)" },
+  // Padding on the content, not each line: CodeMirror draws a wrapped selection from the content's padding edge.
+  ".cm-content": { padding: "0 var(--editor-pad-x)", caretColor: "var(--text)", minWidth: "0" },
+  ".cm-line": { padding: "0" },
   // One line however narrow the box, so an empty draft keeps the one-line height.
   ".cm-placeholder": { color: "var(--muted)", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   "&.cm-plain .cm-content": { fontFamily: "var(--mono)", fontSize: "0.875em" },
@@ -369,7 +420,7 @@ export function ComposerEditor({
   /** Enter without Shift, outside a code block. */
   onSubmit: (event: KeyboardEvent) => void;
   /** Dropped files. */
-  onFiles: (files: File[]) => void;
+  onFiles: (transfer: DataTransfer) => void;
   /** Runs before the editor's own paste; call `preventDefault` to claim it. */
   onPaste: (event: ClipboardEvent) => void;
   placeholder: string;
@@ -392,8 +443,12 @@ export function ComposerEditor({
   const [compartments] = useState(() => ({ mode: new Compartment(), readOnly: new Compartment(), placeholder: new Compartment(), aria: new Compartment() }));
   const [hovered, setHovered] = useState<HTMLElement | null>(null);
   const previewId = useId();
-  /** A height the user dragged to; null keeps the natural height. */
+  /** A height the user dragged to, which the draft can still grow past; null keeps the natural height. */
   const [height, setHeight] = useState(() => storedHeight(resizeKey));
+  /** Whether a drag holds the box at `height` though the draft is taller; the next edit that grows the draft lifts it. */
+  const [capped, setCapped] = useState(false);
+  /** The draft's laid-out height, so an edit can tell whether it grew the draft. */
+  const contentHeight = useRef(0);
   const [heightLimit, setHeightLimit] = useState(Number.POSITIVE_INFINITY);
   const closeTimer = useRef<number | null>(null);
 
@@ -426,12 +481,12 @@ export function ComposerEditor({
             return true;
           },
           drop(event, view) {
-            const files = Array.from(event.dataTransfer?.files ?? []);
-            if (files.length === 0) return false;
+            const transfer = event.dataTransfer;
+            if (!transfer?.types.includes("Files")) return false;
             event.preventDefault();
             const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
             if (pos !== null) view.dispatch({ selection: { anchor: pos } });
-            latest.current.onFiles(files);
+            latest.current.onFiles(transfer);
             return true;
           },
         })),
@@ -457,6 +512,17 @@ export function ComposerEditor({
         compartments.placeholder.of(placeholderText(latest.current.placeholder)),
         compartments.aria.of(EditorView.contentAttributes.of(ariaAttributes())),
         EditorView.updateListener.of((update) => {
+          if (update.docChanged || update.geometryChanged) {
+            // Measured rather than `view.contentHeight`, which estimates wrapped lines right after an edit.
+            const edited = update.docChanged;
+            update.view.requestMeasure({
+              read: (view) => view.contentDOM.getBoundingClientRect().height,
+              write: (measured) => {
+                if (edited && measured > contentHeight.current) setCapped(false);
+                contentHeight.current = measured;
+              },
+            });
+          }
           if (!update.docChanged && !update.selectionSet) return;
           const typed = update.transactions.some(
             (transaction) => transaction.isUserEvent("input") && !transaction.isUserEvent("input.type.compose"),
@@ -483,6 +549,7 @@ export function ComposerEditor({
     if (!view || (view.state.doc.toString() === value && shownDraftKey.current === draftKey)) return;
     shownDraftKey.current = draftKey;
     view.setState(createState(value));
+    setCapped(false);
     latest.current.onChange(value, value.length, false);
   }, [value, draftKey]);
 
@@ -512,8 +579,8 @@ export function ComposerEditor({
     if (!dom) return;
     const clamped = height === null ? null : Math.min(height, heightLimit);
     dom.style.minHeight = clamped === null ? "" : `${clamped}px`;
-    dom.style.maxHeight = `${clamped ?? heightLimit}px`;
-  }, [height, heightLimit]);
+    dom.style.maxHeight = `${clamped !== null && capped ? clamped : heightLimit}px`;
+  }, [height, heightLimit, capped]);
 
   useEffect(() => {
     try {
@@ -642,7 +709,10 @@ export function ComposerEditor({
         min={MIN_HEIGHT}
         max={heightLimit}
         measure={currentHeight}
-        onChange={setHeight}
+        onChange={(next) => {
+          setHeight(next);
+          setCapped(next !== null);
+        }}
       />
       {hovered && hoveredSkill && (
         <SkillPreviewCard
@@ -655,7 +725,7 @@ export function ComposerEditor({
           onMouseLeave={scheduleClose}
         />
       )}
-      {hovered && hoveredAttachment?.mediaType.startsWith("image/") && (
+      {hovered && hoveredAttachment && isPictureType(hoveredAttachment.mediaType) && (
         <ImagePreview anchor={hovered} attachment={hoveredAttachment} />
       )}
     </div>

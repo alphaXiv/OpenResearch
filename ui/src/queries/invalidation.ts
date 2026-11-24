@@ -1,8 +1,14 @@
 import type { WorkspaceClient } from "./client";
-import type { Query, QueryFilters } from "@tanstack/react-query";
-import type { ChatSession, Experiment, Run } from "../api";
+import type { InfiniteData, Query, QueryClient, QueryFilters, QueryKey } from "@tanstack/react-query";
+import type { ChatSession, Experiment, Run, SidebarChatPage } from "../api";
 
 import { markLiveUpdate } from "./live";
+
+/** Whether this workspace's server streams sidebar cards, judged by the `totals` its pages carry. */
+export function streamsSidebarRows(client: QueryClient, scope: QueryKey) {
+  return client.getQueriesData<InfiniteData<SidebarChatPage>>({ queryKey: [...scope, "listSidebarChatSessions"] })
+    .some(([, data]) => data?.pages[0]?.totals !== undefined);
+}
 
 export const isCommit = (ref: unknown) => typeof ref === "string" && /^[0-9a-f]{40}$/i.test(ref);
 
@@ -21,7 +27,7 @@ export function isImmutableQuery(query: Query) {
 const fileBodies = ["resolvedFile", "getProjectFile", "getArtifactFileText", "getArtifactFileMetadata"];
 
 export const artifactFamilies = ["getArtifacts", "getArtifactFileText", "getArtifactFileMetadata"];
-const liveFamilies = ["getSessionExperiments", "getSubagentTranscript", "listChatActiveRuns", "listProjects", "listProjectActivity", "listSidebarChatSessions", "listExperiments", "listRuns", "listChatSessions", "getChatMessages", "getHarnesses", "getUpdateStatus", "getUsage", ...artifactFamilies, ...fileBodies, "getAbsoluteFile", "fileVersion", "getCodeTree", "getSessionWorktree", "getRunDiff", "getExperimentDiff", "listEngineHosts"];
+export const liveFamilies = ["getSessionExperiments", "getSubagentTranscript", "listChatShownRuns", "getRunMonitor", "listProjects", "listProjectActivity", "listSidebarChatSessions", "listExperiments", "listRuns", "listChatSessions", "getChatMessages", "getHarnesses", "getUpdateStatus", "getUsage", ...artifactFamilies, ...fileBodies, "getAbsoluteFile", "fileVersion", "getCodeTree", "getSessionWorktree", "getRunDiff", "getExperimentDiff", "listEngineHosts"];
 
 const settingsFamilies: Record<string, readonly string[]> = {
   hf: ["getHfSettings", "getComputeSettings", "getEnvVars", "getTrackioRuns"],
@@ -153,7 +159,7 @@ export function createInvalidation(client: WorkspaceClient) {
       return;
     }
     if (path.startsWith("/api/chat/")) {
-      invalidate(["listSidebarChatSessions"], scope);
+      if (!streamsSidebarRows(queryClient, scope)) invalidate(["listSidebarChatSessions"], scope);
       // An env card's answer saves variables.
       if (path.endsWith("/respond")) invalidate(["getEnvVars"], scope);
       if (path === "/api/chat/sessions") invalidate(["getProjectStarterPrompts", "listProjectActivity"], scope);
@@ -163,6 +169,10 @@ export function createInvalidation(client: WorkspaceClient) {
     if (project) {
       const [, projectId, action] = project;
       if (action.startsWith("/file")) { invalidateProjectFiles(projectId, scope, true); return; }
+      if (action === "/settings") {
+        invalidate(["getProjectSettings", "getComputeSettings"], scope, (query) => query.queryKey[3] === projectId);
+        return;
+      }
       invalidate(["listProjects", "listProjectActivity", "listSidebarChatSessions"], scope);
       invalidate(["getProjectGitStatus", "getCodeTree", "getProjectStarterPrompts"], scope, (query) => query.queryKey[3] === projectId);
       return;

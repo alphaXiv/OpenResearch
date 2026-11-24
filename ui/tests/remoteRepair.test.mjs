@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { act } from "react";
+import { ltr } from "../src/i18n";
 import { m } from "../src/paraglide/messages.js";
 import { find, renderApp, serveApp, settle } from "./render.mjs";
 
@@ -20,7 +21,7 @@ async function repairScreen() {
     gatewayUrl: "http://localhost:4910/", error: "Permissions refused", repairCommand, installPaths: null,
     uiPreferences: { theme: null, locale: null }, canStartNewHost: false,
   };
-  serveApp({ "GET /_orx/runtime": () => ({ kind: "ssh", version: "test", buildChannel: "stable", dashboardProtocol: 1, session }) });
+  serveApp({ "GET /_orx/runtime": () => ({ kind: "ssh", version: "test", buildChannel: "stable", session }) });
   const view = await renderApp("/projects");
   return { ...view, button: (label) => find("button", label) };
 }
@@ -67,4 +68,31 @@ test("a failed terminal can be opened again without reconnecting", async () => {
   assert.match(document.body.textContent, new RegExp(m.settings_terminal_closed()));
   await click(view.button(m.remote_repair_run()));
   assert.ok(terminal());
+});
+
+test("an older running host offers an update without stopping its work", async () => {
+  const session = {
+    id: "s", host: "fixture", user: "me", status: "needsUpdate", version: "old", dashboardProtocol: 1,
+    gatewayUrl: "http://localhost:4910/", error: null, repairCommand: null,
+    installPaths: { binary: "/fixture/bin/orx", database: "/fixture/data", cache: "/fixture/cache" },
+    uiPreferences: { theme: null, locale: null }, canStartNewHost: false,
+  };
+  serveApp({ "GET /_orx/runtime": () => ({ kind: "ssh", version: "test", buildChannel: "stable", session }) });
+  await renderApp("/projects");
+  assert.ok(find("button", m.remote_update()));
+  assert.equal(find("button", m.remote_stop_host()), null);
+});
+
+test("the host restart is announced while its workspace reconnects", async () => {
+  const session = {
+    id: "s", host: "fixture", user: "me", status: "restarting", version: "new", dashboardProtocol: 2,
+    gatewayUrl: "http://localhost:4910/", error: null, repairCommand: null, installPaths: null,
+    uiPreferences: { theme: null, locale: null }, canStartNewHost: false,
+  };
+  serveApp({ "GET /_orx/runtime": () => ({ kind: "ssh", version: "test", buildChannel: "stable", session }) });
+  await renderApp("/projects");
+  assert.ok(find("h1", m.remote_restarting_title({ host: ltr("fixture") })));
+  assert.ok(document.querySelector('[role="status"]'));
+  assert.ok(find("button", m.remote_machine_connecting()));
+  assert.equal(find("button", m.remote_start_new_host()), null);
 });

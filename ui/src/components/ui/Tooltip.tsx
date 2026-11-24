@@ -14,8 +14,8 @@ export function Tooltip({
   className?: string;
   interactive?: boolean;
   disabled?: boolean;
-  /** `start` opens beside the trigger, toward the reading start, so rows in a list stay visible. */
-  side?: "top" | "start";
+  /** `start` and `end` open beside the trigger, toward that edge in reading order, so rows in a list stay visible. */
+  side?: "top" | "start" | "end";
 }) {
   const triggerRef = useRef<HTMLSpanElement>(null);
   const tooltipRef = useRef<HTMLSpanElement>(null);
@@ -28,9 +28,9 @@ export function Tooltip({
     if (!tooltip.matches(":popover-open")) tooltip.showPopover();
     const anchor = trigger.getBoundingClientRect();
     const bounds = tooltip.getBoundingClientRect();
-    if (side === "start") {
+    if (side !== "top") {
       const rtl = getComputedStyle(trigger).direction === "rtl";
-      const beside = rtl ? anchor.right + 6 : anchor.left - bounds.width - 6;
+      const beside = (side === "start") !== rtl ? anchor.left - bounds.width - 6 : anchor.right + 6;
       if (beside >= 8 && beside + bounds.width <= window.innerWidth - 8) {
         const middle = anchor.top + anchor.height / 2 - bounds.height / 2;
         tooltip.style.left = `${beside}px`;

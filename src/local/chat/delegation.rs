@@ -27,12 +27,20 @@ const ANSWER_PREVIEW_CHARS: usize = 200;
 pub const WAIT_MAX_SECONDS: u64 = 1800;
 pub const TOOL_TIMEOUT_SECONDS: u64 = WAIT_MAX_SECONDS + 60;
 
+static AGENT_KEY: OnceLock<String> = OnceLock::new();
+
+/// The key [`agent_token`] derives from; a server sets it once, before any agent starts, to
+/// the one its kept agents' tokens came from.
+pub fn set_agent_key(key: String) {
+    let _ = AGENT_KEY.set(key);
+}
+
 /// Proves which chat a call to the orx MCP server speaks for. Derived from a
-/// key that lives only in this process, so a respawned agent keeps its token
-/// and nothing needs revoking: a deleted chat's token names no chat.
+/// key a server lineage keeps while any agent it started runs, so a respawned
+/// or kept agent keeps its token and nothing needs revoking: a deleted chat's
+/// token names no chat.
 pub fn agent_token(session_id: &str) -> String {
-    static KEY: OnceLock<String> = OnceLock::new();
-    let key = KEY.get_or_init(|| format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4()));
+    let key = AGENT_KEY.get_or_init(|| format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4()));
     Sha256::digest(format!("{key}:{session_id}").as_bytes())
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -107,16 +115,6 @@ fn mode_rank(mode: PermissionMode) -> u8 {
     }
 }
 
-/// Whether `caller` may message `target` without widening what it can do: a
-/// target that may do more unasked than its caller, or whose modes orx cannot
-/// read, is the user's to steer.
-pub fn within_reach(caller: &StoredChatSession, target: &StoredChatSession) -> bool {
-    match (permission_rank(caller), permission_rank(target)) {
-        (Some(caller), Some(target)) => target <= caller,
-        _ => false,
-    }
-}
-
 /// The broadest mode the delegate's harness offers that is no broader than
 /// the delegator's. Plan narrows to asking: a delegate is sent to do its task.
 /// A delegator whose modes orx cannot read gets a delegate that asks.
@@ -137,11 +135,14 @@ pub fn delegate_permission(parent: &StoredChatSession, harness_id: &str) -> Resu
             ))
         };
     }
+    let bypass_unconfirmed = harness_id == "claude-code"
+        && harness::claude::full_access() == harness::claude::FullAccess::NeedsRootConsent;
     choices
         .iter()
         .filter_map(|choice| {
             PermissionMode::from_id(&choice.id)
                 .filter(|mode| *mode != PermissionMode::Plan)
+                .filter(|mode| !(bypass_unconfirmed && *mode == PermissionMode::Bypass))
                 .map(|mode| (mode_rank(mode), choice.id.clone()))
         })
         .filter(|(rank, _)| *rank <= ceiling)
@@ -408,6 +409,9 @@ impl PendingPrompt {
                 .collect();
             return format!("set {}", names.join(", "));
         }
+        if self.kind() == "question" {
+            return "answer its question".into();
+        }
         format!(
             "approve {}",
             self.prompt.tool.as_deref().unwrap_or("a step")
@@ -435,6 +439,12 @@ pub fn pending_prompt(store: &Store, session_id: &str) -> Result<Option<PendingP
             })
         })
     }))
+}
+
+/// Whether another chat may answer `pending`: only a delegate's questions
+/// are; the user answers every chat they opened.
+pub fn asks_agents(store: &Store, chat_id: &str, pending: &PendingPrompt) -> Result<bool> {
+    Ok(pending.kind() == "question" && store.delegation(chat_id)?.parent.is_some())
 }
 
 pub(super) fn question_text(id: &str, model: &str, pending: &PendingPrompt) -> String {
@@ -475,11 +485,13 @@ pub fn status(
 ) -> Result<String> {
     let model = target.model.clone().unwrap_or_default();
     let pending = pending_prompt(store, &target.id)?;
+    let asks_agents = match &pending {
+        Some(pending) => asks_agents(store, &target.id, pending)?,
+        None => false,
+    };
     let turn = store.latest_chat_turn(&target.id)?;
     let mut text = match (&pending, working, &turn) {
-        (Some(pending), _, _) if pending.kind() == "question" => {
-            question_text(&target.id, &model, pending)
-        }
+        (Some(pending), _, _) if asks_agents => question_text(&target.id, &model, pending),
         (Some(pending), _, _) => format!(
             "Chat `{}` ({model}) waits for the user to {} in that chat.",
             target.id,
@@ -921,6 +933,7 @@ mod tests {
             client_turn_id: "ct_1".into(),
             request_hash: "hash".into(),
             prepared_input: "task".into(),
+            flag_input: None,
             settings_json: "{}".into(),
             state: "preparing".into(),
             delivery_state: "not_sent".into(),
@@ -1007,6 +1020,17 @@ mod tests {
                 .map(|pending| pending.id),
             Some("perm".into()),
             "the questions of a batch are asked in order"
+        );
+        store.remove_chat_delegate(&child.id).unwrap();
+        assert_eq!(
+            kinds(),
+            ["answer"],
+            "only the user answers a chat that is not a delegate"
+        );
+        let status = status(&store, &child, false, &parent.id).unwrap();
+        assert!(
+            status.contains("waits for the user to answer its question"),
+            "{status}"
         );
         let plan_exit = WirePrompt {
             kind: "question".into(),

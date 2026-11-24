@@ -178,7 +178,7 @@ impl Backend {
 pub enum ComputeCommand {
     /// Browse cloud offers (also the behavior without a subcommand).
     Catalog(CatalogArgs),
-    /// List backends and the machine-wide default.
+    /// List backends and the default for the chat's or folder's project.
     Status,
     /// Inspect backend configuration and hardware or credential sources.
     Show { backend: Backend },
@@ -212,23 +212,32 @@ pub struct CatalogArgs {
     #[arg(long)]
     pub cpu: bool,
     /// Filter to one GPU id (e.g. `H100_SXM`). Case-insensitive. GPU mode only.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "cpu")]
     pub gpu: Option<String>,
     /// Filter to a specific GPU count per instance. GPU mode only.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "cpu")]
     pub count: Option<i64>,
     /// Filter to one provider (e.g. `runpod`, `vast`, `lambda`). Case-insensitive. GPU mode only.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "cpu")]
     pub provider: Option<String>,
 }
 #[derive(Debug, Subcommand)]
 pub enum DefaultCommand {
+    /// Set the default for the chat's or folder's project, or the machine's outside one.
     Set {
         backend: Backend,
         #[arg(long)]
         flavor: Option<String>,
+        /// Set the machine's default, which projects without their own follow.
+        #[arg(long)]
+        machine: bool,
     },
-    Clear,
+    /// Return the project to the machine's default, or clear the machine's outside a project.
+    Clear {
+        /// Clear the machine's default instead.
+        #[arg(long)]
+        machine: bool,
+    },
 }
 #[derive(Debug, Args)]
 pub struct ConfigureArgs {
@@ -511,10 +520,12 @@ async fn run_command(command: ComputeCommand, json_output: bool) -> Result<()> {
         ComputeCommand::Status => settings::status().await?,
         ComputeCommand::Show { backend } => settings::show(backend.name()).await?,
         ComputeCommand::Default { command } => match command {
-            DefaultCommand::Set { backend, flavor } => {
-                settings::default(Some(backend.name().into()), flavor).await?
-            }
-            DefaultCommand::Clear => settings::default(None, None).await?,
+            DefaultCommand::Set {
+                backend,
+                flavor,
+                machine,
+            } => settings::default(Some(backend.name().into()), flavor, machine).await?,
+            DefaultCommand::Clear { machine } => settings::default(None, None, machine).await?,
         },
         ComputeCommand::Configure(args) => {
             let backend = args.backend.name();

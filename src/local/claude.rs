@@ -23,35 +23,39 @@
 //!
 //! Control requests ride the same stdin stream
 //! (`{"type":"control_request","request_id":…,"request":{"subtype":…}}`) and are
-//! answered by a `control_response`; `set_model` is the only one we use — native
-//! `interrupt` gave no response and is treated as unreliable, so v1 interrupts
-//! by killing the child (`ChatHost::interrupt`'s `claude-code` branch).
+//! answered by a `control_response`. Interrupts kill the child because native
+//! `interrupt` gave no response.
+//!
+//! The child lives in a keeper (`crate::keep`), so a restarting server hands it to the next,
+//! which adopts it from its owner record. Output is acknowledged only once it is durable:
+//! during a turn by the turn's checkpoints, between turns once the reader has handled it, and
+//! never while a segment the child started on its own is held in memory.
 //!
 //! Non-goals (separate tasks): MCP config isolation (`--strict-mcp-config`);
 //! codex/opencode paths; the UI rendering fix.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use crate::error::{anyhow, Result};
+use crate::keep::{self, KeptHandle, KeptLines, KeptStdin};
 use crate::local::agent_lifecycle::{IdlePolicy, REAPER_INTERVAL};
 use crate::local::harness::claude::{
-    claude_permission_mode, uses_permission_bridge, write_mcp_config, write_settings,
-    CLAUDE_ENTRYPOINT,
+    check_full_access, claude_permission_mode, full_access, uses_permission_bridge,
+    write_mcp_config, write_settings, FullAccess, CLAUDE_ENTRYPOINT,
 };
 use crate::local::harness::{HarnessAuthState, PermissionMode, SetupFailure};
 use crate::local::native_store::NativeStore;
 
-/// Ceiling on a control request's response wait. Control requests (`set_model`)
+/// Ceiling on a control request's response wait. Control requests
 /// are quick; a wedged child must never hold the respawn path for long.
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 const TERMINATION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -87,15 +91,22 @@ struct TurnSlot {
     /// A turn has ended on this child, so a segment it starts with no turn
     /// listening is its own continuation rather than startup output.
     served: bool,
-    /// Background tasks the child reported started and not yet finished. It
-    /// resumes on its own when one finishes, so it must outlive them, even one
-    /// that never ends.
-    background: HashSet<String>,
+    /// Background tasks the child reported started and not yet finished, with
+    /// their descriptions, by task id. It resumes on its own when one finishes,
+    /// so it must outlive them, even one that never ends.
+    background: BTreeMap<String, String>,
     /// When `background` last went from empty to not, in epoch milliseconds.
     background_since: Option<i64>,
     /// A segment the child began on its own after a turn ended, held until a
-    /// turn takes it.
-    unclaimed: Option<Vec<Value>>,
+    /// turn takes it; each line with the output offset after it.
+    unclaimed: Option<Vec<(Value, u64)>>,
+    /// Where `unclaimed` starts in the child's output.
+    held_from: u64,
+    /// The output offset the reader has handled through.
+    position: u64,
+    /// The last turn let go without ending, so its output may still be resumed from its
+    /// checkpoint by the next server; none of it is acknowledged until another turn starts.
+    abandoned: bool,
     /// A turn is starting to record `unclaimed`, so no other is started for it.
     /// If that turn never takes the lines, they wait for the chat's next turn.
     recording: bool,
@@ -105,14 +116,17 @@ struct TurnSlot {
 }
 
 impl TurnSlot {
-    fn new(now: Instant) -> Self {
+    fn new(now: Instant, position: u64) -> Self {
         Self {
             sender: None,
             idle_since: now,
             served: false,
-            background: HashSet::new(),
+            background: BTreeMap::new(),
             background_since: None,
             unclaimed: None,
+            held_from: position,
+            position,
+            abandoned: false,
             recording: false,
             task_finished_at: None,
         }
@@ -146,14 +160,21 @@ impl TurnSlot {
     }
 
     /// Hands any held continuation to the new turn first; returns whether the
-    /// child has served a turn before.
-    fn register(&mut self, sender: mpsc::UnboundedSender<TurnEvent>) -> bool {
-        for line in self.unclaimed.take().into_iter().flatten() {
-            let _ = sender.send(TurnEvent::Line(line));
-        }
+    /// child has served a turn before, and the output offset the turn starts at.
+    fn register(&mut self, sender: mpsc::UnboundedSender<TurnEvent>) -> (bool, u64) {
+        let start = match self.unclaimed.take() {
+            Some(lines) => {
+                for (line, offset) in lines {
+                    let _ = sender.send(TurnEvent::Line(line, offset));
+                }
+                self.held_from
+            }
+            None => self.position,
+        };
         self.recording = false;
+        self.abandoned = false;
         self.sender = Some(sender);
-        self.served
+        (self.served, start)
     }
 
     fn release(&mut self, sender: &mpsc::UnboundedSender<TurnEvent>, now: Instant) -> bool {
@@ -170,69 +191,103 @@ impl TurnSlot {
         true
     }
 
-    /// Follows the child's background tasks; returns whether how many there are changed.
+    /// Follows the child's background tasks; returns whether they changed.
     fn track_background(&mut self, event: &Value, now: Instant) -> bool {
         if event.get("type").and_then(Value::as_str) != Some("system") {
             return false;
         }
-        let before = self.background.len();
-        let task_id = || {
-            event
-                .get("task_id")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        };
-        match event.get("subtype").and_then(Value::as_str) {
-            Some("task_started") => self.background.extend(task_id()),
-            Some("task_notification") => {
-                if let Some(id) = task_id() {
-                    self.background.remove(&id);
+        let was_empty = self.background.is_empty();
+        let text =
+            |value: &Value, key: &str| value.get(key).and_then(Value::as_str).map(str::to_string);
+        let task_id = text(event, "task_id");
+        let changed = match event.get("subtype").and_then(Value::as_str) {
+            Some("task_started") => {
+                let Some(id) = task_id else { return false };
+                let description = text(event, "description").unwrap_or_default();
+                if self.background.get(&id) == Some(&description) {
+                    return false;
                 }
+                self.background.insert(id, description);
+                true
+            }
+            Some("task_updated") => {
+                let description = event
+                    .get("patch")
+                    .and_then(|patch| text(patch, "description"));
+                let (Some(id), Some(description)) = (task_id, description) else {
+                    return false;
+                };
+                let Some(known) = self.background.get_mut(&id) else {
+                    return false;
+                };
+                if *known == description {
+                    return false;
+                }
+                *known = description;
+                true
+            }
+            Some("task_notification") => {
                 self.task_finished_at = Some(now);
+                task_id.is_some_and(|id| self.background.remove(&id).is_some())
             }
             Some("background_tasks_changed") => {
-                if let Some(tasks) = event.get("tasks").and_then(Value::as_array) {
-                    self.background = tasks
-                        .iter()
-                        .filter_map(|task| task.get("task_id").and_then(Value::as_str))
-                        .map(str::to_string)
-                        .collect();
+                let Some(tasks) = event.get("tasks").and_then(Value::as_array) else {
+                    return false;
+                };
+                let updated = tasks
+                    .iter()
+                    .filter_map(|task| {
+                        let id = text(task, "task_id")?;
+                        let description = text(task, "description")
+                            .or_else(|| self.background.get(&id).cloned())
+                            .unwrap_or_default();
+                        Some((id, description))
+                    })
+                    .collect();
+                if self.background == updated {
+                    return false;
                 }
+                self.background = updated;
+                true
             }
-            _ => {}
-        }
+            _ => return false,
+        };
         if self.background.is_empty() {
             self.background_since = None;
-        } else if before == 0 {
+        } else if was_empty {
             self.background_since = Some(crate::store::now_ms());
         }
-        self.background.len() != before
+        changed
     }
 
     /// Whether a line no turn is listening for starts a segment the child
     /// began on its own; if so it is held for a turn to record.
-    fn starts_continuation(&mut self, event: &Value) -> bool {
+    fn starts_continuation(&mut self, event: &Value, offset: u64) -> bool {
         if !self.served || !starts_segment(event) {
             return false;
         }
-        self.unclaimed = Some(vec![event.clone()]);
+        self.held_from = self.position;
+        self.unclaimed = Some(vec![(event.clone(), offset)]);
         true
     }
 }
 
 /// What the resident child was spawned with. Any field that can only be applied
 /// at launch (permission mode, effort, the `orx mcp` bridge) forces a respawn
-/// when it changes; `model` is the exception — it retunes live via `set_model`,
-/// so it is updated in place on a successful control request.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// when it changes, including the model carried in the child's environment. Kept in the
+/// child's owner record, so its fields only grow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SpawnConfig {
     pub permission_mode: Option<PermissionMode>,
     pub effort: Option<String>,
     pub model: Option<String>,
     pub native_store: NativeStore,
     pub profile: Option<String>,
+    #[serde(default)]
     pub alphaxiv_signed_in: bool,
     /// Whether the child has its input bridge; failed setup is retried on the next turn.
+    #[serde(default)]
     pub bridge_active: bool,
     /// The executable detection selected, so a newer install respawns the child.
     pub bin: Option<PathBuf>,
@@ -264,8 +319,9 @@ pub type ClaudeContinuation = (TurnRoute, mpsc::UnboundedReceiver<TurnEvent>);
 #[derive(Debug)]
 pub enum TurnEvent {
     /// A stream-json output line (an `assistant`/`user`/`system`/`result`
-    /// object). The turn loop folds these through `apply_event`.
-    Line(Value),
+    /// object) and the output offset after it. The turn loop folds these
+    /// through `apply_event`.
+    Line(Value, u64),
     /// Child died (EOF on stdout). The turn cannot continue.
     Closed,
 }
@@ -322,17 +378,72 @@ pub fn classify_line(line: &str) -> ClaudeLine {
     }
 }
 
+/// What a successor needs to take a kept child back: the `state` of its owner record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Record {
+    config: SpawnConfig,
+    /// The approval bridge token the child's `orx mcp` presents.
+    #[serde(default)]
+    gate: Option<String>,
+    /// The sign-in the child started under.
+    #[serde(default)]
+    auth: AuthIdentity,
+    /// Counts the servers that attached to the child, so their control request ids differ.
+    #[serde(default)]
+    generation: u64,
+    #[serde(default)]
+    started_at_ms: i64,
+    /// Background tasks still running; the child must outlive them.
+    #[serde(default)]
+    background: BTreeMap<String, String>,
+    /// The model in the child's `ORX_INVOCATION_CONTEXT`.
+    #[serde(default)]
+    invocation_model: Option<String>,
+}
+
+impl Record {
+    fn owner(&self, session_id: &str) -> Value {
+        keep::Owner::Agent {
+            harness: "claude-code".into(),
+            session_id: session_id.to_string(),
+            state: serde_json::to_value(self).expect("Claude records serialize"),
+        }
+        .to_value()
+    }
+}
+
+/// A sign-in as `claude auth status` reports it. A generation number only means something
+/// within one server, so an adopted child is matched to the new server's by this.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthIdentity {
+    method: Option<String>,
+    provider: Option<String>,
+}
+
+impl AuthIdentity {
+    fn of(auth: &AuthSnapshot) -> Self {
+        Self {
+            method: auth.method.map(str::to_string),
+            provider: auth.provider.clone(),
+        }
+    }
+}
+
+/// An adopted child's auth generation until it is matched to this server's.
+const UNBOUND: u64 = u64::MAX;
+
 /// A live connection to one session's resident `claude` child.
 pub struct ClaudeClient {
     chat: Weak<crate::local::chat::ChatHost>,
     session_id: String,
-    child: Mutex<Child>,
-    #[cfg(unix)]
-    process_group_id: u32,
+    keeper: KeptHandle,
     /// Held open for the life of the child: stdin EOF ends the session, so it
     /// closes only to stop the child. One JSON line per user message / control
     /// request.
-    stdin: Mutex<Option<ChildStdin>>,
+    stdin: Mutex<Option<KeptStdin>>,
+    generation: u64,
     next_id: AtomicI64,
     /// Our outstanding control requests. Sync mutex: touched from the reader
     /// task and from `control_request`, held only for map ops, never across an
@@ -341,17 +452,133 @@ pub struct ClaudeClient {
     /// The session's in-flight turn, if any (one per session-child). The
     /// registration guard drops synchronously on task abort, hence sync mutex.
     turn: std::sync::Mutex<TurnSlot>,
-    /// What this child was spawned with — the reuse/respawn decision reads it,
-    /// and a successful `set_model` updates its `model` in place.
+    /// What this child was spawned with, used by the reuse/respawn decision.
     config: std::sync::Mutex<SpawnConfig>,
-    auth_generation: u64,
+    /// The inherited model stays fixed even when the catalog resolves its alias differently.
+    invocation_model: Option<String>,
+    gate: Option<String>,
+    auth: AuthIdentity,
+    auth_generation: AtomicU64,
     started_at: Instant,
+    started_at_ms: i64,
     terminated: AtomicBool,
     /// Steers written to this child, which its exit gives back to the queue.
     steers: std::sync::Mutex<Vec<String>>,
 }
 
 impl ClaudeClient {
+    /// Takes over a kept child described by `record`. With `resume_at`, everything the child
+    /// wrote from there is held for the turn that resumes on it.
+    fn new(
+        chat: Weak<crate::local::chat::ChatHost>,
+        session_id: &str,
+        mut kept: keep::Kept,
+        record: Record,
+        auth_generation: u64,
+        resume_at: Option<u64>,
+    ) -> Result<(Arc<Self>, KeptLines)> {
+        let keeper = kept.handle();
+        let stdin = kept
+            .take_stdin()
+            .ok_or_else(|| anyhow!("Claude Code's keeper has no stdin"))?;
+        let mut lines = kept
+            .take_stdout()
+            .ok_or_else(|| anyhow!("Claude Code's keeper has no output"))?
+            .lines();
+        let now = Instant::now();
+        let age = crate::store::now_ms()
+            .saturating_sub(record.started_at_ms)
+            .max(0) as u64;
+        let mut turn = TurnSlot::new(now, resume_at.unwrap_or(keeper.start()));
+        turn.background = record.background;
+        if let Some(offset) = resume_at {
+            lines.skip_to(offset).map_err(|error| {
+                anyhow!("Claude Code's turn cannot resume from its checkpoint: {error}")
+            })?;
+            turn.unclaimed = Some(Vec::new());
+            turn.recording = true;
+        }
+        // Every server that attached before handed the child a turn.
+        turn.served = record.generation > 0;
+        let client = Arc::new(Self {
+            chat,
+            session_id: session_id.to_string(),
+            keeper,
+            stdin: Mutex::new(Some(stdin)),
+            generation: record.generation,
+            next_id: AtomicI64::new(1),
+            pending: std::sync::Mutex::new(HashMap::new()),
+            turn: std::sync::Mutex::new(turn),
+            config: std::sync::Mutex::new(record.config),
+            invocation_model: record.invocation_model,
+            gate: record.gate,
+            auth: record.auth,
+            auth_generation: AtomicU64::new(auth_generation),
+            started_at: now.checked_sub(Duration::from_millis(age)).unwrap_or(now),
+            started_at_ms: record.started_at_ms,
+            terminated: AtomicBool::new(false),
+            steers: std::sync::Mutex::new(Vec::new()),
+        });
+        Ok((client, lines))
+    }
+
+    fn record(&self) -> Value {
+        Record {
+            config: self.config(),
+            gate: self.gate.clone(),
+            auth: self.auth.clone(),
+            generation: self.generation,
+            started_at_ms: self.started_at_ms,
+            background: self.turn.lock().unwrap().background.clone(),
+            invocation_model: self.invocation_model.clone(),
+        }
+        .owner(&self.session_id)
+    }
+
+    /// Rewrites the owner record after something a successor needs changed.
+    fn publish_record(&self) {
+        if let Err(error) = self.keeper.set_owner(&self.record()) {
+            eprintln!(
+                "orx up: could not update Claude worker session={}: {error}",
+                self.session_id
+            );
+        }
+    }
+
+    pub(crate) fn keeper(&self) -> &KeptHandle {
+        &self.keeper
+    }
+
+    /// Releases output through `offset` when nothing in memory still needs it.
+    fn release_output(&self, offset: u64) {
+        let mut turn = self.turn.lock().unwrap();
+        turn.position = turn.position.max(offset);
+        if turn.sender.is_none() && turn.unclaimed.is_none() && !turn.abandoned {
+            self.keeper.ack(offset);
+        }
+    }
+
+    /// Whether this child runs under `auth`'s sign-in. An adopted child takes on the first
+    /// generation whose sign-in it matches.
+    fn matches_auth(&self, auth: &AuthSnapshot) -> bool {
+        let bound = self.auth_generation.load(Ordering::Acquire);
+        if bound != UNBOUND {
+            return bound == auth.generation;
+        }
+        if auth.state != HarnessAuthState::Ready || AuthIdentity::of(auth) != self.auth {
+            return false;
+        }
+        match self.auth_generation.compare_exchange(
+            UNBOUND,
+            auth.generation,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => true,
+            Err(current) => current == auth.generation,
+        }
+    }
+
     /// Marks the held segment as being recorded by a turn that will call
     /// [`ClaudeHost::take_continuation`]; false when there is none to record.
     pub(crate) fn claim_continuation(&self) -> bool {
@@ -367,7 +594,7 @@ impl ClaudeClient {
     }
 
     pub fn auth_generation(&self) -> u64 {
-        self.auth_generation
+        self.auth_generation.load(Ordering::Acquire)
     }
 
     /// Send a user message as one stream-json line. The child answers with a
@@ -376,6 +603,12 @@ impl ClaudeClient {
     pub async fn send_steer(&self, steer: &crate::local::chat::SteerMessage) -> Result<()> {
         self.steers.lock().unwrap().push(steer.id.clone());
         self.send_user_message(&steer.text).await
+    }
+
+    /// Takes back steers a predecessor handed this child, as if this server had.
+    pub fn hold_steers(&self, steers: &[crate::local::chat::SteerMessage]) {
+        let mut held = self.steers.lock().unwrap();
+        held.extend(steers.iter().map(|steer| steer.id.clone()));
     }
 
     pub async fn send_user_message(&self, text: &str) -> Result<()> {
@@ -391,7 +624,7 @@ impl ClaudeClient {
     /// / timeout).
     pub(crate) async fn control_request(&self, request: Value) -> Result<Result<Value, String>> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let request_id = format!("req_{id}");
+        let request_id = format!("req_{}_{id}", self.generation);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(request_id.clone(), tx);
         let sent = self
@@ -433,7 +666,7 @@ impl ClaudeClient {
             let mut compact_outcome: Option<Result<(), String>> = None;
             while let Some(event) = rx.recv().await {
                 match event {
-                    TurnEvent::Line(line) => {
+                    TurnEvent::Line(line, _) => {
                         let system = line.get("type").and_then(Value::as_str) == Some("system");
                         let subtype = line.get("subtype").and_then(Value::as_str);
                         // Native /compact emits status events instead of a user-message echo.
@@ -509,21 +742,6 @@ impl ClaudeClient {
         })?
     }
 
-    /// Retune the resident child's model in place via `set_model`. On success,
-    /// record the new model in `config` so the reuse decision stays truthful.
-    async fn set_model(&self, model: &str) -> Result<()> {
-        match self
-            .control_request(json!({ "subtype": "set_model", "model": model }))
-            .await?
-        {
-            Ok(_) => {
-                self.config.lock().unwrap().model = Some(model.to_string());
-                Ok(())
-            }
-            Err(msg) => Err(anyhow!("claude set_model failed: {msg}")),
-        }
-    }
-
     async fn write_line(&self, msg: &Value) -> Result<()> {
         let mut stdin = self.stdin.lock().await;
         let stdin = stdin
@@ -547,7 +765,7 @@ impl ClaudeClient {
         tx: mpsc::UnboundedSender<TurnEvent>,
         reaper_notify: Arc<Notify>,
     ) -> TurnRoute {
-        let served = self.turn.lock().unwrap().register(tx.clone());
+        let (served, start) = self.turn.lock().unwrap().register(tx.clone());
         // The reader may have already sent its last `Closed` to no one.
         if self.terminated.load(Ordering::Acquire) {
             let _ = tx.send(TurnEvent::Closed);
@@ -557,6 +775,7 @@ impl ClaudeClient {
             tx,
             reaper_notify,
             served,
+            start,
         }
     }
 
@@ -588,6 +807,7 @@ pub struct TurnRoute {
     tx: mpsc::UnboundedSender<TurnEvent>,
     reaper_notify: Arc<Notify>,
     served: bool,
+    start: u64,
 }
 
 impl TurnRoute {
@@ -599,6 +819,11 @@ impl TurnRoute {
     /// the prompt's echo is one it started on its own, not startup replay.
     pub fn served(&self) -> bool {
         self.served
+    }
+
+    /// The output offset the turn's first line starts at.
+    pub fn start(&self) -> u64 {
+        self.start
     }
 
     /// Detaches the turn from the child unless the reader has already routed
@@ -621,6 +846,7 @@ impl Drop for TurnRoute {
     fn drop(&mut self) {
         let mut turn = self.client.turn.lock().unwrap();
         if turn.release(&self.tx, Instant::now()) {
+            turn.abandoned = true;
             drop(turn);
             self.reaper_notify.notify_one();
         }
@@ -652,75 +878,84 @@ fn reported_permission_mode(event: &Value) -> Option<PermissionMode> {
 
 /// Reader task: pump child stdout, route each line. On EOF every pending control
 /// request fails and the live turn (if any) gets [`TurnEvent::Closed`].
-async fn read_loop(client: Arc<ClaudeClient>, stdout: tokio::process::ChildStdout) {
-    let mut lines = BufReader::new(stdout).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        match classify_line(&line) {
+async fn read_loop(client: Arc<ClaudeClient>, mut lines: KeptLines) {
+    loop {
+        let (line, offset) = match lines.next_line().await {
+            Ok(Some(next)) => next,
+            Ok(None) => break,
+            Err(error) => {
+                eprintln!(
+                    "orx up: could not read Claude worker session={}: {error}",
+                    client.session_id
+                );
+                break;
+            }
+        };
+        let value = match classify_line(&line) {
             ClaudeLine::ControlResponse { request_id, result } => {
+                // A predecessor's request finds no sender here: ids carry the generation.
                 if let Some(tx) = client.pending.lock().unwrap().remove(&request_id) {
                     let _ = tx.send(result);
                 }
+                client.release_output(offset);
+                continue;
             }
-            ClaudeLine::Event(value) => {
-                if let Some(mode) = reported_permission_mode(&value) {
-                    let previous = {
-                        let mut config = client.config.lock().unwrap();
-                        let previous = config.permission_mode.unwrap_or(PermissionMode::Auto);
-                        config.permission_mode = Some(mode);
-                        previous
-                    };
-                    if previous != mode && !client.terminated.load(Ordering::Acquire) {
-                        if let Some(chat) = client.chat.upgrade() {
-                            if let Err(error) = chat
-                                .sync_claude_permission_mode(&client.session_id, previous, mode)
-                                .await
-                            {
-                                eprintln!(
-                                    "orx up: could not synchronize Claude permission mode: {error}"
-                                );
-                            }
-                        }
-                    }
-                }
-                // Route to the live turn. With none listening, a segment the
-                // child starts itself is held for a turn to record; any other
-                // line (an aborted turn's tail) is dropped once its tool
-                // identities are recorded.
-                let mut turn = client.turn.lock().unwrap();
-                if turn.track_background(&value, Instant::now()) {
-                    if let Some(chat) = client.chat.upgrade() {
-                        chat.emit_event(
-                            "chat.background",
-                            json!({ "sessionId": client.session_id }),
-                        );
-                    }
-                }
-                if let Some(tx) = turn.sender.as_ref() {
-                    let _ = tx.send(TurnEvent::Line(value));
-                } else if let Some(lines) = turn.unclaimed.as_mut() {
-                    lines.push(value);
-                } else if turn.starts_continuation(&value) {
-                    drop(turn);
-                    if let Some(chat) = client.chat.upgrade() {
-                        let session_id = client.session_id.clone();
-                        tokio::spawn(async move { chat.record_continuation(&session_id).await });
-                    }
-                } else if value.get("type").and_then(Value::as_str) == Some("assistant") {
-                    drop(turn);
-                    if let Some(message) = value.get("message").cloned() {
-                        let session_id = client.session_id.clone();
-                        // Off the reader so a busy store never stalls Claude's stdout.
-                        tokio::task::spawn_blocking(move || {
-                            crate::local::chat::record_native_invocations(
-                                "claude-code",
-                                &session_id,
-                                &message,
-                            )
-                        });
+            ClaudeLine::Junk => {
+                client.release_output(offset);
+                continue;
+            }
+            ClaudeLine::Event(value) => value,
+        };
+        if let Some(mode) = reported_permission_mode(&value) {
+            let previous = {
+                let mut config = client.config.lock().unwrap();
+                let previous = config.permission_mode.unwrap_or(PermissionMode::Auto);
+                config.permission_mode = Some(mode);
+                previous
+            };
+            if previous != mode && !client.terminated.load(Ordering::Acquire) {
+                client.publish_record();
+                if let Some(chat) = client.chat.upgrade() {
+                    if let Err(error) = chat
+                        .sync_claude_permission_mode(&client.session_id, previous, mode)
+                        .await
+                    {
+                        eprintln!("orx up: could not synchronize Claude permission mode: {error}");
                     }
                 }
             }
-            ClaudeLine::Junk => {}
+        }
+        // A segment the child starts itself is held for a turn to record; a line no turn
+        // takes, such as an aborted turn's tail, is dropped.
+        let (background_changed, dropped) = {
+            let mut turn = client.turn.lock().unwrap();
+            let background_changed = turn.track_background(&value, Instant::now());
+            let dropped = if let Some(tx) = turn.sender.as_ref() {
+                let _ = tx.send(TurnEvent::Line(value, offset));
+                false
+            } else if let Some(lines) = turn.unclaimed.as_mut() {
+                lines.push((value, offset));
+                false
+            } else if turn.starts_continuation(&value, offset) {
+                if let Some(chat) = client.chat.upgrade() {
+                    let session_id = client.session_id.clone();
+                    tokio::spawn(async move { chat.record_continuation(&session_id).await });
+                }
+                false
+            } else {
+                true
+            };
+            turn.position = offset;
+            (background_changed, dropped)
+        };
+        if background_changed {
+            client.publish_record();
+            if let Some(chat) = client.chat.upgrade() {
+                chat.emit_event("chat.background", json!({ "sessionId": client.session_id }));
+            }
+        }
+        if dropped {
+            client.release_output(offset);
         }
     }
     // EOF or read error: the connection is unusable. Kill the child if it is
@@ -744,7 +979,7 @@ async fn read_loop(client: Arc<ClaudeClient>, stdout: tokio::process::ChildStdou
     }
 }
 
-/// Lets the child exit on its own, then kills its process group and reaps it.
+/// Lets the child exit on its own, then stops it through its keeper.
 pub(crate) async fn terminate_client(client: &Arc<ClaudeClient>) {
     end_client(client, false).await;
 }
@@ -761,7 +996,7 @@ async fn end_client(client: &Arc<ClaudeClient>, interrupt: bool) {
 }
 
 async fn end_detached(client: &ClaudeClient, interrupt: bool) {
-    if client.terminated.swap(true, Ordering::AcqRel) {
+    if client.terminated.swap(true, Ordering::AcqRel) || keep::handing_off() {
         return;
     }
     // The tasks die with the child, and nothing will resume to report them.
@@ -773,37 +1008,22 @@ async fn end_detached(client: &ClaudeClient, interrupt: bool) {
     if let Some(chat) = client.chat.upgrade().filter(|_| abandoned) {
         chat.emit_event("chat.background", json!({ "sessionId": client.session_id }));
     }
-    #[cfg(unix)]
-    let group = Some(client.process_group_id);
-    #[cfg(not(unix))]
-    let group = None;
     // A writer blocked on a wedged child holds stdin; that child gets SIGTERM instead.
     let input_closed = client
         .stdin
         .try_lock()
         .map(|mut stdin| stdin.take())
         .is_ok();
-    let mut child = client.child.lock().await;
-    if input_closed && !interrupt {
-        crate::process::let_agent_exit(&mut child, group).await;
-    } else {
-        crate::process::ask_agent_to_stop(&mut child, group).await;
-    }
-    // Also reaps what Claude Code left in its group: tool shells and MCP servers.
-    #[cfg(unix)]
-    if let Ok(process_group_id) = i32::try_from(client.process_group_id) {
-        // SAFETY: spawn assigns the child its own process group before this id is captured.
-        unsafe {
-            libc::kill(-process_group_id, libc::SIGKILL);
-        }
-    }
-    let _ = child.start_kill();
-    if tokio::time::timeout(TERMINATION_TIMEOUT, child.wait())
+    // Also ends what Claude Code left in its group: tool shells and MCP servers.
+    if client
+        .keeper
+        .end_agent(input_closed && !interrupt, TERMINATION_TIMEOUT)
         .await
-        .is_err()
+        .is_none()
+        && !keep::handing_off()
     {
         eprintln!(
-            "orx up: timed out reaping Claude worker session={}",
+            "orx up: timed out stopping Claude worker session={}",
             client.session_id
         );
     }
@@ -842,7 +1062,11 @@ fn release_steers(client: &ClaudeClient) {
 /// wiring: `--input-format stream-json` and, on recovery/respawn,
 /// `--resume <native_id>`. No handshake — the first turn's `system`/`init` line
 /// is the health signal.
-async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<ClaudeClient>> {
+async fn spawn_client(
+    spec: &SpawnSpec,
+    auth: &AuthSnapshot,
+    invocation_model: Option<String>,
+) -> Result<Arc<ClaudeClient>> {
     let bin = spec.config.bin.clone().ok_or_else(|| {
         SetupFailure::tag(
             "claude_setup_binary",
@@ -851,6 +1075,9 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
             ),
         )
     })?;
+    check_full_access(spec.config.permission_mode)?;
+    let access = full_access();
+
     let mut cmd = crate::process::tokio_command(&bin);
     cmd.args([
         "--print",
@@ -867,20 +1094,12 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
         // the harness ignores events until the echo arrives.
         "--replay-user-messages",
         "--verbose",
-        "--allow-dangerously-skip-permissions",
         "--permission-mode",
         claude_permission_mode(spec.config.permission_mode),
     ])
     .arg("--append-system-prompt-file")
     .arg(&spec.playbook)
-    .current_dir(&spec.repo)
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::from(crate::local::chat::harness_log("claude")?))
-    // Backstop only: the child is deliberately kept resident across turns, so
-    // its lifetime is managed by the host reaper and explicit stop paths, not
-    // by dropping a per-turn handle.
-    .kill_on_drop(true);
+    .current_dir(&spec.repo);
     if let Some(model) = &spec.config.model {
         cmd.args(["--model", model]);
     }
@@ -942,7 +1161,14 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
         cmd.args(["--disallowedTools", "Agent,Task,Workflow"]);
         cmd.args(["--allowedTools", "mcp__orx"]);
     }
+    // Claude exits at launch on this flag as root without `IS_SANDBOX`.
+    if access != FullAccess::NeedsRootConsent {
+        cmd.arg("--allow-dangerously-skip-permissions");
+    }
     crate::local::chat::prepare_env(&mut cmd);
+    if access == FullAccess::RootConsented {
+        cmd.env("IS_SANDBOX", "1");
+    }
     cmd.env("CLAUDE_CODE_ENTRYPOINT", CLAUDE_ENTRYPOINT);
     let delegated = crate::store::Store::open()
         .and_then(|store| store.delegation(&spec.session_id))
@@ -978,88 +1204,49 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
         "claude-code",
         spec.chat.up_port(),
     )?;
-    // Own process group: a terminal SIGINT reaches orx up alone, which then
-    // tears the resident child down deliberately (kill_session / shutdown). A
-    // shared group would let Ctrl-C kill a persistent child mid-turn.
-    #[cfg(unix)]
-    cmd.process_group(0);
-
-    let mut child = cmd.spawn().map_err(|e| {
+    if let Some(model) = &invocation_model {
+        let identity = crate::store::InvocationIdentity {
+            harness: "claude-code".into(),
+            model: model.clone(),
+            provider: None,
+        };
+        identity.validate()?;
+        cmd.env("ORX_INVOCATION_CONTEXT", serde_json::to_string(&identity)?);
+    }
+    let record = Record {
+        config,
+        gate: gate.map(|(_, token)| token),
+        auth: AuthIdentity::of(auth),
+        generation: 0,
+        started_at_ms: crate::store::now_ms(),
+        background: BTreeMap::new(),
+        invocation_model,
+    };
+    let kept = keep::spawn(keep::Keep {
+        command: cmd.as_std(),
+        io: keep::Io::Pipes {
+            stderr: Some(crate::store::data_dir().join("agent-claude.log")),
+        },
+        retain: keep::LOSSLESS,
+        owner: record.owner(&spec.session_id),
+    })
+    .await
+    .map_err(|e| {
         SetupFailure::tag(
             "claude_setup_spawn",
             anyhow!("Could not spawn {}: {}", bin.display(), e),
         )
     })?;
-    #[cfg(unix)]
-    let process_group_id = child
-        .id()
-        .ok_or_else(|| anyhow!("claude: spawned child has no process id"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow!("claude: no stdout"))?;
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow!("claude: no stdin"))?;
-
-    let started_at = Instant::now();
-    let client = Arc::new(ClaudeClient {
-        chat: Arc::downgrade(&spec.chat),
-        session_id: spec.session_id.clone(),
-        child: Mutex::new(child),
-        #[cfg(unix)]
-        process_group_id,
-        stdin: Mutex::new(Some(stdin)),
-        next_id: AtomicI64::new(1),
-        pending: std::sync::Mutex::new(HashMap::new()),
-        turn: std::sync::Mutex::new(TurnSlot::new(started_at)),
-        config: std::sync::Mutex::new(config),
-        auth_generation,
-        started_at,
-        terminated: AtomicBool::new(false),
-        steers: std::sync::Mutex::new(Vec::new()),
-    });
-    tokio::spawn(read_loop(client.clone(), stdout));
+    let (client, lines) = ClaudeClient::new(
+        Arc::downgrade(&spec.chat),
+        &spec.session_id,
+        kept,
+        record,
+        auth.generation,
+        None,
+    )?;
+    tokio::spawn(read_loop(client.clone(), lines));
     Ok(client)
-}
-
-/// How a live child reconciles with the turn's wanted config.
-///
-/// * `Reuse` — identical spawn config → hand back the running child (zero cost).
-/// * `SetModel` — only the model changed, to a concrete value → retune in place.
-/// * `Respawn` — mode/effort/bridge changed, or the model was cleared (a launch
-///   flag can't be unset live) → kill and respawn with `--resume`.
-#[derive(Debug, PartialEq, Eq)]
-pub enum ChildAction {
-    Reuse,
-    SetModel(String),
-    Respawn,
-}
-
-/// Pure reuse/respawn decision (unit-tested). `current` is the running child's
-/// config, `wanted` the turn's.
-pub fn child_action(current: &SpawnConfig, wanted: &SpawnConfig) -> ChildAction {
-    // Any launch-only axis differing forces a respawn.
-    if current.permission_mode != wanted.permission_mode
-        || current.effort != wanted.effort
-        || current.bridge_active != wanted.bridge_active
-        || current.alphaxiv_signed_in != wanted.alphaxiv_signed_in
-        || current.native_store != wanted.native_store
-        || current.profile != wanted.profile
-        || current.bin != wanted.bin
-    {
-        return ChildAction::Respawn;
-    }
-    if current.model == wanted.model {
-        return ChildAction::Reuse;
-    }
-    // Model differs. A change TO a concrete model retunes live; clearing the
-    // model (Some → None) can't be expressed as a flag toggle, so respawn.
-    match &wanted.model {
-        Some(model) => ChildAction::SetModel(model.clone()),
-        None => ChildAction::Respawn,
-    }
 }
 
 /// The `orx up` Claude host: one resident `claude` child per chat session, keyed
@@ -1162,7 +1349,7 @@ impl ClaudeHost {
             if client.terminated.load(Ordering::Acquire) {
                 continue;
             }
-            let exited = !matches!(client.child.lock().await.try_wait(), Ok(None));
+            let exited = client.keeper.try_wait().is_some();
             let turn = client.turn.lock().unwrap();
             if turn.sender.is_some() || (!exited && !turn.idle(now)) {
                 continue;
@@ -1388,15 +1575,25 @@ impl ClaudeHost {
         auth.state
     }
 
-    async fn resolve_unknown(&self) -> AuthSnapshot {
-        let _recovering = self.auth_recovery_lock.lock().await;
-        let current = self.auth_snapshot();
-        if current.state != HarnessAuthState::Unknown || current.runtime_rejected {
-            return current;
+    /// Waits for a verdict on the shared sign-in when none is known yet, which a turn needs
+    /// before [`Self::acquire_turn`] can start a child; a profile has its own sign-in.
+    pub async fn settle_auth(&self, spec: &SpawnSpec) {
+        if spec.config.profile.is_some() {
+            return;
         }
-        let probe = crate::local::harness::claude::current_auth_state().await;
-        self.observe_auth_probe(&probe);
-        self.auth_snapshot()
+        let _recovering = self.auth_recovery_lock.lock().await;
+        for _ in 0..3 {
+            let current = self.auth_snapshot();
+            if current.state != HarnessAuthState::Unknown || current.runtime_rejected {
+                return;
+            }
+            let probe = crate::local::harness::claude::current_auth_state().await;
+            self.observe_auth_probe(&probe);
+            // A check reserved while this one ran discards its answer: still pending, not failed.
+            if self.auth_snapshot().sequence == probe.sequence {
+                return;
+            }
+        }
     }
 
     /// Acquire this session's resident child for one turn, reconciled to
@@ -1408,11 +1605,45 @@ impl ClaudeHost {
     /// the reader task keeps the child alive — an unregistered client would be
     /// unreachable by every kill path and leak the process for the rest of `orx
     /// up`'s life. Detached, the bring-up always runs to completion.
+    ///
+    /// A sign-in [`Self::settle_auth`] has not settled starts no child.
     pub async fn acquire_turn(
         self: &Arc<Self>,
         spec: SpawnSpec,
         tx: mpsc::UnboundedSender<TurnEvent>,
     ) -> Result<TurnRoute> {
+        let selected = spec.config.model.as_deref();
+        // `None` while the catalog has not resolved the selection, as right after a start.
+        let resolved = match selected {
+            Some(selected) => {
+                let catalog = spec.chat.harnesses.lock().await;
+                let entry = catalog.as_ref().and_then(|(_, payload)| {
+                    crate::local::harness::catalog_entry(
+                        payload,
+                        "claude-code",
+                        spec.config.profile.as_deref(),
+                    )
+                });
+                entry
+                    .and_then(|entry| entry["models"].as_array())
+                    .and_then(|models| {
+                        models
+                            .iter()
+                            .find(|model| model["id"].as_str() == Some(selected))
+                    })
+                    .and_then(|model| model["resolvedModel"].as_str())
+                    .map(str::to_owned)
+            }
+            None => None,
+        };
+        let invocation_model = resolved.clone().or_else(|| selected.map(str::to_owned));
+        // A child started on the bare selection, or before the catalog resolved it, runs what
+        // the selection still names; only a different resolution needs another child.
+        let runs_selection = |live: &ClaudeClient| match (&live.invocation_model, &resolved) {
+            (running, _) if running.as_deref() == selected => true,
+            (_, None) => true,
+            (running, Some(resolved)) => running.as_ref() == Some(resolved),
+        };
         let session = spec.session_id.clone();
         let session_lock = {
             let mut locks = self.spawn_locks.lock().await;
@@ -1431,9 +1662,9 @@ impl ClaudeHost {
                 .map_err(|e| SetupFailure::tag("claude_setup_profile", e))?;
         }
         let mut auth = self.auth_snapshot();
-        if !profile && auth.state == HarnessAuthState::Unknown && !auth.runtime_rejected {
-            auth = self.resolve_unknown().await;
-        }
+        // A sign-in the check could not read is no sign-out: a running child keeps serving, and
+        // reports a rejected credential itself. Only starting one needs a verified sign-in.
+        let unverified = !profile && auth.state == HarnessAuthState::Unknown;
         match if profile {
             HarnessAuthState::Ready
         } else {
@@ -1462,18 +1693,11 @@ impl ClaudeHost {
                     anyhow!("Claude Code 2.1.211 or newer is required"),
                 ));
             }
-            HarnessAuthState::Unknown => {
-                return Err(SetupFailure::tag("claude_setup_auth_check", anyhow!(
-                    "Claude Code authentication could not be verified — run `claude auth status`, then re-check the agent"
-                )));
-            }
-            HarnessAuthState::Ready => {}
+            HarnessAuthState::Unknown | HarnessAuthState::Ready => {}
         }
         let live = self.inner.lock().await.get(&session).cloned();
         if let Some(live) = live {
-            if live.terminated.load(Ordering::Acquire)
-                || !matches!(live.child.lock().await.try_wait(), Ok(None))
-            {
+            if live.terminated.load(Ordering::Acquire) || live.keeper.try_wait().is_some() {
                 self.inner.lock().await.remove(&session);
                 stop_client(live, "exited").await;
             } else if let Some(reason) =
@@ -1481,46 +1705,32 @@ impl ClaudeHost {
             {
                 self.inner.lock().await.remove(&session);
                 stop_client(live, reason.as_str()).await;
-            } else if !profile && live.auth_generation() != auth.generation {
+            } else if !profile && !unverified && !live.matches_auth(&auth) {
+                self.inner.lock().await.remove(&session);
+                stop_client(live, "authentication-changed").await;
+            } else if live.config() == spec.config && runs_selection(&live) {
+                let latest = self.auth_snapshot();
+                // Unbound is a child a previous server kept, never checked against this one's.
+                let unverified_match = unverified
+                    && latest.state == HarnessAuthState::Unknown
+                    && [UNBOUND, latest.generation].contains(&live.auth_generation());
+                if profile
+                    || unverified_match
+                    || (latest.state == HarnessAuthState::Ready && live.matches_auth(&latest))
+                {
+                    return Ok(live.register_turn(tx, self.reaper_notify.clone()));
+                }
                 self.inner.lock().await.remove(&session);
                 stop_client(live, "authentication-changed").await;
             } else {
-                match child_action(&live.config(), &spec.config) {
-                    ChildAction::Reuse => {
-                        let latest = self.auth_snapshot();
-                        if profile
-                            || (latest.state == HarnessAuthState::Ready
-                                && live.auth_generation() == latest.generation)
-                        {
-                            return Ok(live.register_turn(tx, self.reaper_notify.clone()));
-                        }
-                        self.inner.lock().await.remove(&session);
-                        stop_client(live, "authentication-changed").await;
-                    }
-                    ChildAction::SetModel(model) => match live.set_model(&model).await {
-                        Ok(()) => {
-                            let latest = self.auth_snapshot();
-                            if profile
-                                || (latest.state == HarnessAuthState::Ready
-                                    && live.auth_generation() == latest.generation)
-                            {
-                                return Ok(live.register_turn(tx, self.reaper_notify.clone()));
-                            }
-                            self.inner.lock().await.remove(&session);
-                            stop_client(live, "authentication-changed").await;
-                        }
-                        Err(e) => {
-                            eprintln!("orx up: claude set_model failed, respawning: {e}");
-                            self.inner.lock().await.remove(&session);
-                            stop_client(live, "set-model-failed").await;
-                        }
-                    },
-                    ChildAction::Respawn => {
-                        self.inner.lock().await.remove(&session);
-                        stop_client(live, "configuration-changed").await;
-                    }
-                }
+                self.inner.lock().await.remove(&session);
+                stop_client(live, "configuration-changed").await;
             }
+        }
+        if unverified {
+            return Err(SetupFailure::tag("claude_setup_auth_check", anyhow!(
+                "Claude Code authentication could not be verified — run `claude auth status`, then re-check the agent"
+            )));
         }
         auth = self.auth_snapshot();
         if !profile && auth.state != HarnessAuthState::Ready {
@@ -1535,7 +1745,7 @@ impl ClaudeHost {
             .insert(session.clone(), spawn_epoch);
         let host = self.clone();
         let client = tokio::spawn(async move {
-            let client = spawn_client(&spec, auth.generation).await?;
+            let client = spawn_client(&spec, &auth, invocation_model).await?;
             {
                 let mut guard = host.inner.lock().await;
                 let latest = host.auth_snapshot();
@@ -1568,9 +1778,9 @@ impl ClaudeHost {
         Ok(client.register_turn(tx, self.reaper_notify.clone()))
     }
 
-    /// How many background tasks each live child has unfinished, and since
-    /// when the first of them has run, by session id.
-    pub async fn background_tasks(&self) -> HashMap<String, (usize, i64)> {
+    /// Each live child's unfinished background tasks as `(task id, description)`,
+    /// and since when the first of them has run, by session id.
+    pub async fn background_tasks(&self) -> HashMap<String, (Vec<(String, String)>, i64)> {
         let live: Vec<_> = self.inner.lock().await.values().cloned().collect();
         live.iter()
             .filter(|client| !client.terminated.load(Ordering::Acquire))
@@ -1579,9 +1789,31 @@ impl ClaudeHost {
                 let since = turn
                     .background_since
                     .filter(|_| !turn.background.is_empty())?;
-                Some((client.session_id.clone(), (turn.background.len(), since)))
+                let tasks = turn
+                    .background
+                    .iter()
+                    .map(|(id, description)| (id.clone(), description.clone()))
+                    .collect();
+                Some((client.session_id.clone(), (tasks, since)))
             })
             .collect()
+    }
+
+    /// Stop one of the session's background tasks with Claude Code's `stop_task`.
+    /// `Ok(false)` when the session has no such task running.
+    pub async fn stop_task(&self, session_id: &str, task_id: &str) -> Result<bool> {
+        let Some(client) = self
+            .live(session_id)
+            .await
+            .filter(|client| client.turn.lock().unwrap().background.contains_key(task_id))
+        else {
+            return Ok(false);
+        };
+        client
+            .control_request(json!({ "subtype": "stop_task", "task_id": task_id }))
+            .await?
+            .map_err(|msg| anyhow!("Claude Code could not stop the task: {msg}"))?;
+        Ok(true)
     }
 
     /// Whether the session's child holds a segment it started on its own that
@@ -1623,6 +1855,71 @@ impl ClaudeHost {
         Some((live.register_turn(tx, self.reaper_notify.clone()), rx))
     }
 
+    /// Takes back a child a previous server kept for `chat`. With a `resume_at`, what the
+    /// child wrote from there waits for [`Self::resume_turn`]; without, what the previous
+    /// server never acknowledged is read as new.
+    pub async fn adopt(
+        self: &Arc<Self>,
+        chat: &Arc<crate::local::chat::ChatHost>,
+        adoption: crate::local::harness::Adoption,
+    ) -> Result<()> {
+        let session = adoption.session_id;
+        let mut record: Record = serde_json::from_value(adoption.state).map_err(|error| {
+            anyhow!(
+                "The kept Claude Code agent of chat {session} has an unreadable record: {error}"
+            )
+        })?;
+        record.generation += 1;
+        let kept = keep::attach(&adoption.keep_id).await?;
+        let (client, lines) = ClaudeClient::new(
+            Arc::downgrade(chat),
+            &session,
+            kept,
+            record,
+            UNBOUND,
+            adoption.resume_at,
+        )?;
+        // Before any request: the new generation is what keeps its ids apart.
+        client.keeper.set_owner(&client.record())?;
+        if let Some(token) = &client.gate {
+            let mode = client.config().permission_mode;
+            chat.restore_gate_token(
+                &session,
+                token,
+                mode == Some(PermissionMode::Plan),
+                mode == Some(PermissionMode::Bypass),
+            );
+        }
+        let session_lock = {
+            let mut locks = self.spawn_locks.lock().await;
+            locks
+                .entry(session.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let _spawning = session_lock.lock().await;
+        if self.forgotten_sessions.lock().await.contains(&session) {
+            return Err(anyhow!("Claude session was deleted"));
+        }
+        let replaced = self.inner.lock().await.insert(session, client.clone());
+        if let Some(replaced) = replaced {
+            stop_client(replaced, "adopted-duplicate").await;
+        }
+        tokio::spawn(read_loop(client, lines));
+        Ok(())
+    }
+
+    /// Routes the output an adopted child held for the turn that resumes on it, from that
+    /// turn's checkpoint, to the turn.
+    pub async fn resume_turn(&self, session_id: &str, keep_id: &str) -> Option<ClaudeContinuation> {
+        let live = self.inner.lock().await.get(session_id).cloned()?;
+        if live.keeper.id() != keep_id {
+            return None;
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        Some((live.register_turn(tx, self.reaper_notify.clone()), rx))
+    }
+
     /// Kill and reap one session's child. The load-bearing interrupt/delete
     /// path: a resident child survives task-abort/`kill_on_drop`, so it must be
     /// killed explicitly; the next turn respawns with `--resume`.
@@ -1636,6 +1933,17 @@ impl ClaudeHost {
     pub async fn interrupt_session(&self, session_id: &str) {
         self.kill_session_for(session_id, "session-interrupted", true)
             .await;
+    }
+
+    pub async fn interrupt_background(&self, session_id: &str) -> bool {
+        let Some(client) = self.live(session_id).await else {
+            return false;
+        };
+        if client.turn.lock().unwrap().background.is_empty() {
+            return false;
+        }
+        self.interrupt_session(session_id).await;
+        true
     }
 
     /// Stops the session's child so its next turn resumes whatever the store
@@ -1652,7 +1960,7 @@ impl ClaudeHost {
                 "Claude is still finishing a background task. Wait for its reply, or ask Claude to stop the task."
             ));
         }
-        self.kill_session_for(session_id, "fork-switched", false)
+        self.kill_session_for(session_id, "stopped-idle", false)
             .await;
         Ok(())
     }
@@ -1679,6 +1987,7 @@ impl ClaudeHost {
         let session_id = spec.session_id.clone();
         let (tx, rx) = mpsc::unbounded_channel();
         let result = tokio::time::timeout(timeout, async {
+            self.settle_auth(&spec).await;
             let route = self.acquire_turn(spec, tx).await?;
             route.client().compact(rx, timeout).await
         })
@@ -1715,8 +2024,11 @@ impl ClaudeHost {
         self.spawn_locks.lock().await.remove(session_id);
     }
 
-    /// Kill and reap every child (also happens via kill_on_drop on exit).
+    /// Stops every child, unless this server is handing them to the next.
     pub async fn shutdown(&self) {
+        if keep::handing_off() {
+            return;
+        }
         let clients = self
             .inner
             .lock()
@@ -1747,42 +2059,50 @@ pub(crate) mod tests {
         idle_since: Instant,
         shell: &str,
     ) -> Arc<ClaudeClient> {
-        chat_test_client(session_id, started_at, idle_since, shell, Weak::new())
+        kept_test_client(session_id, started_at, idle_since, shell, Weak::new())
+            .await
+            .0
     }
 
+    /// A client of `shell` run in a keeper, and its output, which no reader reads yet.
     #[cfg(unix)]
-    fn chat_test_client(
+    async fn kept_test_client(
         session_id: &str,
         started_at: Instant,
         idle_since: Instant,
         shell: &str,
         chat: Weak<crate::local::chat::ChatHost>,
-    ) -> Arc<ClaudeClient> {
-        let mut command = crate::process::tokio_command("sh");
-        command
-            .args(["-c", shell])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .process_group(0);
-        let mut child = command.spawn().unwrap();
-        let process_group_id = child.id().unwrap();
-        let stdin = child.stdin.take().unwrap();
-        Arc::new(ClaudeClient {
-            chat,
-            session_id: session_id.to_string(),
-            child: Mutex::new(child),
-            process_group_id,
-            stdin: Mutex::new(Some(stdin)),
-            next_id: AtomicI64::new(1),
-            pending: std::sync::Mutex::new(HashMap::new()),
-            turn: std::sync::Mutex::new(TurnSlot::new(idle_since)),
-            config: std::sync::Mutex::new(cfg(None, None, None, false)),
-            auth_generation: 0,
-            started_at,
-            terminated: AtomicBool::new(false),
-            steers: std::sync::Mutex::new(Vec::new()),
+    ) -> (Arc<ClaudeClient>, KeptLines) {
+        let mut command = crate::process::command("sh");
+        command.args(["-c", shell]);
+        let record = test_record(session_id);
+        let kept = keep::spawn(keep::Keep {
+            command: &command,
+            io: keep::Io::Pipes { stderr: None },
+            retain: keep::LOSSLESS,
+            owner: record.owner(session_id),
         })
+        .await
+        .unwrap();
+        let (mut client, lines) =
+            ClaudeClient::new(chat, session_id, kept, record, 0, None).unwrap();
+        let only = Arc::get_mut(&mut client).unwrap();
+        only.started_at = started_at;
+        only.turn.get_mut().unwrap().idle_since = idle_since;
+        (client, lines)
+    }
+
+    #[cfg(unix)]
+    fn test_record(session_id: &str) -> Record {
+        Record {
+            config: cfg(None, None, None, false),
+            gate: Some(format!("gate-{session_id}")),
+            auth: AuthIdentity::default(),
+            generation: 0,
+            started_at_ms: crate::store::now_ms(),
+            background: BTreeMap::new(),
+            invocation_model: None,
+        }
     }
 
     #[cfg(unix)]
@@ -1807,8 +2127,12 @@ pub(crate) mod tests {
             sent_at: 1,
         };
         let now = Instant::now();
-        let old = chat_test_client("chat", now, now, "cat >/dev/null", Arc::downgrade(&chat));
-        let new = chat_test_client("chat", now, now, "cat >/dev/null", Arc::downgrade(&chat));
+        let old = kept_test_client("chat", now, now, "cat >/dev/null", Arc::downgrade(&chat))
+            .await
+            .0;
+        let new = kept_test_client("chat", now, now, "cat >/dev/null", Arc::downgrade(&chat))
+            .await
+            .0;
         for (client, id) in [(&old, "q_old"), (&new, "q_new")] {
             chat.queue_steer("chat", &steer(id), &store).unwrap();
             client.send_steer(&steer(id)).await.unwrap();
@@ -1872,7 +2196,6 @@ pub(crate) mod tests {
         session_id: &str,
         chat: Weak<crate::local::chat::ChatHost>,
     ) -> Arc<ClaudeClient> {
-        let now = Instant::now();
         let shell = r#"while IFS= read -r line; do
             case "$line" in *RESUMES_FIRST*)
                 printf '%s\n' '{"type":"system","subtype":"init"}' '{"type":"assistant","message":{"id":"resumed","content":[{"type":"text","text":"TASK_DONE"}]}}' '{"type":"result","subtype":"success"}' ;;
@@ -1880,13 +2203,92 @@ pub(crate) mod tests {
             printf '%s\n' "$line"
             case "$line" in *'"type":"user"'*)
                 printf '%s\n' '{"type":"assistant","message":{"id":"reply","content":[{"type":"text","text":"REPLY"}]}}' '{"type":"result","subtype":"success"}' ;;
+            *'"subtype":"stop_task"'*)
+                request=${line#*'"request_id":"'}
+                request=${request%%'"'*}
+                task=${line#*'"task_id":"'}
+                task=${task%%'"'*}
+                printf '{"type":"system","subtype":"task_notification","task_id":"%s","status":"stopped"}\n' "$task"
+                printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s"}}\n' "$request" ;;
             esac
         done"#;
-        let client = chat_test_client(session_id, now, now, shell, chat);
-        let stdout = client.child.lock().await.stdout.take().unwrap();
-        tokio::spawn(read_loop(client.clone(), stdout));
+        scripted_worker(host, session_id, shell, chat).await
+    }
+
+    /// A fake CLI running `shell` in a keeper, read by the real read loop.
+    #[cfg(unix)]
+    pub(crate) async fn scripted_worker(
+        host: &ClaudeHost,
+        session_id: &str,
+        shell: &str,
+        chat: Weak<crate::local::chat::ChatHost>,
+    ) -> Arc<ClaudeClient> {
+        let now = Instant::now();
+        let (client, lines) = kept_test_client(session_id, now, now, shell, chat).await;
+        tokio::spawn(read_loop(client.clone(), lines));
         install_test_client(host, client.clone()).await;
         client
+    }
+
+    /// Lets go of `client` the way a server that exits does, leaving its child to a successor.
+    #[cfg(unix)]
+    pub(crate) fn leave_for_successor(client: &ClaudeClient) {
+        client.terminated.store(true, Ordering::Release);
+        client.keeper.detach();
+    }
+
+    /// A successor's [`ClaudeHost::adopt`] of `client`'s child, from its owner record.
+    #[cfg(unix)]
+    pub(crate) async fn adopt_in(
+        chat: &Arc<crate::local::chat::ChatHost>,
+        client: &ClaudeClient,
+        resume_at: Option<u64>,
+    ) -> Result<Arc<ClaudeClient>> {
+        let state = keep::entries()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.id == client.keeper.id())
+            .and_then(|entry| match entry.owner {
+                keep::Record::Known(keep::Owner::Agent { state, .. }) => Some(state),
+                _ => None,
+            })
+            .expect("the kept child has an agent record");
+        chat.claude
+            .adopt(
+                chat,
+                crate::local::harness::Adoption {
+                    keep_id: client.keeper.id().to_string(),
+                    session_id: client.session_id.clone(),
+                    state,
+                    resume_at,
+                    commands: Vec::new(),
+                },
+            )
+            .await?;
+        Ok(chat.claude.live(&client.session_id).await.unwrap())
+    }
+
+    /// Writes `text` to the fake CLI as one line.
+    #[cfg(unix)]
+    pub(crate) async fn type_line(client: &ClaudeClient, text: &str) {
+        client
+            .stdin
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .write_all(format!("{text}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn chat_with(host: &Arc<ClaudeHost>) -> Arc<crate::local::chat::ChatHost> {
+        Arc::new(crate::local::chat::ChatHost::new(
+            Arc::new(crate::local::opencode::AgentHost::new(None)),
+            Arc::new(crate::local::codex::CodexHost::new()),
+            host.clone(),
+        ))
     }
 
     /// Runs one prompted turn on the worker to its result.
@@ -1896,8 +2298,10 @@ pub(crate) mod tests {
         let route = client.register_turn(tx, host.reaper_notify.clone());
         assert!(!route.served());
         client.send_user_message("first").await.unwrap();
-        while let Some(TurnEvent::Line(line)) = rx.recv().await {
+        while let Some(TurnEvent::Line(line, offset)) = rx.recv().await {
             if line["type"] == "result" {
+                // As the turn's last checkpoint would.
+                client.keeper.ack(offset);
                 break;
             }
         }
@@ -1950,25 +2354,170 @@ pub(crate) mod tests {
         }
     }
 
-    #[test]
-    fn changing_profile_always_respawns_the_child() {
-        let current = cfg(None, None, Some("sonnet"), false);
-        let mut wanted = current.clone();
-        wanted.profile = Some("claude-012345abcd".into());
-        assert_eq!(child_action(&current, &wanted), ChildAction::Respawn);
-        let mut second = wanted.clone();
-        second.profile = Some("claude-abcdefghij".into());
-        assert_eq!(child_action(&wanted, &second), ChildAction::Respawn);
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bash_inherits_the_selected_model_without_an_input_hook() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repo = crate::store::data_dir().join(format!("invocation-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&repo).unwrap();
+        let bin = repo.join("claude");
+        std::fs::write(
+            &bin,
+            r#"#!/bin/sh
+while IFS= read -r input; do
+    printf '{"type":"system","identity":%s}\n' "$ORX_INVOCATION_CONTEXT"
+done
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let host = Arc::new(ClaudeHost::new());
+        host.auth.write().unwrap().state = HarnessAuthState::Ready;
+        let chat = Arc::new(crate::local::chat::ChatHost::new(
+            Arc::new(crate::local::opencode::AgentHost::new(None)),
+            Arc::new(crate::local::codex::CodexHost::new()),
+            host.clone(),
+        ));
+        for (selected, resolved) in [
+            ("haiku", Some("claude-haiku-5-5")),
+            ("sonnet[1m]", Some("claude-sonnet-5-5")),
+            ("sonnet[1m]", Some("claude-sonnet-5-5")),
+            ("sonnet[1m]", Some("claude-sonnet-6-0")),
+            ("custom-model", None),
+        ] {
+            *chat.harnesses.lock().await = Some((
+                Instant::now(),
+                json!({"harnesses":[{
+                    "id":"claude-code", "models":[{"id":selected,"resolvedModel":resolved}]
+                }]}),
+            ));
+            let mut config = cfg(Some(PermissionMode::Auto), None, Some(selected), false);
+            config.bin = Some(bin.clone());
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let route = host
+                .acquire_turn(
+                    SpawnSpec {
+                        chat: chat.clone(),
+                        session_id: "invocation-test".into(),
+                        repo: repo.clone(),
+                        playbook: repo.join("playbook"),
+                        resume: None,
+                        fork_at: None,
+                        config,
+                    },
+                    tx,
+                )
+                .await
+                .unwrap();
+            route.client().send_user_message("Run orx").await.unwrap();
+            let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let TurnEvent::Line(event, _) = event else {
+                panic!("Claude exited before replying")
+            };
+            let identity: crate::store::InvocationIdentity =
+                serde_json::from_value(event["identity"].clone()).unwrap();
+            assert_eq!(identity.harness, "claude-code");
+            assert_eq!(identity.model, resolved.unwrap_or(selected));
+            assert_eq!(route.client().config().model.as_deref(), Some(selected));
+            let settings: Value = serde_json::from_slice(
+                &std::fs::read(write_settings(&repo, false).unwrap()).unwrap(),
+            )
+            .unwrap();
+            assert!(settings["hooks"]["PreToolUse"]
+                .as_array()
+                .unwrap()
+                .is_empty());
+            drop(route);
+        }
+        host.shutdown().await;
+        std::fs::remove_dir_all(repo).unwrap();
     }
 
-    #[test]
-    fn a_newly_selected_claude_respawns_the_child() {
-        let mut current = cfg(None, None, Some("sonnet"), false);
-        current.bin = Some(PathBuf::from("/user/claude"));
-        let mut wanted = current.clone();
-        assert_eq!(child_action(&current, &wanted), ChildAction::Reuse);
-        wanted.bin = Some(PathBuf::from("/managed/claude"));
-        assert_eq!(child_action(&current, &wanted), ChildAction::Respawn);
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn as_root_bypass_needs_the_users_confirmation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if !crate::config::in_test_child(&["IS_SANDBOX"]) {
+            return;
+        }
+        crate::local::harness::claude::TEST_RUNS_AS_ROOT.store(true, Ordering::Relaxed);
+        let repo = crate::store::data_dir().join("root-bypass");
+        std::fs::create_dir_all(&repo).unwrap();
+        let bin = repo.join("claude");
+        std::fs::write(
+            &bin,
+            r#"#!/bin/sh
+allow=false
+for arg; do [ "$arg" = --allow-dangerously-skip-permissions ] && allow=true; done
+while IFS= read -r input; do
+    printf '{"type":"system","allow":%s,"sandbox":"%s"}\n' "$allow" "$IS_SANDBOX"
+done
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let host = Arc::new(ClaudeHost::new());
+        host.auth.write().unwrap().state = HarnessAuthState::Ready;
+        let chat = Arc::new(crate::local::chat::ChatHost::new(
+            Arc::new(crate::local::opencode::AgentHost::new(None)),
+            Arc::new(crate::local::codex::CodexHost::new()),
+            host.clone(),
+        ));
+        let spawn = |session: &str, mode| {
+            let mut config = cfg(Some(mode), None, None, false);
+            config.bin = Some(bin.clone());
+            let (tx, rx) = mpsc::unbounded_channel();
+            let spec = SpawnSpec {
+                chat: chat.clone(),
+                session_id: session.into(),
+                repo: repo.clone(),
+                playbook: repo.join("playbook"),
+                resume: None,
+                fork_at: None,
+                config,
+            };
+            let host = host.clone();
+            async move { (host.acquire_turn(spec, tx).await, rx) }
+        };
+        let launched = |session: &'static str, mode| {
+            let spawn = spawn(session, mode);
+            async move {
+                let (route, mut rx) = spawn.await;
+                let route = route.unwrap();
+                route.client().send_user_message("hi").await.unwrap();
+                let Some(TurnEvent::Line(event, _)) =
+                    tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                        .await
+                        .unwrap()
+                else {
+                    panic!("Claude exited before replying")
+                };
+                (event["allow"].clone(), event["sandbox"].clone())
+            }
+        };
+
+        assert_eq!(
+            launched("root-auto", PermissionMode::Auto).await,
+            (json!(false), json!(""))
+        );
+        let refused = spawn("root-bypass", PermissionMode::Bypass).await.0;
+        assert!(refused
+            .err()
+            .unwrap()
+            .downcast_ref::<crate::local::harness::claude::RootBypassUnconfirmed>()
+            .is_some());
+
+        crate::telemetry::set_claude_root_full_access(true).unwrap();
+        assert_eq!(
+            launched("root-bypass-confirmed", PermissionMode::Bypass).await,
+            (json!(true), json!("1"))
+        );
+        host.shutdown().await;
     }
 
     #[cfg(unix)]
@@ -1985,7 +2534,7 @@ pub(crate) mod tests {
                 json!({"type": "user", "message": {"content": "/compact"}}),
                 json!({"type": "result", "subtype": "success", "is_error": failed}),
             ] {
-                tx.send(TurnEvent::Line(line)).unwrap();
+                tx.send(TurnEvent::Line(line, 0)).unwrap();
             }
             let result = client.compact(rx, Duration::from_secs(1)).await;
             terminate_client(&client).await;
@@ -2009,7 +2558,7 @@ pub(crate) mod tests {
                 json!({"type": "system", "subtype": "init"}),
                 json!({"type": "result", "subtype": "success", "is_error": false, "local_command": "compact"}),
             ] {
-                tx.send(TurnEvent::Line(line)).unwrap();
+                tx.send(TurnEvent::Line(line, 0)).unwrap();
             }
             let result = client.compact(rx, Duration::from_secs(1)).await;
             terminate_client(&client).await;
@@ -2033,16 +2582,19 @@ pub(crate) mod tests {
             let (tx, rx) = mpsc::unbounded_channel();
             tx.send(TurnEvent::Line(
                 json!({"type": "system", "subtype": "status", "status": "compacting"}),
+                0,
             ))
             .unwrap();
             if boundary {
                 tx.send(TurnEvent::Line(
                     json!({"type": "system", "subtype": "compact_boundary"}),
+                    0,
                 ))
                 .unwrap();
             }
             tx.send(TurnEvent::Line(
                 json!({"type": "result", "subtype": "success", "is_error": false}),
+                0,
             ))
             .unwrap();
             let result = client.compact(rx, Duration::from_secs(1)).await;
@@ -2059,6 +2611,7 @@ pub(crate) mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         tx.send(TurnEvent::Line(
             json!({"type": "result", "subtype": "success"}),
+            0,
         ))
         .unwrap();
         let result = client.compact(rx, Duration::from_millis(10)).await;
@@ -2077,6 +2630,7 @@ pub(crate) mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         tx.send(TurnEvent::Line(
             json!({"type": "user", "message": {"content": [{"type": "text", "text": "/compact"}]}}),
+            0,
         ))
         .unwrap();
         tx.send(TurnEvent::Closed).unwrap();
@@ -2154,140 +2708,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn child_action_matrix() {
-        // Identical config → reuse.
-        assert_eq!(
-            child_action(
-                &cfg(
-                    Some(PermissionMode::Auto),
-                    Some("high"),
-                    Some("opus"),
-                    false
-                ),
-                &cfg(
-                    Some(PermissionMode::Auto),
-                    Some("high"),
-                    Some("opus"),
-                    false
-                ),
-            ),
-            ChildAction::Reuse
-        );
-        let mut legacy = cfg(None, None, None, false);
-        legacy.native_store = NativeStore::Legacy;
-        assert_eq!(
-            child_action(&cfg(None, None, None, false), &legacy),
-            ChildAction::Respawn
-        );
-        // Model-only change to a concrete value → set_model.
-        assert_eq!(
-            child_action(
-                &cfg(
-                    Some(PermissionMode::Auto),
-                    Some("high"),
-                    Some("opus"),
-                    false
-                ),
-                &cfg(
-                    Some(PermissionMode::Auto),
-                    Some("high"),
-                    Some("sonnet"),
-                    false
-                ),
-            ),
-            ChildAction::SetModel("sonnet".into())
-        );
-        // Clearing the model (Some → None) can't be a live flag toggle → respawn.
-        assert_eq!(
-            child_action(
-                &cfg(
-                    Some(PermissionMode::Auto),
-                    Some("high"),
-                    Some("opus"),
-                    false
-                ),
-                &cfg(Some(PermissionMode::Auto), Some("high"), None, false),
-            ),
-            ChildAction::Respawn
-        );
-        // Setting a model from None is a concrete target → set_model.
-        assert_eq!(
-            child_action(
-                &cfg(Some(PermissionMode::Auto), Some("high"), None, false),
-                &cfg(
-                    Some(PermissionMode::Auto),
-                    Some("high"),
-                    Some("opus"),
-                    false
-                ),
-            ),
-            ChildAction::SetModel("opus".into())
-        );
-        // Permission-mode change → respawn (launch-only).
-        assert_eq!(
-            child_action(
-                &cfg(
-                    Some(PermissionMode::Auto),
-                    Some("high"),
-                    Some("opus"),
-                    false
-                ),
-                &cfg(
-                    Some(PermissionMode::Plan),
-                    Some("high"),
-                    Some("opus"),
-                    false
-                ),
-            ),
-            ChildAction::Respawn
-        );
-        // Effort change → respawn (launch-only).
-        assert_eq!(
-            child_action(
-                &cfg(
-                    Some(PermissionMode::Auto),
-                    Some("high"),
-                    Some("opus"),
-                    false
-                ),
-                &cfg(Some(PermissionMode::Auto), Some("max"), Some("opus"), false),
-            ),
-            ChildAction::Respawn
-        );
-        // Bridge toggling on (a plan turn that got the bridge where the child
-        // didn't have it) → respawn.
-        assert_eq!(
-            child_action(
-                &cfg(Some(PermissionMode::Plan), None, Some("opus"), false),
-                &cfg(Some(PermissionMode::Plan), None, Some("opus"), true),
-            ),
-            ChildAction::Respawn
-        );
-        // Mode-and-model both differing still respawns (launch axis wins over
-        // the model-only set_model shortcut).
-        assert_eq!(
-            child_action(
-                &cfg(Some(PermissionMode::Auto), None, Some("opus"), false),
-                &cfg(Some(PermissionMode::Plan), None, Some("sonnet"), false),
-            ),
-            ChildAction::Respawn
-        );
-    }
-
-    #[test]
-    fn alphaxiv_sign_in_changes_respawn_the_resident_child() {
-        let signed_out = cfg(Some(PermissionMode::Ask), None, None, true);
-        let mut signed_in = signed_out.clone();
-        signed_in.alphaxiv_signed_in = true;
-        assert_eq!(child_action(&signed_out, &signed_in), ChildAction::Respawn);
-        assert_eq!(child_action(&signed_in, &signed_out), ChildAction::Respawn);
-    }
-
-    #[test]
     fn lifecycle_reaps_idle_and_stale_workers_at_the_boundaries() {
         let now = Instant::now();
         let recent_start = now - Duration::from_secs(20 * 60);
-        let mut slot = TurnSlot::new(now - IDLE_TIMEOUT + Duration::from_secs(1));
+        let mut slot = TurnSlot::new(now - IDLE_TIMEOUT + Duration::from_secs(1), 0);
 
         assert_eq!(slot.stop_reason(recent_start, now, IDLE_TIMEOUT), None);
 
@@ -2311,7 +2735,7 @@ pub(crate) mod tests {
     fn lifecycle_never_reaps_an_active_turn_and_release_starts_idle_clock() {
         let now = Instant::now();
         let started_at = now - STALE_AFTER - Duration::from_secs(1);
-        let mut slot = TurnSlot::new(started_at);
+        let mut slot = TurnSlot::new(started_at, 0);
         let (tx, _rx) = mpsc::unbounded_channel();
         slot.register(tx.clone());
 
@@ -2333,7 +2757,7 @@ pub(crate) mod tests {
     #[test]
     fn stale_route_drop_cannot_clear_a_successor_turn() {
         let now = Instant::now();
-        let mut slot = TurnSlot::new(now);
+        let mut slot = TurnSlot::new(now, 0);
         let (old_tx, _old_rx) = mpsc::unbounded_channel();
         let (new_tx, _new_rx) = mpsc::unbounded_channel();
         slot.register(old_tx.clone());
@@ -2367,7 +2791,7 @@ pub(crate) mod tests {
         let (route, mut rx) = host.take_continuation("resumes").await.unwrap();
         assert!(route.served());
         for expected in [init, reply, result] {
-            assert!(matches!(rx.recv().await, Some(TurnEvent::Line(line)) if line == expected));
+            assert!(matches!(rx.recv().await, Some(TurnEvent::Line(line, _)) if line == expected));
         }
         assert!(host.take_continuation("resumes").await.is_none());
         drop(route);
@@ -2384,7 +2808,7 @@ pub(crate) mod tests {
         terminate_client(&client).await;
 
         let (_route, mut rx) = host.take_continuation("exits").await.unwrap();
-        assert!(matches!(rx.recv().await, Some(TurnEvent::Line(line)) if line == init));
+        assert!(matches!(rx.recv().await, Some(TurnEvent::Line(line, _)) if line == init));
         assert!(matches!(rx.recv().await, Some(TurnEvent::Closed)));
         host.shutdown().await;
     }
@@ -2399,7 +2823,7 @@ pub(crate) mod tests {
         let init = json!({"type": "system", "subtype": "init"});
 
         emit(&client, std::slice::from_ref(&init)).await;
-        assert!(matches!(route.end(&mut rx), Some(TurnEvent::Line(line)) if line == init));
+        assert!(matches!(route.end(&mut rx), Some(TurnEvent::Line(line, _)) if line == init));
         assert!(route.end(&mut rx).is_none());
 
         emit(&client, std::slice::from_ref(&init)).await;
@@ -2433,22 +2857,45 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn background_tasks_are_listed_from_the_first_start_until_the_last_finishes() {
         let (host, client) = echo_worker("listed").await;
-        let started =
-            |id: &str| json!({"type": "system", "subtype": "task_started", "task_id": id});
+        let started = |id: &str, description: &str| json!({"type": "system", "subtype": "task_started", "task_id": id, "description": description});
         let finished =
             |id: &str| json!({"type": "system", "subtype": "task_notification", "task_id": id});
         assert!(host.background_tasks().await.is_empty());
 
-        emit(&client, &[started("a")]).await;
-        let (_, since) = host.background_tasks().await["listed"];
-        emit(&client, &[started("b"), finished("a")]).await;
+        emit(&client, &[started("a", "Train the baseline")]).await;
+        let (_, since) = host.background_tasks().await.remove("listed").unwrap();
+        emit(&client, &[started("b", "Watch the run"), finished("a")]).await;
         assert_eq!(
-            host.background_tasks().await["listed"],
-            (1, since),
+            host.background_tasks().await.remove("listed"),
+            Some((vec![("b".into(), "Watch the run".into())], since)),
             "a task still runs since the first began"
         );
 
-        emit(&client, &[finished("b")]).await;
+        emit(
+            &client,
+            &[
+                json!({"type": "system", "subtype": "task_updated", "task_id": "b",
+                    "patch": {"description": "Watch run 2"}}),
+                json!({"type": "system", "subtype": "background_tasks_changed",
+                    "tasks": [{"task_id": "b"}, {"task_id": "c", "description": "Sweep"}]}),
+            ],
+        )
+        .await;
+        assert_eq!(
+            host.background_tasks().await.remove("listed").unwrap().0,
+            [
+                ("b".into(), "Watch run 2".into()),
+                ("c".into(), "Sweep".into())
+            ],
+            "the level keeps a description the edge gave"
+        );
+
+        assert!(host.stop_task("listed", "b").await.unwrap());
+        assert_eq!(
+            host.background_tasks().await.remove("listed"),
+            Some((vec![("c".into(), "Sweep".into())], since))
+        );
+        emit(&client, &[finished("c")]).await;
         assert!(host.background_tasks().await.is_empty());
         host.shutdown().await;
     }
@@ -2600,7 +3047,7 @@ pub(crate) mod tests {
         let host = ClaudeHost::new();
         let warm = test_client("warm", now, now - Duration::from_secs(60), "cat >/dev/null").await;
         let exited = test_client("exited", now, now - Duration::from_secs(40), "exit 0").await;
-        exited.child.lock().await.wait().await.unwrap();
+        exited.keeper.wait().await;
         install_test_client(&host, warm.clone()).await;
         install_test_client(&host, exited.clone()).await;
 
@@ -2707,10 +3154,8 @@ pub(crate) mod tests {
             "trap 'echo stopped > \"{}\"; exit 0' TERM; echo ready; while :; do sleep 0.05; done",
             stopped.display()
         );
-        let client = test_client("busy", now, now, &shell).await;
-        let stdout = client.child.lock().await.stdout.take().unwrap();
-        let mut ready = String::new();
-        BufReader::new(stdout).read_line(&mut ready).await.unwrap();
+        let (client, mut lines) = kept_test_client("busy", now, now, &shell, Weak::new()).await;
+        lines.next_line().await.unwrap().unwrap();
         let host = ClaudeHost::new();
         install_test_client(&host, client.clone()).await;
 
@@ -2730,15 +3175,10 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn termination_kills_the_worker_process_group() {
         let now = Instant::now();
-        let client = test_client("tree", now, now, "sleep 600 & echo $!; wait").await;
-        let descendant_pid = {
-            let mut child = client.child.lock().await;
-            let stdout = child.stdout.take().unwrap();
-            drop(child);
-            let mut line = String::new();
-            BufReader::new(stdout).read_line(&mut line).await.unwrap();
-            line.trim().parse::<u32>().unwrap()
-        };
+        let (client, mut lines) =
+            kept_test_client("tree", now, now, "sleep 600 & echo $!; wait", Weak::new()).await;
+        let (line, _) = lines.next_line().await.unwrap().unwrap();
+        let descendant_pid = line.trim().parse::<u32>().unwrap();
 
         terminate_client(&client).await;
 
@@ -2896,5 +3336,329 @@ pub(crate) mod tests {
             assert!(host.observe_auth_probe(&probe));
         }
         assert_eq!(host.auth_snapshot().generation, 3);
+    }
+
+    /// A fake `claude` that writes back each line and answers a user message with `REPLY`.
+    #[cfg(unix)]
+    fn fake_claude() -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::config::test_root().join(format!("claude-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("claude");
+        std::fs::write(
+            &bin,
+            r#"#!/bin/sh
+while IFS= read -r line; do
+    printf '%s\n' "$line"
+    case "$line" in *'"type":"user"'*)
+        printf '%s\n' '{"type":"assistant","message":{"id":"reply","content":[{"type":"text","text":"REPLY"}]}}' '{"type":"result","subtype":"success"}' ;;
+    esac
+done
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (dir, bin)
+    }
+
+    #[cfg(unix)]
+    async fn run_to_result(route: &TurnRoute, rx: &mut mpsc::UnboundedReceiver<TurnEvent>) {
+        route.client().send_user_message("hello").await.unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut texts = Vec::new();
+            while let Some(TurnEvent::Line(line, _)) = rx.recv().await {
+                if let Some(text) = line.pointer("/message/content/0/text") {
+                    texts.push(text.clone());
+                }
+                if line["type"] == "result" {
+                    break;
+                }
+            }
+            texts
+        })
+        .await
+        .unwrap();
+        assert_eq!(reply.last().unwrap(), "REPLY");
+    }
+
+    /// A chat's Claude spawned through the real spawn path, after one turn, left for a
+    /// successor.
+    #[cfg(unix)]
+    async fn kept_fake_claude(session: &str) -> (SpawnSpec, Arc<ClaudeClient>) {
+        let (dir, bin) = fake_claude();
+        let host = ready_host();
+        let mut config = cfg(None, None, Some("sonnet"), false);
+        config.bin = Some(bin);
+        let spec = SpawnSpec {
+            chat: chat_with(&host),
+            session_id: session.to_string(),
+            repo: dir.clone(),
+            playbook: dir.join("playbook.md"),
+            resume: None,
+            fork_at: None,
+            config,
+        };
+        // The first server knows what the alias resolves to; a successor's catalog starts empty.
+        *spec.chat.harnesses.lock().await = Some((
+            Instant::now(),
+            json!({"harnesses": [{"id": "claude-code", "profile": {"id": null},
+                "models": [{"id": "sonnet", "resolvedModel": "claude-sonnet-5-5"}]}]}),
+        ));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let route = host.acquire_turn(spec.clone(), tx).await.unwrap();
+        assert_eq!(
+            route.client().invocation_model.as_deref(),
+            Some("claude-sonnet-5-5")
+        );
+        run_to_result(&route, &mut rx).await;
+        let client = route.client().clone();
+        let kept = keep::entries()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.id == client.keeper.id())
+            .unwrap();
+        assert_eq!(kept.liveness, keep::Liveness::Alive);
+        assert!(
+            matches!(kept.owner, keep::Record::Known(keep::Owner::Agent { harness, session_id, .. })
+            if harness == "claude-code" && session_id == session)
+        );
+        drop(route);
+        leave_for_successor(&client);
+        (spec, client)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_kept_claude_is_taken_back_idle_and_reused_by_the_next_server() {
+        let session = format!("adopt-{}", uuid::Uuid::new_v4());
+        let (spec, previous) = kept_fake_claude(&session).await;
+
+        let host = ready_host();
+        let chat = chat_with(&host);
+        let adopted = adopt_in(&chat, &previous, None).await.unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let route = host
+            .acquire_turn(SpawnSpec { chat, ..spec }, tx)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(route.client(), &adopted));
+        assert!(route.served());
+        run_to_result(&route, &mut rx).await;
+        drop(route);
+
+        host.shutdown().await;
+        assert!(adopted.keeper.try_wait().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_kept_claude_serves_on_while_its_sign_in_cannot_be_checked() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        // No `claude` to ask, so the check cannot say. The rest of PATH stays: orx-host
+        // resolves through the cargo toolchain on it.
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let without_claude =
+            std::env::split_paths(&path).filter(|dir| !dir.join("claude").exists());
+        std::env::set_var("PATH", std::env::join_paths(without_claude).unwrap());
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let session = format!("adopt-{}", uuid::Uuid::new_v4());
+            let (spec, previous) = kept_fake_claude(&session).await;
+
+            let host = Arc::new(ClaudeHost::new());
+            let chat = chat_with(&host);
+            let adopted = adopt_in(&chat, &previous, None).await.unwrap();
+            host.settle_auth(&spec).await;
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let route = host
+                .acquire_turn(
+                    SpawnSpec {
+                        chat: chat.clone(),
+                        ..spec.clone()
+                    },
+                    tx,
+                )
+                .await
+                .unwrap();
+            assert_eq!(host.auth_snapshot().state, HarnessAuthState::Unknown);
+            assert!(Arc::ptr_eq(route.client(), &adopted));
+            run_to_result(&route, &mut rx).await;
+            drop(route);
+
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let fresh = SpawnSpec {
+                chat,
+                session_id: format!("fresh-{}", uuid::Uuid::new_v4()),
+                ..spec
+            };
+            let refused = host.acquire_turn(fresh, tx).await.err().unwrap();
+            assert!(
+                refused.to_string().contains("could not be verified"),
+                "{refused:#}"
+            );
+            assert!(adopted.keeper.try_wait().is_none());
+            host.shutdown().await;
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_check_reserved_while_a_turn_waits_on_sign_in_is_no_failure() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let dir = crate::config::test_root().join(format!("claude-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let gate = dir.join("gate");
+        assert!(crate::process::command("mkfifo")
+            .arg(&gate)
+            .status()
+            .unwrap()
+            .success());
+        // The first `auth status` answers only once the test has reserved a newer check.
+        let bin = dir.join("claude");
+        orx_test_support::write_executable(
+            &bin,
+            format!(
+                r#"#!/bin/sh
+case "$1" in
+--version) echo '2.1.300 (Claude Code)' ;;
+auth)
+    if [ ! -e '{gated}' ]; then : > '{gated}'; cat '{gate}' > /dev/null; fi
+    echo '{{"loggedIn":true,"authMethod":"api_key"}}' ;;
+*) while IFS= read -r line; do printf '%s\n' "$line"; done ;;
+esac
+"#,
+                gated = dir.join("gated").display(),
+                gate = gate.display(),
+            ),
+            0o755,
+        )
+        .unwrap();
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::iter::once(dir.clone()).chain(std::env::split_paths(&path));
+        std::env::set_var("PATH", std::env::join_paths(path).unwrap());
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let host = Arc::new(ClaudeHost::new());
+            let mut config = cfg(None, None, None, false);
+            config.bin = Some(bin);
+            let spec = SpawnSpec {
+                chat: chat_with(&host),
+                session_id: format!("settle-{}", uuid::Uuid::new_v4()),
+                repo: dir.clone(),
+                playbook: dir.join("playbook.md"),
+                resume: None,
+                fork_at: None,
+                config,
+            };
+            // As the dashboard's first catalog fill does at startup.
+            let reserving = tokio::task::spawn_blocking({
+                let host = host.clone();
+                move || {
+                    let held = std::fs::OpenOptions::new().write(true).open(gate).unwrap();
+                    host.reserve_auth_check();
+                    drop(held);
+                }
+            });
+
+            host.settle_auth(&spec).await;
+            reserving.await.unwrap();
+
+            assert_eq!(host.auth_snapshot().state, HarnessAuthState::Ready);
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let route = host.acquire_turn(spec, tx).await.unwrap();
+            drop(route);
+            host.shutdown().await;
+        });
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_kept_claude_whose_sign_in_changed_is_replaced() {
+        let session = format!("adopt-{}", uuid::Uuid::new_v4());
+        let (spec, previous) = kept_fake_claude(&session).await;
+
+        let host = ready_host();
+        host.auth.write().unwrap().method = Some("apiKey");
+        let chat = chat_with(&host);
+        let adopted = adopt_in(&chat, &previous, None).await.unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let route = host
+            .acquire_turn(SpawnSpec { chat, ..spec }, tx)
+            .await
+            .unwrap();
+        assert!(!Arc::ptr_eq(route.client(), &adopted));
+        assert!(adopted.keeper.try_wait().is_some());
+        run_to_result(&route, &mut rx).await;
+        drop(route);
+        host.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_segment_held_when_the_server_restarted_is_a_continuation_for_the_next() {
+        let (host, client) = echo_worker("held-across").await;
+        serve_turn(&host, &client).await;
+        let segment = [
+            json!({"type": "system", "subtype": "init"}),
+            json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "TASK_DONE"}]}}),
+            json!({"type": "result", "subtype": "success"}),
+        ];
+        emit(&client, &segment).await;
+        assert!(host.has_continuation("held-across").await);
+        leave_for_successor(&client);
+
+        let successor = ready_host();
+        adopt_in(&chat_with(&successor), &client, None)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !successor.has_continuation("held-across").await {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let (_route, mut rx) = successor.take_continuation("held-across").await.unwrap();
+        for expected in segment {
+            assert!(matches!(rx.recv().await, Some(TurnEvent::Line(line, _)) if line == expected));
+        }
+        successor.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_successor_never_takes_a_predecessors_control_response_for_its_own() {
+        let host = ready_host();
+        let answers = r#"while IFS= read -r line; do
+            id=$(printf '%s' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+            asked=$(printf '%s' "$line" | sed -n 's/.*"subtype":"\([^"]*\)".*/\1/p')
+            printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{"id":"%s","asked":"%s"}}}\n' "$id" "$id" "$asked"
+        done"#;
+        let client = scripted_worker(&host, "ids", answers, Weak::new()).await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        // A turn is listening, so the answer stays unacknowledged, as mid-turn.
+        let _route = client.register_turn(tx, host.reaper_notify.clone());
+        let first = client
+            .control_request(json!({"subtype": "before"}))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first["asked"], "before");
+        leave_for_successor(&client);
+
+        let successor = ready_host();
+        let adopted = adopt_in(&chat_with(&successor), &client, None)
+            .await
+            .unwrap();
+        let answer = adopted
+            .control_request(json!({"subtype": "after"}))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(answer["asked"], "after");
+        assert_ne!(answer["id"], first["id"]);
+        successor.shutdown().await;
     }
 }

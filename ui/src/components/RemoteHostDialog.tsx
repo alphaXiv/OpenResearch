@@ -1,18 +1,16 @@
 import { useContext, useId, useRef, useState } from "react";
 import { WorkspaceDomContext } from "../WorkspaceDom";
 import { useMachines } from "../machineSelection";
+import { useWorkspace, type Workspace } from "../workspace";
 import { useQuery } from "@tanstack/react-query";
-import { useMutate } from "@clo/react-mutation";
 import { Server, Trash2, X } from "lucide-react";
 
 import type { SshHost } from "../api";
 import type { createDialogs, DialogContentProps } from "../dialog";
 import { autoDir } from "../i18n";
 import { m } from "../paraglide/messages.js";
-import { getLocale } from "../paraglide/runtime.js";
-import { mutAddRemoteHost, mutCreateRemoteSession, mutRemoveRemoteHost } from "../queries/settings";
+import { mutAddRemoteHost, mutRemoveRemoteHost } from "../queries/settings";
 
-import { getThemePreference } from "../theme";
 import { ProgressBar } from "./ProgressBar";
 import { Button, DialogContent, DialogDescription, DialogTitle, IconButton, Input, Spinner, Tooltip } from "./ui";
 
@@ -21,6 +19,20 @@ export function showRemoteHostDialog(dialogs: ReturnType<typeof createDialogs>) 
     component: RemoteHostDialog,
     props: {},
     onConfirm: (openRemote: () => Promise<void>) => openRemote(),
+    onCancel: "close",
+  });
+}
+
+/** Drops the host from the machine list and closes its session; OpenResearch on the host keeps running. */
+export function forgetMachine(dialogs: ReturnType<typeof createDialogs>, owner: Workspace, host: string) {
+  dialogs.showConfirmDialog({
+    title: m.remote_forget_title({ host: autoDir(host) }),
+    description: m.remote_forget_description(),
+    destructive: true,
+    confirmLabel: m.remote_forget(),
+    onConfirm: async () => {
+      await mutRemoveRemoteHost.runAsHeadlessPromise(owner, host, {});
+    },
     onCancel: "close",
   });
 }
@@ -41,13 +53,13 @@ function RemoteHostDialog({
   const suggestionsId = useId();
 
   const machines = useMachines();
+  const { dialogs } = useWorkspace();
   const owner = machines.owner;
   const { getSshSettingsQuery, listRemoteHostsQuery, listRemoteSessionsQuery } = owner.queries;
 
   const hostsQuery = useQuery(listRemoteHostsQuery(), owner.queryClient);
   const sessionsQuery = useQuery(listRemoteSessionsQuery(), owner.queryClient);
   const sshConfigQuery = useQuery(getSshSettingsQuery(), owner.queryClient);
-  const remove = useMutate(mutRemoveRemoteHost);
   const hosts = hostsQuery.data ?? null;
   const sessions = sessionsQuery.data ?? [];
   const sessionByHost = new Map(sessions.map((session) => [session.host, session]));
@@ -62,11 +74,7 @@ function RemoteHostDialog({
       try {
         const host = typeof target === "string" ? target : await target();
         setOpeningHost(host);
-        const session = await mutCreateRemoteSession.runAsHeadlessPromise(owner, host, {
-          theme: getThemePreference(),
-          locale: getLocale(),
-        }, {});
-        machines.selectRemote(session);
+        await machines.connect(host);
       } finally {
         setOpeningHost(null);
       }
@@ -156,18 +164,16 @@ function RemoteHostDialog({
                       <span className="text-sm text-subtext">{m.remote_open()}</span>
                     ) : null}
                   </Button>
-                  {!session && (
-                    <Tooltip interactive content={m.remote_remove_host({ host: autoDir(host.host) })}>
-                      <IconButton
-                        className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
-                        aria-label={m.remote_remove_host({ host: autoDir(host.host) })}
-                        disabled={isDisabled}
-                        onClick={() => remove.run(owner, host.host)}
-                      >
-                        <Trash2 size={14} />
-                      </IconButton>
-                    </Tooltip>
-                  )}
+                  <Tooltip interactive content={m.remote_forget_host({ host: autoDir(host.host) })}>
+                    <IconButton
+                      className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                      aria-label={m.remote_forget_host({ host: autoDir(host.host) })}
+                      disabled={isDisabled}
+                      onClick={() => forgetMachine(dialogs, owner, host.host)}
+                    >
+                      <Trash2 size={14} />
+                    </IconButton>
+                  </Tooltip>
                 </li>
               );
             })}

@@ -4,8 +4,10 @@ import { useWorkspace } from "../workspace";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { Popover } from "@base-ui/react/popover";
 import { formatForDisplay } from "@tanstack/react-hotkeys";
-import { useQuery } from "@tanstack/react-query";
-import { ChevronRight, PanelLeft, RefreshCw } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Bug, ChevronRight, PanelLeft, RefreshCw } from "lucide-react";
+
+import { bugReportsOffered, bugReportUrl, copyScreenshot, devCheckoutQuery, type Screenshot } from "../bugReport";
 
 import { appHotkeys } from "../hotkeys";
 import { ltr } from "../i18n";
@@ -51,6 +53,9 @@ function Brand() {
   const restart = useRestartApp(status);
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
+  // Hidden while the window screenshots itself for a bug report.
+  const [capturing, setCapturing] = useState(false);
   const canary = status?.current.startsWith("canary-") ?? false;
   const dev = !canary && runtime.buildChannel === "development";
   const badge = canary ? m.settings_update_channel_canary() : dev ? m.header_dev_badge() : null;
@@ -74,7 +79,7 @@ function Brand() {
 
   return (
     <DirectionProvider direction={document.documentElement.dir === "rtl" ? "rtl" : "ltr"}>
-      <Popover.Root>
+      <Popover.Root open={open} onOpenChange={setOpen}>
         <Popover.Trigger
           openOnHover
           delay={300}
@@ -92,7 +97,7 @@ function Brand() {
         </Popover.Trigger>
         <Popover.Portal container={portalContainer}>
           <Popover.Positioner side="bottom" align="start" sideOffset={6} collisionPadding={8} className="z-50">
-            <Popover.Popup aria-label="OpenResearch" className={`${import.meta.env.DEV ? "w-[36rem]" : "w-max"} min-w-56 max-w-[calc(100vw-1rem)] rounded-lg border border-border bg-background p-3 text-sm text-text shadow-menu outline-none`}>
+            <Popover.Popup aria-label="OpenResearch" className={`${import.meta.env.DEV ? "w-[36rem]" : "w-max"} ${capturing ? "opacity-0" : ""} min-w-56 max-w-[calc(100vw-1rem)] rounded-lg border border-border bg-background p-3 text-sm text-text shadow-menu outline-none`}>
               <dl className="m-0 grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-4 gap-y-2">
                 <dt className="text-subtext">{m.settings_page_version()}</dt>
                 <dd className="m-0 flex items-center justify-between gap-3">
@@ -112,6 +117,9 @@ function Brand() {
               </dl>
               {changes && <p className="mt-2 mb-0 text-subtext">{changes}</p>}
               {shownError && <p role="alert" className="mt-2 mb-0 text-accent-red">{shownError}</p>}
+              {bugReportsOffered(runtime, status) && (
+                <ReportBug version={status?.build ?? runtime.version} onCapturing={setCapturing} onReported={() => setOpen(false)} />
+              )}
               {import.meta.env.DEV && <>
                 <DevCommit />
                 <DevtoolsSwitch />
@@ -121,6 +129,66 @@ function Brand() {
         </Popover.Portal>
       </Popover.Root>
     </DirectionProvider>
+  );
+}
+
+function ReportBug({ version, onCapturing, onReported }: { version: string; onCapturing: (capturing: boolean) => void; onReported: () => void }) {
+  const workspace = useWorkspace();
+  const queryClient = useQueryClient();
+  // Fetched ahead, since probing the machine and looking up the pull request take a moment.
+  useQuery(workspace.queries.getLocalMachineQuery());
+  useQuery({ ...devCheckoutQuery, enabled: import.meta.env.DEV });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const report = async () => {
+    setError(null);
+    setBusy(true);
+    const failure = (e: unknown) => e instanceof Error ? e : new Error(String(e));
+    // Read fresh: another checkout may have just flipped the shared switch.
+    const settings = await queryClient.fetchQuery({ ...workspace.queries.getBugReportsQuery(), staleTime: 0 }).catch(failure);
+    if (settings instanceof Error) {
+      setBusy(false);
+      setError(settings.message);
+      return;
+    }
+    const [machine, checkout] = await Promise.all([
+      queryClient.fetchQuery(workspace.queries.getLocalMachineQuery()).catch(failure),
+      import.meta.env.DEV ? queryClient.fetchQuery(devCheckoutQuery).catch(failure) : null,
+    ]);
+
+    // Only the macOS window takes screenshots and opens links for the page; the team reports from Macs.
+    const macWindow = window.ipc && navigator.platform.startsWith("Mac") ? window.ipc : null;
+    let screenshot: Screenshot = { copied: false, error: null };
+    if (macWindow) {
+      onCapturing(true);
+      await new Promise((painted) => requestAnimationFrame(() => requestAnimationFrame(painted)));
+      const copied = await copyScreenshot(macWindow);
+      onCapturing(false);
+      if (!copied) {
+        setBusy(false);
+        setError(m.header_report_bug_no_answer());
+        return;
+      }
+      screenshot = copied;
+    }
+
+    const url = bugReportUrl({ linear: settings.linear, version, screenshot, machine, checkout });
+    // The awaits above spend the click WebKit would let open a pop-up, so the window opens it.
+    if (macWindow) macWindow.postMessage(`open:${url}`);
+    else window.open(url, "_blank", "noreferrer");
+    setBusy(false);
+    onReported();
+  };
+
+  return (
+    <div className="mt-3 flex flex-col gap-2 border-t border-border pt-3">
+      <Button size="small" className="self-start" disabled={busy} onClick={() => void report()}>
+        <Bug size={14} aria-hidden="true" />
+        {m.header_report_bug()}
+      </Button>
+      {error && <p role="alert" className="m-0 break-words text-accent-red">{error}</p>}
+    </div>
   );
 }
 

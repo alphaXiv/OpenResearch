@@ -55,6 +55,7 @@ fn pending<'a>(
         commit_sha: Some("snapshot"),
         chat_session_id: None,
         spec_digest: "digest",
+        monitor_config: None,
         launch,
     }
 }
@@ -130,6 +131,21 @@ async fn isolated() -> Option<PathBuf> {
         let headers = axum::http::HeaderMap::new();
         if uri.path().ends_with("/logs") && root.join("sse").is_dir() {
             return sse(&root, uri.query().unwrap_or_default());
+        }
+        if uri.path().ends_with("/logs") && root.join("signal-log").exists() {
+            let text = std::fs::read_to_string(root.join("signal-log")).unwrap();
+            if uri.path().starts_with("/api/jobs/org/") {
+                let sse = text
+                    .lines()
+                    .enumerate()
+                    .map(|(i, line)| {
+                        let timestamp = format!("2026-11-11T00:00:{i:02}.000Z");
+                        format!("data: {}\n\n", json!({"data":line, "timestamp":timestamp}))
+                    })
+                    .collect::<String>();
+                return ([("content-type", "text/event-stream")], sse).into_response();
+            }
+            return Json(json!({"logs":text})).into_response();
         }
         if uri.path().ends_with("/logs") && root.join("slow-logs").exists() {
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -349,9 +365,7 @@ exec sleep 120
     };
     let engine = engine(&root);
     let adapter = super::api::Adapter::new(
-        HfAccount {
-            namespace: "org".into(),
-        },
+        HfAccount::new("org".into()),
         Arc::new(TestClock::new()),
         root.join("spools"),
     );
@@ -468,7 +482,8 @@ async fn ray_submission_id_survives_lost_response_and_observations_are_batched()
         adapter.observe(&runs, Duration::from_secs(2)).await.len(),
         2
     );
-    *response.lock().unwrap() = json!({"status":"SUCCEEDED", "start_time":1234, "end_time":4567});
+    *response.lock().unwrap() =
+        json!({"status":"FAILED", "start_time":1234, "end_time":4567, "driver_exit_code":17});
     clock.advance(Duration::from_secs(10));
     let observations = adapter.observe(&runs, Duration::from_secs(2)).await;
     assert!(observations.iter().any(|(_, observation)| matches!(
@@ -481,19 +496,24 @@ async fn ray_submission_id_survives_lost_response_and_observations_are_batched()
     for (id, observation) in observations {
         engine.observe(&id, observation).unwrap();
     }
-    assert_eq!(engine.load("run").unwrap().0.ended_at, Some(4567));
+    let (row, state) = engine.load("run").unwrap();
+    assert_eq!(row.status, "failed");
+    assert_eq!(row.exit_code, Some(17));
+    assert_eq!(row.ended_at, Some(4567));
+    assert_eq!(state.started_at, Some(1234));
     server.abort();
     drop(engine);
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn provider_terminal_observations_keep_source_finish_times_and_exit_codes() {
+fn provider_terminal_observations_keep_source_times_and_exit_codes() {
     for (stage, code, expected) in [
         (
             "FAILED",
             Some(17),
             Observation::Exited {
+                started_at: Some(100),
                 finished_at: Some(123),
                 code: Some(17),
                 signal: None,
@@ -503,6 +523,7 @@ fn provider_terminal_observations_keep_source_finish_times_and_exit_codes() {
             "CANCELLED",
             Some(137),
             Observation::Cancelled {
+                started_at: Some(100),
                 finished_at: Some(123),
                 code: Some(137),
                 signal: None,
@@ -512,6 +533,7 @@ fn provider_terminal_observations_keep_source_finish_times_and_exit_codes() {
             "FAILED",
             None,
             Observation::Failed {
+                started_at: Some(100),
                 finished_at: Some(123),
                 reason: "FAILED".into(),
             },
@@ -3070,9 +3092,7 @@ logs) exec sleep 5 ;;
 esac
 "#,
     );
-    let hf = HfAccount {
-        namespace: "org".into(),
-    };
+    let hf = HfAccount::new("org".into());
     let hf_run = WatchedRun {
         id: "hf".into(),
         handle: crate::engine::adapters::api::test_handle(
@@ -3586,9 +3606,7 @@ async fn hf_exit_evidence_requires_the_provider_failure_format() {
     let Some(root) = isolated().await else {
         return;
     };
-    let account = HfAccount {
-        namespace: "org".into(),
-    };
+    let account = HfAccount::new("org".into());
     let run = WatchedRun {
         id: "run".into(),
         handle: super::api::test_handle("hf_job", Some("org"), None, vec!["job".into()]),
@@ -3621,6 +3639,7 @@ async fn hf_exit_evidence_requires_the_provider_failure_format() {
             Some(code) => assert_eq!(
                 observation,
                 Observation::Exited {
+                    started_at: None,
                     finished_at: None,
                     code: Some(code),
                     signal: None
@@ -3629,12 +3648,45 @@ async fn hf_exit_evidence_requires_the_provider_failure_format() {
             None => assert_eq!(
                 observation,
                 Observation::Failed {
+                    started_at: None,
                     finished_at: None,
                     reason: message.into()
                 }
             ),
         }
     }
+}
+
+/// A job orx wasn't watching when it ended keeps the times Hugging Face recorded.
+#[tokio::test]
+async fn hf_terminal_observations_keep_the_jobs_own_times() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    let account = HfAccount::new("org".into());
+    let run = WatchedRun {
+        id: "run".into(),
+        handle: super::api::test_handle("hf_job", Some("org"), None, vec!["job".into()]),
+    };
+    std::fs::write(
+        root.join("inspect-response.json"),
+        json!({"id": "job", "status": {"stage": "COMPLETED"},
+               "createdAt": "2026-11-11T00:00:00.000Z",
+               "startedAt": "2026-11-11T00:00:06.079Z",
+               "finishedAt": "2026-11-11T02:00:00Z"})
+        .to_string(),
+    )
+    .unwrap();
+    let start = 1_794_355_200_000;
+    assert_eq!(
+        super::api::Api::inspect(&account, &run).await.unwrap(),
+        Observation::Exited {
+            started_at: Some(start + 6_079),
+            finished_at: Some(start + 2 * 3_600_000),
+            code: Some(0),
+            signal: None
+        }
+    );
 }
 
 #[tokio::test]
@@ -3694,9 +3746,7 @@ class HfApi:
         }),
     };
     let adapter = super::api::Adapter::new(
-        HfAccount {
-            namespace: "org".into(),
-        },
+        HfAccount::new("org".into()),
         Arc::new(TestClock::new()),
         root.join("spools"),
     );
@@ -4023,13 +4073,7 @@ fn hf_backend(root: &Path, clock: Arc<TestClock>) -> super::api::Adapter<HfAccou
         json!({"id":"job", "status":{"stage":"RUNNING"}}).to_string(),
     )
     .unwrap();
-    super::api::Adapter::new(
-        HfAccount {
-            namespace: "org".into(),
-        },
-        clock,
-        root.join("spools"),
-    )
+    super::api::Adapter::new(HfAccount::new("org".into()), clock, root.join("spools"))
 }
 
 fn hf_run() -> WatchedRun {
@@ -4461,5 +4505,146 @@ async fn openresearch_404_under_another_account_is_not_a_release() {
     ));
     for flag in ["box-released", "delete-fails"] {
         std::fs::remove_file(root.join(flag)).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn each_provider_replays_signal_rows_and_spend_without_double_counting() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    script(
+        &root.join("bin/vercel-python"),
+        "#!/bin/sh\ncat \"$ORX_API_ROOT/signal-log\"\n",
+    );
+    script(
+        &root.join("bin/modal-python"),
+        r#"#!/usr/bin/env python3
+import json,os,sys
+log=open(os.path.join(os.environ['ORX_API_ROOT'],'signal-log'),'rb').read()
+sys.stdout.buffer.write(json.dumps(['0',len(log)]).encode()+b'\n'+log)
+"#,
+    );
+    script(
+        &root.join("bin/kubectl"),
+        r#"#!/usr/bin/env python3
+import sys,os,json,pathlib
+a=sys.argv[1:]
+if a[0]=='logs':
+ for line in pathlib.Path(os.environ['ORX_API_ROOT'],'signal-log').read_text().splitlines():
+  print('2026-11-11T00:00:00Z '+line)
+elif a[:2]==['get','pods']:
+ print(json.dumps({'items':[{'metadata':{'name':'pod'},'status':{'phase':'Running'}}]}))
+else: raise Exception(a)
+"#,
+    );
+    let endpoint = std::env::var("HF_ENDPOINT").unwrap();
+    for kind in ["hf_job", "modal_job", "vercel_job", "k8s_job", "ray_job"] {
+        let data = root.join(kind);
+        std::fs::create_dir_all(&data).unwrap();
+        let target = if kind == "ray_job" {
+            endpoint.as_str()
+        } else {
+            "org"
+        };
+        let account = crate::engine::handle::ApiAccount {
+            target: Some(target.into()),
+            context: None,
+        };
+        let ids = match kind {
+            "vercel_job" => vec!["box".into(), "process".into()],
+            "k8s_job" => vec!["job/job".into()],
+            _ => vec!["job".into()],
+        };
+        let run = WatchedRun {
+            id: kind.into(),
+            handle: super::api::test_handle(kind, Some(target), None, ids),
+        };
+        let provider = super::api::provider(kind).unwrap();
+        let mut text = String::new();
+        let desired = || Ok(orx_signals::Config::default());
+        for step in 1..=3 {
+            text.push_str(&format!(
+                "::orx:: {}\n",
+                json!({"step":step,"row":"eval","spend":step,"m":{"score":step}})
+            ));
+            std::fs::write(root.join("signal-log"), &text).unwrap();
+            let backend =
+                (provider.build)(&account, Arc::new(TestClock::new()), data.join("run-logs"))
+                    .unwrap();
+            backend.drain_log(&run).await.unwrap();
+            super::signals::collect(&data, backend.as_ref(), &run, true, 123, desired)
+                .await
+                .unwrap();
+            let snapshot =
+                super::local::signals::load(&data.join("run-signals").join(format!("{kind}.json")))
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(snapshot.rows["eval"].len(), step as usize, "{kind}");
+            assert_eq!(snapshot.spend, Some(step as f64), "{kind}");
+            assert!(
+                !snapshot.coverage.reasons.contains(&"log_replaced".into()),
+                "{kind}"
+            );
+            assert!(
+                !snapshot.coverage.reasons.contains(&"rebuilding".into()),
+                "{kind}"
+            );
+            drop(backend);
+        }
+        // A provider that cannot say where its log continues starts the spool over.
+        if kind == "vercel_job" {
+            let gate = root.join("signal-gate");
+            assert!(crate::process::command("mkfifo")
+                .arg(&gate)
+                .status()
+                .unwrap()
+                .success());
+            script(&root.join("bin/vercel-python"),
+                "#!/bin/sh\ncat \"$ORX_API_ROOT/signal-log\"\nread unused < \"$ORX_API_ROOT/signal-gate\"\n");
+            std::fs::write(
+                root.join("signal-log"),
+                "::orx:: {\"row\":\"eval\",\"m\":{\"score\":4}}\n",
+            )
+            .unwrap();
+            let backend =
+                (provider.build)(&account, Arc::new(TestClock::new()), data.join("run-logs"))
+                    .unwrap();
+            backend
+                .read_log(
+                    &run,
+                    LogFile::Log,
+                    ByteRange {
+                        start: 0,
+                        end: 65536,
+                    },
+                    None,
+                )
+                .await
+                .unwrap();
+            super::signals::collect(&data, backend.as_ref(), &run, false, 124, desired)
+                .await
+                .unwrap();
+            let snapshot =
+                super::local::signals::load(&data.join("run-signals").join(format!("{kind}.json")))
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                snapshot.rows["eval"].len(),
+                3,
+                "partial replay keeps history"
+            );
+            assert!(snapshot.coverage.reasons.contains(&"rebuilding".into()));
+            let staged = super::local::signals::load(
+                &data.join("run-signals").join(format!("{kind}.replay")),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(staged.rows["eval"].len(), 1, "the rebuild is staged");
+            let finish = tokio::task::spawn_blocking(move || std::fs::write(gate, b"done\n"));
+            backend.drain_log(&run).await.unwrap();
+            finish.await.unwrap().unwrap();
+            backend.unwatch(&run).await;
+        }
     }
 }

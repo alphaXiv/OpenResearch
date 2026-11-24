@@ -65,4 +65,4 @@ orx exp run <expId> --backend slurm --qos acc_ehpc --constraint 'a100&ib' --excl
   `orx compute configure slurm --keep-remote-runs true` keeps them all; deleting
   a project removes them regardless.
 
-See [run monitoring](../SKILL.md#who-watches-a-run).
+See [run monitoring](watching.md).

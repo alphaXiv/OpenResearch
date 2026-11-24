@@ -114,6 +114,9 @@ pub(crate) struct Settings {
     /// Random anonymous id (uuid v4), generated once on first enabled run.
     #[serde(default)]
     pub install_id: Option<String>,
+    /// The download page's click id, looked up once when the install id is created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_click_id: Option<String>,
     /// Set by `orx telemetry off`. `Some(true)` = user opted out persistently.
     #[serde(default)]
     pub telemetry_disabled: Option<bool>,
@@ -158,6 +161,9 @@ pub(crate) struct Settings {
     /// Whether the one-time post-publication default prompt has been answered.
     #[serde(default)]
     pub github_default_prompt_seen: Option<bool>,
+    /// Whether the user confirmed Claude full access on this machine while orx runs as root.
+    #[serde(default)]
+    pub claude_root_full_access: Option<bool>,
     /// Literature sources the user turned off (Settings → Literature sources).
     /// Values are `LitSource::as_str()` names; empty = all sources enabled, so a
     /// source added later defaults to enabled. Enforced by discovery and paper reading.
@@ -358,7 +364,29 @@ pub(crate) fn set_github_default_prompt_seen(seen: bool) -> std::io::Result<()> 
     mutate_settings(|settings| settings.github_default_prompt_seen = Some(seen))
 }
 
-fn dashboard_locale() -> Option<String> {
+pub(crate) fn claude_root_full_access() -> bool {
+    load_settings()
+        .and_then(|settings| settings.claude_root_full_access)
+        .unwrap_or(false)
+}
+
+pub(crate) fn set_claude_root_full_access(allowed: bool) -> std::io::Result<()> {
+    mutate_settings(|settings| settings.claude_root_full_access = Some(allowed))
+}
+
+/// How this computer is signed in, as a label that names no account, or
+/// `None` when the credential files cannot be checked.
+fn sign_in() -> Option<&'static str> {
+    if crate::alphaxiv::signed_in_checked().ok()? {
+        Some("alphaxiv")
+    } else if crate::config::credentials_present().ok()? {
+        Some("openresearch")
+    } else {
+        Some("none")
+    }
+}
+
+pub(crate) fn dashboard_locale() -> Option<String> {
     load_settings().and_then(|settings| settings.dashboard_locale)
 }
 
@@ -407,6 +435,71 @@ pub(crate) fn set_ssh_default(host: Option<String>) -> std::io::Result<()> {
 
 fn outbox_dir() -> PathBuf {
     crate::config::config_dir().join("telemetry-outbox")
+}
+
+/// Where a command run in a chat leaves its events for `orx up` to send: orx lets an
+/// agent's sandbox write the data directory, not the config directory.
+fn chat_outbox_dir() -> PathBuf {
+    crate::store::data_dir().join("telemetry-outbox")
+}
+
+fn queued_payload_paths() -> Vec<PathBuf> {
+    [outbox_dir(), chat_outbox_dir()]
+        .iter()
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"))
+        .collect()
+}
+
+/// A chat command's event is about a kilobyte; anything far larger was not queued by orx.
+const CHAT_OUTBOX_MAX_BYTES: u64 = 1 << 20;
+
+/// The queued payload at `path`, or `None` for a file that is not one.
+fn read_queued_payload(path: &std::path::Path) -> std::io::Result<Option<serde_json::Value>> {
+    if path.parent() != Some(chat_outbox_dir().as_path()) {
+        return Ok(serde_json::from_slice(&std::fs::read(path)?).ok());
+    }
+    read_chat_queued_payload(path)
+}
+
+/// An agent can write the chat outbox and whatever is read is posted as is, so a link is
+/// never followed, a pipe never waited on, and only the one event `send_or_stage` names
+/// the file for is accepted.
+fn read_chat_queued_payload(path: &std::path::Path) -> std::io::Result<Option<serde_json::Value>> {
+    use std::io::Read as _;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(
+        &mut options,
+        libc::O_NOFOLLOW | libc::O_NONBLOCK,
+    );
+    // FILE_FLAG_OPEN_REPARSE_POINT: open a link itself, not its target.
+    #[cfg(windows)]
+    std::os::windows::fs::OpenOptionsExt::custom_flags(&mut options, 0x0020_0000);
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    file.take(CHAT_OUTBOX_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > CHAT_OUTBOX_MAX_BYTES {
+        return Ok(None);
+    }
+
+    let payload = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+    let named = path.file_stem().and_then(|stem| stem.to_str());
+    Ok(payload.filter(|payload| {
+        payload["events"]
+            .as_array()
+            .is_some_and(|events| events.len() == 1)
+            && payload["events"][0]["eventId"].as_str() == named
+    }))
 }
 
 /// How reading `settings.json` turned out. The corrupt case is kept distinct
@@ -546,21 +639,118 @@ pub(crate) fn mutate_settings<F: FnOnce(&mut Settings)>(f: F) -> std::io::Result
 /// (so a run that couldn't write never invents a throwaway id that would inflate
 /// install counts on every invocation).
 pub(crate) fn install_id() -> Option<String> {
+    install_id_or_create(installer_click_id)
+}
+
+/// `click_id` runs only for an install without an id, and before the settings lock.
+fn install_id_or_create(click_id: impl FnOnce() -> Option<String>) -> Option<String> {
     // Fast path: already generated.
     if let Some(id) = load_settings().and_then(|s| s.install_id) {
         return Some(id);
     }
+    let click_id = click_id();
     // Generate + persist under the lock, re-checking inside in case a
     // concurrent caller won the race and already wrote one.
     let mut result = None;
     mutate_settings(|s| {
         if s.install_id.is_none() {
             s.install_id = Some(uuid::Uuid::new_v4().to_string());
+            s.download_click_id = click_id;
         }
         result = s.install_id.clone();
     })
     .ok()?;
     result
+}
+
+/// A click id as openresearch.sh issues and accepts it: a UUIDv7.
+fn valid_click_id(text: &str) -> Option<uuid::Uuid> {
+    uuid::Uuid::try_parse(text.trim())
+        .ok()
+        .filter(|id| id.get_version_num() == 7 && id.get_variant() == uuid::Variant::RFC4122)
+}
+
+/// The latest click id among the `openresearch.sh/download?c=<id>` URLs quoted in `text`.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn latest_click_id(text: &str) -> Option<uuid::Uuid> {
+    text.split('"')
+        .filter_map(|quoted| url::Url::parse(quoted).ok())
+        .filter(|url| {
+            url.scheme() == "https"
+                && matches!(
+                    url.host_str(),
+                    Some("openresearch.sh" | "www.openresearch.sh")
+                )
+                && url.path() == "/download"
+        })
+        .filter_map(|url| {
+            url.query_pairs()
+                .filter(|(key, _)| key == "c")
+                .find_map(|(_, value)| valid_click_id(&value))
+        })
+        .max()
+}
+
+/// The pages Spotlight recorded downloads as coming from, read from its index so
+/// the Downloads folder is never opened.
+#[cfg(target_os = "macos")]
+fn spotlight_download_pages() -> Option<String> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let mut child = crate::process::command("/usr/bin/mdfind")
+        .args([
+            "-attr",
+            "kMDItemWhereFroms",
+            r#"kMDItemWhereFroms == "*openresearch.sh/download?*"c"#,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout.read_to_end(&mut bytes);
+        let _ = sender.send(bytes);
+    });
+    // The first launch waits on this, so a stalled Spotlight costs it at most this long.
+    let bytes = receiver.recv_timeout(Duration::from_secs(2)).ok();
+    let _ = child.kill();
+    let _ = child.wait();
+    Some(String::from_utf8_lossy(&bytes?).into_owned())
+}
+
+/// The click id of the download page this desktop app's installer came from.
+#[cfg(target_os = "macos")]
+fn installer_click_id() -> Option<String> {
+    let crate::updates::InstallChannel::AppBundle(_) = crate::updates::current_channel().ok()?
+    else {
+        return None;
+    };
+    latest_click_id(&spotlight_download_pages()?).map(|id| id.to_string())
+}
+
+/// windows/OpenResearch.iss saves the click id beside the desktop app.
+#[cfg(windows)]
+fn installer_click_id() -> Option<String> {
+    let crate::updates::InstallChannel::Portable(dir) = crate::updates::current_channel().ok()?
+    else {
+        return None;
+    };
+    if !dir.join("OpenResearch.exe").is_file() {
+        return None;
+    }
+    let saved = std::fs::read_to_string(dir.join("download-click")).ok()?;
+    valid_click_id(&saved).map(|id| id.to_string())
+}
+
+// Linux browsers don't reliably record the page a download started from.
+#[cfg(not(any(target_os = "macos", windows)))]
+fn installer_click_id() -> Option<String> {
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -724,8 +914,20 @@ fn build_payload_with_id(
             "properties": properties,
         }],
     });
-    if let Some(locale) = dashboard_locale() {
+    if let Some(sign_in) = sign_in() {
+        payload["context"]["signIn"] = json!(sign_in);
+    }
+    let settings = load_settings();
+    let settings = settings.as_ref();
+    if let Some(locale) = settings.and_then(|s| s.dashboard_locale.as_deref()) {
         payload["context"]["locale"] = json!(locale);
+    }
+    // The API rejects the whole batch for a malformed id.
+    if let Some(id) = settings
+        .and_then(|s| s.download_click_id.as_deref())
+        .and_then(valid_click_id)
+    {
+        payload["context"]["downloadClickId"] = json!(id.to_string());
     }
     payload
 }
@@ -793,8 +995,11 @@ async fn post_payload(payload: &serde_json::Value) -> DeliveryOutcome {
     }
 }
 
-fn persist_payload(event_id: uuid::Uuid, payload: &serde_json::Value) -> Option<PathBuf> {
-    let dir = outbox_dir();
+fn persist_payload(
+    dir: PathBuf,
+    event_id: uuid::Uuid,
+    payload: &serde_json::Value,
+) -> Option<PathBuf> {
     std::fs::create_dir_all(&dir).ok()?;
     let path = dir.join(format!("{event_id}.json"));
     crate::local::git::atomic_write_with_mode(
@@ -843,18 +1048,11 @@ fn is_consent_payload(payload: &serde_json::Value) -> bool {
 }
 
 fn remove_queued_product_events() {
-    let Ok(entries) = std::fs::read_dir(outbox_dir()) else {
-        return;
-    };
-    for path in entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"))
-    {
-        let Ok(bytes) = std::fs::read(&path) else {
+    for path in queued_payload_paths() {
+        let Ok(payload) = read_queued_payload(&path) else {
             continue;
         };
-        let keep = serde_json::from_slice(&bytes).is_ok_and(|payload| is_consent_payload(&payload));
+        let keep = payload.is_some_and(|payload| is_consent_payload(&payload));
         if !keep {
             let _ = std::fs::remove_file(path);
         }
@@ -863,6 +1061,24 @@ fn remove_queued_product_events() {
 
 pub(crate) fn accounting_reports_enabled() -> bool {
     is_enabled(flag())
+}
+
+/// A chat's id in usage reports: the same for each of its turns, and not the chat's own id.
+pub(crate) fn chat_ref(chat_id: &str) -> Option<String> {
+    if !is_enabled(flag()) {
+        return None;
+    }
+    Some(hashed_chat_ref(&install_id()?, chat_id))
+}
+
+fn hashed_chat_ref(install_id: &str, chat_id: &str) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(format!("{install_id}:{chat_id}"));
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    uuid::Builder::from_random_bytes(bytes)
+        .into_uuid()
+        .to_string()
 }
 
 pub(crate) fn pending_event_payload(
@@ -891,7 +1107,7 @@ fn transfer_pending_events() {
         let Ok(event_id) = uuid::Uuid::parse_str(&id) else {
             continue;
         };
-        if persist_payload(event_id, &payload).is_some() {
+        if persist_payload(outbox_dir(), event_id, &payload).is_some() {
             let _ = store.acknowledge_pending_telemetry(&id);
         }
     }
@@ -911,14 +1127,7 @@ pub(crate) fn retry_outbox() {
         return;
     }
     transfer_pending_events();
-    let Ok(entries) = std::fs::read_dir(outbox_dir()) else {
-        return;
-    };
-    let mut paths: Vec<_> = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"))
-        .collect();
+    let mut paths = queued_payload_paths();
     sort_oldest_first(&mut paths, |path| {
         std::fs::metadata(path)
             .and_then(|meta| meta.modified())
@@ -926,10 +1135,10 @@ pub(crate) fn retry_outbox() {
     });
     // ponytail: no eviction preserves retryable events; move to SQLite if queue scans become costly.
     for path in paths.into_iter().take(20) {
-        let Ok(bytes) = std::fs::read(&path) else {
+        let Ok(payload) = read_queued_payload(&path) else {
             continue;
         };
-        let Ok(payload) = serde_json::from_slice(&bytes) else {
+        let Some(payload) = payload else {
             let _ = std::fs::remove_file(path);
             continue;
         };
@@ -959,19 +1168,18 @@ fn spawn_event(
 }
 
 /// An agent's sandbox may proxy a send and report the agent's command as failed
-/// when exit cuts the send off, so a command run in an `orx up` chat stages its
-/// events for `orx up` to deliver.
+/// when exit cuts the send off, so a command run in an `orx up` chat leaves its
+/// events for `orx up` to deliver. A file, not the store: a second connection
+/// would wait out the busy timeout whenever a chat holds the write lock.
 fn send_or_stage(
     event_id: uuid::Uuid,
     payload: serde_json::Value,
 ) -> Option<tokio::task::JoinHandle<()>> {
     if crate::local::chat::in_local_session() {
-        if let Ok(store) = crate::store::Store::open() {
-            let _ = store.stage_telemetry(&event_id.to_string(), &payload);
-        }
+        persist_payload(chat_outbox_dir(), event_id, &payload);
         return None;
     }
-    let path = persist_payload(event_id, &payload);
+    let path = persist_payload(outbox_dir(), event_id, &payload);
     Some(tokio::spawn(deliver_payload(path, payload)))
 }
 
@@ -1051,6 +1259,8 @@ fn consent_payload(agreed: bool, distinct_id: &str, event_id: uuid::Uuid) -> ser
     if !agreed {
         if let Some(context) = payload["context"].as_object_mut() {
             context.remove("locale");
+            context.remove("downloadClickId");
+            context.remove("signIn");
         }
     }
     payload
@@ -1078,7 +1288,7 @@ pub(crate) async fn record_consent(agreed: bool) {
     }
     let event_id = uuid::Uuid::new_v4();
     let payload = consent_payload(agreed, &consent_distinct_id(agreed), event_id);
-    let path = persist_payload(event_id, &payload);
+    let path = persist_payload(outbox_dir(), event_id, &payload);
     let send = deliver_queued_payload(path, payload);
     // Cap the wait so the settings POST / command return promptly even if the
     // network is slow; the send itself also has its own 3s request timeout.
@@ -1283,6 +1493,18 @@ pub(crate) const FIRST_ACTIONS: [&str; 7] = [
 pub(crate) const MODEL_CALLOUT_KINDS: [&str; 2] = ["release", "free"];
 pub(crate) const MODEL_CALLOUT_ACTIONS: [&str; 3] = ["shown", "opened", "dismissed"];
 pub(crate) const MODEL_PICKER_SECTIONS: [&str; 5] = ["free", "favorites", "lab", "older", "search"];
+pub(crate) const WORKSPACE_PANES: [&str; 10] = [
+    "search",
+    "files",
+    "artifacts",
+    "experiments",
+    "terminal",
+    "compute",
+    "side_chat",
+    "changes",
+    "subagent",
+    "active_experiment",
+];
 
 /// `text` as the API's bounded label, which a longer one would fail with the whole batch it rides in.
 fn bounded_label(text: &str) -> Option<&str> {
@@ -1345,6 +1567,13 @@ pub(crate) fn capture_model_picked(
         "model_picked",
         json!({ "section": section, "model": model, "harness": harness, "new": new, "free": free }),
     );
+}
+
+pub(crate) fn capture_pane_opened(pane: &str) {
+    if !WORKSPACE_PANES.contains(&pane) {
+        return;
+    }
+    capture("pane_opened", json!({ "pane": pane }));
 }
 
 pub(crate) fn capture_onboarding_step_viewed(step: &str) {
@@ -1561,6 +1790,9 @@ mod tests {
             }),
             (&["githubDefaultPromptSeen"], || {
                 set_github_default_prompt_seen(true).unwrap()
+            }),
+            (&["claudeRootFullAccess"], || {
+                set_claude_root_full_access(true).unwrap()
             }),
             (&["autoUpdate"], || set_auto_update_enabled(false).unwrap()),
             (&["updateChannel"], || {
@@ -1801,16 +2033,72 @@ mod tests {
     }
 
     #[test]
+    fn a_chat_ref_is_stable_per_chat_and_hides_the_chat_id() {
+        if !crate::config::in_test_child(TELEMETRY_ENV) {
+            return;
+        }
+        let chat = "chat_d4ebbf67-e2b6-4a9a-a51e-67d8a47608cb";
+        let first = hashed_chat_ref("install", chat);
+        assert_eq!(hashed_chat_ref("install", chat), first);
+        assert_ne!(hashed_chat_ref("install", "chat_other"), first);
+        assert_ne!(hashed_chat_ref("other-install", chat), first);
+        assert!(!first.contains("d4ebbf67"));
+        // openresearch.sh accepts only a UUID here.
+        assert!(uuid::Uuid::parse_str(&first).is_ok());
+
+        // Telemetry is off in tests: no ref, and no install id minted for one.
+        assert_eq!(chat_ref(chat), None);
+        assert!(load_settings().and_then(|s| s.install_id).is_none());
+    }
+
+    #[test]
     fn install_id_is_stable() {
         if !crate::config::in_test_child(TELEMETRY_ENV) {
             return;
         }
 
-        let first = install_id().expect("id generated");
-        let second = install_id().expect("id persisted");
+        let first = install_id_or_create(|| Some(CLICK.into())).expect("id generated");
+        let second = install_id_or_create(|| panic!("an existing install looked its click up"))
+            .expect("id persisted");
         assert_eq!(first, second, "install id must be stable across calls");
         // A valid uuid.
         assert!(uuid::Uuid::parse_str(&first).is_ok());
+        let click = load_settings().and_then(|s| s.download_click_id);
+        assert_eq!(click.as_deref(), Some(CLICK));
+    }
+
+    const CLICK: &str = "0193a1b2-c3d4-7e5f-8a6b-0123456789ab";
+    const LATER_CLICK: &str = "0193a1b2-c3d5-7e5f-8a6b-0123456789ab";
+
+    #[test]
+    fn latest_click_id_comes_from_the_newest_download_page() {
+        let hit = |page: &str| {
+            format!(
+                "/Users/me/Downloads/OpenResearch.dmg   kMDItemWhereFroms = (\n    \
+                 \"https://release-assets.githubusercontent.com/asset?c={LATER_CLICK}&sig=x\",\n    \
+                 \"{page}\"\n)\n"
+            )
+        };
+        let page =
+            |host: &str, click: &str| hit(&format!("https://{host}/download?start=mac&c={click}"));
+        let latest = |text: String| latest_click_id(&text).map(|id| id.to_string());
+
+        let both = page("openresearch.sh", CLICK) + &page("www.openresearch.sh", LATER_CLICK);
+        assert_eq!(latest(both).as_deref(), Some(LATER_CLICK));
+        assert_eq!(
+            latest(page("openresearch.sh", CLICK)).as_deref(),
+            Some(CLICK)
+        );
+        for ignored in [
+            String::new(),
+            hit("https://openresearch.sh/"),
+            page("openresearch.sh.example.com", CLICK),
+            hit(&format!("https://openresearch.sh/pricing?c={CLICK}")),
+            page("openresearch.sh", "not-a-uuid"),
+            page("openresearch.sh", "ffffffff-ffff-ffff-ffff-ffffffffffff"),
+        ] {
+            assert_eq!(latest(ignored.clone()), None, "{ignored}");
+        }
     }
 
     #[test]
@@ -1980,6 +2268,7 @@ mod tests {
             ("demo_welcome_choice", "cli_demo_welcome_choice"),
             ("model_callout", "cli_model_callout"),
             ("model_picked", "cli_model_picked"),
+            ("pane_opened", "cli_pane_opened"),
         ] {
             let p = build_payload(bare, "did", json!({}));
             assert_eq!(
@@ -2252,6 +2541,7 @@ mod tests {
                 "cli-release-contract-test",
                 json!({
                     "reportId": uuid::Uuid::new_v4().to_string(), "harness": "acp:custom",
+                    "chatRef": uuid::Uuid::new_v4().to_string(),
                     "model": null, "provider": null, "inputTokens": 10, "outputTokens": 5,
                     "cacheReadTokens": null, "cacheWriteTokens": null, "reasoningTokens": null,
                     "totalTokens": 15, "outcome": "done", "coverage": "complete",
@@ -2369,7 +2659,25 @@ mod tests {
             payload["context"]["locale"] = json!("zh-CN");
             payload
         });
-        for payload in payloads.into_iter().chain(launch_payloads).chain(localized) {
+        let signed_in = ["alphaxiv", "openresearch", "none"].map(|state| {
+            let mut payload = build_payload("app_started", "cli-release-contract-test", json!({}));
+            payload["context"]["signIn"] = json!(state);
+            payload
+        });
+        let panes = WORKSPACE_PANES.map(|pane| {
+            build_payload(
+                "pane_opened",
+                "cli-release-contract-test",
+                json!({ "pane": pane }),
+            )
+        });
+        for payload in payloads
+            .into_iter()
+            .chain(launch_payloads)
+            .chain(localized)
+            .chain(signed_in)
+            .chain(panes)
+        {
             assert_eq!(post_payload(&payload).await, DeliveryOutcome::Acknowledged);
         }
     }
@@ -2400,16 +2708,65 @@ mod tests {
     }
 
     #[test]
+    fn payload_context_carries_only_a_valid_download_click_id() {
+        if !crate::config::in_test_child(TELEMETRY_ENV) {
+            return;
+        }
+        let click_id = |stored: Option<&str>| {
+            mutate_settings(|s| s.download_click_id = stored.map(str::to_string)).unwrap();
+            build_payload("app_started", "did", json!({}))["context"]["downloadClickId"].clone()
+        };
+        assert!(click_id(None).is_null());
+        assert!(click_id(Some("not-a-uuid")).is_null());
+        assert_eq!(click_id(Some(CLICK)), CLICK);
+    }
+
+    #[test]
+    fn payload_context_reports_how_this_computer_is_signed_in() {
+        if !crate::config::in_test_child(TELEMETRY_ENV) {
+            return;
+        }
+        let sign_in =
+            || build_payload("app_started", "did", json!({}))["context"]["signIn"].clone();
+        assert_eq!(sign_in(), "none");
+        let config = crate::config::config_dir();
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("credentials.json"), "{}").unwrap();
+        assert_eq!(sign_in(), "openresearch");
+        std::fs::write(config.join("alphaxiv-forwarded.json"), "{}").unwrap();
+        assert_eq!(sign_in(), "alphaxiv");
+        std::fs::remove_file(config.join("alphaxiv-forwarded.json")).unwrap();
+        std::fs::write(config.join("alphaxiv.json"), "{}").unwrap();
+        assert_eq!(sign_in(), "alphaxiv");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let unsearchable = std::fs::Permissions::from_mode(0o000);
+            std::fs::set_permissions(&config, unsearchable).unwrap();
+            let unknown = sign_in();
+            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(
+                unknown.is_null(),
+                "unchecked sign-in was reported as {unknown}"
+            );
+        }
+    }
+
+    #[test]
     fn consent_payload_carries_agreed_flag() {
         if !crate::config::in_test_child(TELEMETRY_ENV) {
             return;
         }
         set_dashboard_locale("es").unwrap();
+        mutate_settings(|s| s.download_click_id = Some(CLICK.into())).unwrap();
         for agreed in [true, false] {
             let p = consent_payload(agreed, "did", uuid::Uuid::new_v4());
             assert_eq!(p["events"][0]["name"], "cli_telemetry_consent");
             assert_eq!(p["events"][0]["properties"]["agreed"], agreed);
             assert_eq!(p["context"].get("locale").is_some(), agreed);
+            assert_eq!(p["context"].get("downloadClickId").is_some(), agreed);
+            assert_eq!(p["context"].get("signIn").is_some(), agreed);
         }
     }
 
@@ -2670,14 +3027,56 @@ mod tests {
             build_payload_with_id("command", "install", event_id, json!({ "command": "exp" }));
 
         assert!(send_or_stage(event_id, payload.clone()).is_none());
-        assert_eq!(
-            crate::store::Store::open()
-                .unwrap()
-                .pending_telemetry()
-                .unwrap(),
-            vec![(event_id.to_string(), payload)]
-        );
+        let staged = chat_outbox_dir().join(format!("{event_id}.json"));
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&staged).unwrap()).unwrap();
+        assert_eq!(written, payload);
+        assert_eq!(queued_payload_paths(), vec![staged.clone()]);
         assert!(!outbox_dir().exists());
+        assert!(!crate::store::data_dir().join("orx.db").exists());
+
+        set_persisted_disabled(true).unwrap();
+        assert!(!staged.exists());
+    }
+
+    #[test]
+    fn the_chat_outbox_reads_only_events_queued_under_their_own_name() {
+        if !crate::config::in_test_child(TELEMETRY_ENV) {
+            return;
+        }
+        let event_id = uuid::Uuid::new_v4();
+        let payload =
+            build_payload_with_id("command", "install", event_id, json!({ "command": "exp" }));
+        std::fs::create_dir_all(chat_outbox_dir()).unwrap();
+        let queued = chat_outbox_dir().join(format!("{event_id}.json"));
+        std::fs::write(&queued, serde_json::to_vec(&payload).unwrap()).unwrap();
+        assert_eq!(read_queued_payload(&queued).unwrap(), Some(payload.clone()));
+
+        let renamed = chat_outbox_dir().join(format!("{}.json", uuid::Uuid::new_v4()));
+        std::fs::rename(&queued, &renamed).unwrap();
+        assert_eq!(read_queued_payload(&renamed).unwrap(), None);
+
+        // A setup snapshot names its file for the batch, not its first event.
+        let snapshot = outbox_dir().join("batch.json");
+        std::fs::create_dir_all(outbox_dir()).unwrap();
+        std::fs::write(&snapshot, serde_json::to_vec(&payload).unwrap()).unwrap();
+        assert_eq!(
+            read_queued_payload(&snapshot).unwrap(),
+            Some(payload.clone())
+        );
+
+        #[cfg(unix)]
+        {
+            let private = chat_outbox_dir().join("private.txt");
+            std::fs::write(&private, serde_json::to_vec(&payload).unwrap()).unwrap();
+            std::os::unix::fs::symlink(&private, &queued).unwrap();
+            assert!(read_queued_payload(&queued).is_err());
+
+            let pipe = chat_outbox_dir().join(format!("{}.json", uuid::Uuid::new_v4()));
+            let name = std::ffi::CString::new(pipe.to_str().unwrap()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+            assert_eq!(read_queued_payload(&pipe).unwrap(), None);
+        }
     }
 
     #[test]

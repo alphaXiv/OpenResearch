@@ -47,7 +47,7 @@ export const refused = (error = "refused") => Response.json({ error }, { status:
 
 /** A connected remote host's runtime for its session `id`. */
 const remoteRuntime = (id) => ({
-  kind: "ssh", version: "test", buildChannel: "stable", dashboardProtocol: 1,
+  kind: "ssh", version: "test", buildChannel: "stable",
   session: { id, host: "gpu", user: "me", status: "connected", version: "test", dashboardProtocol: 1, gatewayUrl: "http://localhost:4910/", error: null, repairCommand: null, installPaths: null, uiPreferences: { theme: null, locale: null }, canStartNewHost: true },
 });
 
@@ -64,8 +64,9 @@ export async function renderChat(path, { sessions = [session("s")], transcripts 
     ...(remote ? { "GET /_orx/runtime": () => remoteRuntime(remoteSession) } : {}),
     "GET /api/projects": () => ({ projects }),
     "GET /api/projects/activity": () => ({ activity: [] }),
+    ...Object.fromEntries(projects.map(({ id }) => [`GET /api/projects/${id}/settings`, () => ({})])),
     "GET /api/chat/sessions": (_, url) => ({ sessions: sessions.filter((row) => url.includes(`projectId=${row.projectId}`)) }),
-    "GET /api/chat/active-runs": () => [],
+    "GET /api/chat/shown-runs": () => [],
     "GET /api/harnesses": () => ({ harnesses }),
     "GET /api/harnesses/setup/commands": () => ({}),
     "GET /api/skills": () => ({ skills: [] }),

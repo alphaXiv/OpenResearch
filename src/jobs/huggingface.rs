@@ -195,6 +195,12 @@ pub struct JobStatus {
 pub struct JobInfo {
     pub id: String,
     pub status: JobStatus,
+    /// ISO 8601; None until the job runs.
+    #[serde(default)]
+    pub started_at: Option<String>,
+    /// ISO 8601; None until the job ends.
+    #[serde(default)]
+    pub finished_at: Option<String>,
 }
 
 async fn check(res: reqwest::Response, what: &str) -> Result<reqwest::Response> {
@@ -219,7 +225,7 @@ async fn check(res: reqwest::Response, what: &str) -> Result<reqwest::Response> 
 }
 
 #[derive(Deserialize)]
-struct WhoAmI {
+pub(crate) struct WhoAmI {
     name: String,
     #[serde(default)]
     orgs: Vec<Org>,
@@ -231,7 +237,7 @@ struct Org {
 }
 
 /// whoami-v2 is heavily rate-limited upstream, so call once per command, not per poll.
-async fn who(token: &str) -> Result<WhoAmI> {
+pub(crate) async fn who(token: &str) -> Result<WhoAmI> {
     let res = http()
         .get(format!("{}/api/whoami-v2", endpoint()))
         .bearer_auth(token)
@@ -248,17 +254,16 @@ pub async fn whoami(token: &str) -> Result<String> {
 
 /// After a 404 for job `job_id` in `namespace`: `None` when the token's account is `namespace`
 /// or a member of it, so the job is gone; otherwise why the 404 proves nothing.
-pub async fn unseen(token: &str, namespace: &str, job_id: &str) -> Result<Option<String>> {
-    let who = who(token).await?;
+pub(crate) fn unseen(who: &WhoAmI, namespace: &str, job_id: &str) -> Option<String> {
     if who.name == namespace || who.orgs.iter().any(|org| org.name == namespace) {
-        return Ok(None);
+        return None;
     }
-    Ok(Some(format!(
+    Some(format!(
         "Hugging Face can't show job {job_id} to the token's account {}, which isn't \
          {namespace} or a member of it, so orx can't tell whether the job still runs. Set \
          HF_TOKEN to a token of {namespace} or one of its members, then run `orx compute test hf`.",
         who.name
-    )))
+    ))
 }
 
 /// whoami-v2 details for the settings UI.
@@ -444,6 +449,8 @@ pub async fn run_job_with_source(
             stage: "SCHEDULING".to_string(),
             message: None,
         },
+        started_at: None,
+        finished_at: None,
     })
 }
 

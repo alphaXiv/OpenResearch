@@ -64,12 +64,78 @@ fn main() {
     }
 
     embed_host_binaries(channel == "production");
+    embed_agent_skills();
     embed_windows_icon();
 }
 
-/// Resource 1 is the icon Explorer shows for orx.exe and the app window loads.
+/// Writes `$OUT_DIR/agent_skills.rs`: one `AgentSkill` per `agent-skills/<name>/SKILL.md`,
+/// with every other file in that directory as a resource.
+fn embed_agent_skills() {
+    println!("cargo:rerun-if-changed=agent-skills");
+    let root =
+        std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("agent-skills");
+
+    let mut dirs: Vec<_> = std::fs::read_dir(&root)
+        .expect("read agent-skills")
+        .map(|entry| entry.unwrap().path())
+        .filter(|dir| dir.join("SKILL.md").is_file())
+        .collect();
+    dirs.sort();
+
+    let mut out = String::from("&[\n");
+    for dir in dirs {
+        let name = dir.file_name().unwrap().to_str().unwrap();
+        let mut files = Vec::new();
+        collect_files(&dir, &mut files);
+        files.sort();
+
+        let mut resources = String::new();
+        for file in files {
+            let rel = file
+                .strip_prefix(&dir)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .replace('\\', "/");
+            if rel == "SKILL.md" {
+                continue;
+            }
+            resources.push_str(&format!(
+                "AgentSkillResource {{ path: {rel:?}, content: include_str!({:?}) }},\n",
+                file.to_str().unwrap()
+            ));
+        }
+        out.push_str(&format!(
+            "AgentSkill {{ name: {name:?}, content: include_str!({:?}), resources: &[\n{resources}] }},\n",
+            dir.join("SKILL.md").to_str().unwrap()
+        ));
+    }
+    out.push(']');
+
+    let path = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("agent_skills.rs");
+    std::fs::write(path, out).expect("write agent_skills.rs");
+}
+
+fn collect_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).expect("read skill directory") {
+        let path = entry.unwrap().path();
+        // Hidden files and Python's bytecode cache are left on disk, never shipped.
+        let name = path.file_name().unwrap().to_string_lossy();
+        if name.starts_with('.') || name == "__pycache__" {
+            continue;
+        }
+        if path.is_dir() {
+            collect_files(&path, out);
+        } else {
+            out.push(path);
+        }
+    }
+}
+
+/// Resource 1 is the icon Explorer shows for orx.exe and the app window loads, and its manifest.
 fn embed_windows_icon() {
     println!("cargo:rerun-if-changed=windows/OpenResearch.ico");
+    println!("cargo:rerun-if-changed=windows/orx.manifest");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
@@ -77,8 +143,17 @@ fn embed_windows_icon() {
     let icon = manifest_dir.join("windows").join("OpenResearch.ico");
     // An absolute path, so it doesn't matter which directory rc.exe resolves against.
     let rc = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("icon.rc");
-    let escaped = icon.display().to_string().replace('\\', "\\\\");
-    std::fs::write(&rc, format!("1 ICON \"{escaped}\"\n")).unwrap();
+    let escape = |path: std::path::PathBuf| path.display().to_string().replace('\\', "\\\\");
+    let manifest = manifest_dir.join("windows").join("orx.manifest");
+    std::fs::write(
+        &rc,
+        format!(
+            "1 ICON \"{}\"\n1 24 \"{}\"\n",
+            escape(icon),
+            escape(manifest)
+        ),
+    )
+    .unwrap();
     embed_resource::compile(&rc, embed_resource::NONE)
         .manifest_required()
         .unwrap();
@@ -108,7 +183,7 @@ fn embed_host_binaries(required: bool) {
                 )
             });
             assert!(
-                !bytes.is_empty() && bytes.len() <= 4 * 1024 * 1024,
+                !bytes.is_empty() && bytes.len() <= 8 * 1024 * 1024,
                 "Invalid orx-host size: {}",
                 path.display()
             );

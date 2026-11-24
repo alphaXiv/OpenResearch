@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { QueryObserver } from "@tanstack/react-query";
 import { mutSaveOverleafToken } from "../src/queries/overleaf.ts";
-import { mutDeleteEnvVar, mutRemoveAcpHarness, mutSetComputeDefault, mutSetLitSources, mutSetTelemetry, mutSignOutOpenResearch } from "../src/queries/settings.ts";
+import { mutDeleteEnvVar, mutRemoveAcpHarness, mutSetChatLitSources, mutSetComputeDefault, mutUpdateProjectSettings, mutSetTelemetry, mutSignOutOpenResearch } from "../src/queries/settings.ts";
 import { createWorkspace } from "../src/workspace.tsx";
 import { serve } from "./render.mjs";
 
@@ -64,33 +64,64 @@ test("a project's variable leaves only that project's list, and a global save re
   assert.deepEqual(get(project).projectVars.map((entry) => entry.key), ["B"]);
 });
 
-test("a new default destination shows at once and keeps the server's settings", async () => {
+test("a new default for all projects shows at once in every project and keeps each project's own", async () => {
   const { workspace, reply, set, get } = setup();
-  const options = workspace.queries.getComputeSettingsQuery("p");
+  const following = workspace.queries.getComputeSettingsQuery("p");
+  const pinned = workspace.queries.getComputeSettingsQuery("q");
   const settings = { defaultBackend: "local", defaultFlavor: null, configuredDefaultBackend: "local", configuredDefaultFlavor: null, targets: [] };
-  set(options, settings);
+  set(following, { ...settings, projectDefault: null });
+  set(pinned, { ...settings, projectDefault: { backend: "k8s" } });
 
-  const saved = mutSetComputeDefault.runAsHeadlessPromise(workspace, { backend: "modal", flavor: "A100", projectId: "p" }, {});
-  assert.equal(get(options).configuredDefaultBackend, "modal");
-  assert.equal(get(options).defaultFlavor, "A100");
+  const saved = mutSetComputeDefault.runAsHeadlessPromise(workspace, { backend: "modal", flavor: "A100" }, {});
+  assert.equal(get(following).configuredDefaultBackend, "modal");
+  assert.equal(get(pinned).defaultFlavor, "A100");
   reply.resolve({ ...settings, defaultBackend: "modal", configuredDefaultBackend: "modal", defaultFlavor: "a100", configuredDefaultFlavor: "a100" });
   await saved;
-  assert.equal(get(options).defaultFlavor, "a100");
+  assert.equal(get(following).defaultFlavor, "a100");
+  assert.deepEqual(get(pinned).projectDefault, { backend: "k8s" });
 });
 
-test("two quick source toggles both reach the server, in order, each carrying the other", async () => {
+test("a project's settings change at once, return to the default on null, and roll back when refused", async () => {
   const { workspace, reply, requests, set, get } = setup();
-  const options = workspace.queries.getLitSourcesQuery();
-  set(options, { alphaxiv: true, openalex: true, biorxiv: true, pubmed: true });
+  const options = workspace.queries.getProjectSettingsQuery("p");
+  set(options, { compute: { backend: "k8s" }, disabledLitSources: ["pubmed"] });
 
-  const first = mutSetLitSources.runAsHeadlessPromise(workspace, { ...get(options), openalex: false }, {});
-  const second = mutSetLitSources.runAsHeadlessPromise(workspace, { ...get(options), pubmed: false }, {});
-  assert.deepEqual(get(options), { alphaxiv: true, openalex: false, biorxiv: true, pubmed: false });
+  const reset = mutUpdateProjectSettings.runAsHeadlessPromise(workspace, "p", { compute: null }, {});
+  assert.deepEqual(get(options), { disabledLitSources: ["pubmed"] });
   await settle();
-  assert.deepEqual(requests, [{ alphaxiv: true, openalex: false, biorxiv: true, pubmed: true }]);
-  reply.resolve({ alphaxiv: true, openalex: false, biorxiv: true, pubmed: false });
+  assert.deepEqual(requests, [{ compute: null }]);
+  reply.resolve(refused("Project p is not registered in the orx store."));
+  await assert.rejects(reset);
+  assert.deepEqual(get(options), { compute: { backend: "k8s" }, disabledLitSources: ["pubmed"] });
+});
+
+test("two quick source toggles in a project both reach the server, in order, each carrying the other", async () => {
+  const { workspace, reply, requests, set, get } = setup();
+  const options = workspace.queries.getProjectSettingsQuery("p");
+  set(options, {});
+
+  const first = mutUpdateProjectSettings.runAsHeadlessPromise(workspace, "p", { disabledLitSources: ["openalex"] }, {});
+  const second = mutUpdateProjectSettings.runAsHeadlessPromise(workspace, "p", { disabledLitSources: [...get(options).disabledLitSources, "pubmed"] }, {});
+  assert.deepEqual(get(options), { disabledLitSources: ["openalex", "pubmed"] });
+  await settle();
+  assert.deepEqual(requests, [{ disabledLitSources: ["openalex"] }]);
+  reply.resolve({ disabledLitSources: ["openalex", "pubmed"] });
   await Promise.all([first, second]);
-  assert.deepEqual(requests.at(-1), { alphaxiv: true, openalex: false, biorxiv: true, pubmed: false });
+  assert.deepEqual(requests.at(-1), { disabledLitSources: ["openalex", "pubmed"] });
+});
+
+test("a chat's own sources show at once and return to its project's when the server refuses", async () => {
+  const { workspace, reply, requests, set, get } = setup();
+  const options = workspace.queries.getChatLitSourcesQuery("chat");
+  set(options, { disabledLitSources: null });
+
+  const changed = mutSetChatLitSources.runAsHeadlessPromise(workspace, "chat", ["pubmed"], {});
+  assert.deepEqual(get(options), { disabledLitSources: ["pubmed"] });
+  await settle();
+  assert.deepEqual(requests, [{ disabledLitSources: ["pubmed"] }]);
+  reply.resolve(refused("chat not found"));
+  await assert.rejects(changed);
+  assert.deepEqual(get(options), { disabledLitSources: null });
 });
 
 test("signing out shows the account signed out before the server answers", async () => {
@@ -152,18 +183,17 @@ test("analytics turned off stays off when turning it back on fails and so does t
   closeSettings();
 });
 
-test("a source turned off stays off when turning it back on fails and so does the refresh", async () => {
+test("a source a project turned off stays off when turning it back on fails and so does the refresh", async () => {
   const workspace = createWorkspace("lit-sources-refused");
-  const options = workspace.queries.getLitSourcesQuery();
-  const all = { alphaxiv: true, openalex: true, biorxiv: true, pubmed: true };
-  workspace.queryClient.setQueryData(options.queryKey, all);
-  const closeSettings = serveSaveThenRefuse(workspace, options, { ...all, openalex: false });
+  const options = workspace.queries.getProjectSettingsQuery("p");
+  workspace.queryClient.setQueryData(options.queryKey, {});
+  const closeSettings = serveSaveThenRefuse(workspace, options, { disabledLitSources: ["openalex"] });
 
-  const off = mutSetLitSources.runAsHeadlessPromise(workspace, { ...all, openalex: false }, {});
-  const on = mutSetLitSources.runAsHeadlessPromise(workspace, all, {});
+  const off = mutUpdateProjectSettings.runAsHeadlessPromise(workspace, "p", { disabledLitSources: ["openalex"] }, {});
+  const on = mutUpdateProjectSettings.runAsHeadlessPromise(workspace, "p", { disabledLitSources: [] }, {});
   await off;
   await assert.rejects(on, { message: "OpenResearch is not running." });
   await settle();
-  assert.deepEqual(workspace.queryClient.getQueryData(options.queryKey), { ...all, openalex: false });
+  assert.deepEqual(workspace.queryClient.getQueryData(options.queryKey), { disabledLitSources: ["openalex"] });
   closeSettings();
 });

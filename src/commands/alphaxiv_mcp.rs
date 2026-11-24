@@ -20,10 +20,12 @@ pub const RESEARCH_TOOLS: &[&str] = &[
 ];
 pub const LIBRARY_READ_TOOLS: &[&str] =
     &["list_library", "list_annotated_papers", "get_paper_notes"];
+/// Change the user's library, so agents ask first where they take a per-tool rule. Antigravity and
+/// ACP agents take none and `codex exec` cannot prompt, so there the agent's own policy decides.
 pub const WRITE_TOOLS: &[&str] = &["save_papers_to_folder", "create_folder"];
 const SIGNED_OUT: &str = "alphaXiv is signed out on the computer running this chat, so library tools are unavailable. Research tools still work.";
 const FORWARDED_LAPSED: &str = "The alphaXiv sign-in the user's laptop shared with the computer running this chat has expired, so library tools are unavailable until the user reconnects to this computer from OpenResearch on their laptop. Research tools still work.";
-const INSTRUCTIONS: &str = "alphaXiv tools research papers and researchers. Library tools read the user's saved folders, notes and highlights and need alphaXiv sign-in on the computer running this chat, or on the laptop connected to it. Save papers or create folders only when requested. Want to read, Reading and Completed are folders, not exclusive states. Link papers as https://www.alphaxiv.org/abs/<arXiv id>.";
+pub(crate) const INSTRUCTIONS: &str = "alphaXiv tools research papers and researchers. Library tools read the user's saved folders, notes and highlights and need alphaXiv sign-in on the computer running this chat, or on the laptop connected to it. Save papers or create folders only when requested. Want to read, Reading and Completed are folders, not exclusive states. Link papers as https://www.alphaxiv.org/abs/<arXiv id>.";
 
 /// Under the agents' 300 s tool-call timeouts, so this error reaches the agent first.
 const CALL_TIMEOUT: Duration = Duration::from_secs(240);
@@ -169,6 +171,106 @@ async fn handle(message: Value) -> Value {
     json!({"jsonrpc":"2.0", "id":id, "result":result})
 }
 
+/// `orx alphaxiv tools [name]`: the tools the MCP server would list, for agents without it.
+pub async fn print_tools(name: Option<String>) -> Result<()> {
+    let reply = handle(json!({"jsonrpc":"2.0", "id":1, "method":"tools/list"})).await;
+    if let Some(error) = reply.pointer("/error/message").and_then(Value::as_str) {
+        return Err(anyhow!("{error}"));
+    }
+    let tools = reply
+        .pointer("/result/tools")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let Some(name) = name else {
+        for tool in &tools {
+            let description = tool["description"].as_str().unwrap_or("");
+            let summary = description
+                .split_once(". ")
+                .map_or(description, |(first, _)| first);
+            let required: Vec<&str> = tool
+                .pointer("/inputSchema/required")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            let signature = format!(
+                "{}({})",
+                tool["name"].as_str().unwrap_or(""),
+                required.join(", ")
+            );
+            println!("{signature}: {}", summary.trim_end_matches('.'));
+        }
+        println!("\nRequired arguments are in parentheses. `orx alphaxiv tools <name>` shows all of a tool's arguments; `orx alphaxiv call <name> '<json>'` runs it.");
+        return Ok(());
+    };
+
+    let tool = tools
+        .iter()
+        .find(|tool| tool["name"] == name.as_str())
+        .ok_or_else(|| {
+            if !allowed(&name, true) {
+                unknown_tool(&name)
+            } else if crate::alphaxiv::signed_in() {
+                anyhow!("{FORWARDED_LAPSED}")
+            } else {
+                anyhow!("{SIGNED_OUT}")
+            }
+        })?;
+    println!("{}\n", tool["description"].as_str().unwrap_or("").trim());
+    println!("Arguments (JSON Schema):");
+    println!("{}", serde_json::to_string_pretty(&tool["inputSchema"])?);
+    Ok(())
+}
+
+/// `orx alphaxiv call <name> [json]`, through the same allowlist and sign-in as the MCP server.
+pub async fn call(name: &str, arguments: Option<String>) -> Result<()> {
+    if !allowed(name, true) {
+        return Err(unknown_tool(name));
+    }
+    let text = match arguments.as_deref() {
+        Some("-") => std::io::read_to_string(std::io::stdin())?,
+        Some(text) => text.to_owned(),
+        None => "{}".to_owned(),
+    };
+    let arguments: Value = serde_json::from_str(&text).map_err(|error| {
+        anyhow!("The arguments for {name} are not valid JSON ({error}); `orx alphaxiv tools {name}` lists its fields.")
+    })?;
+    if !arguments.is_object() {
+        return Err(anyhow!("The arguments for {name} must be a JSON object, such as '{{\"query\": \"…\"}}'; `orx alphaxiv tools {name}` lists its fields."));
+    }
+
+    let request = json!({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":name, "arguments":arguments}});
+    let reply = handle(request).await;
+    if let Some(error) = reply.pointer("/error/message").and_then(Value::as_str) {
+        return Err(anyhow!("{error}"));
+    }
+    let text = reply
+        .pointer("/result/content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|part| part["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if reply.pointer("/result/isError") == Some(&json!(true)) {
+        let hint = if text.contains("Invalid arguments") {
+            format!("\n`orx alphaxiv tools {name}` lists its arguments.")
+        } else {
+            String::new()
+        };
+        return Err(anyhow!("{text}{hint}"));
+    }
+    println!("{text}");
+    Ok(())
+}
+
+fn unknown_tool(name: &str) -> anyhow::Error {
+    anyhow!("alphaXiv has no tool `{name}` in OpenResearch; `orx alphaxiv tools` lists them.")
+}
+
 fn tool_error(id: Value, text: &str) -> Value {
     json!({"jsonrpc":"2.0", "id":id, "result":{"isError":true,"content":[{"type":"text","text":text}]}})
 }
@@ -281,6 +383,13 @@ mod tests {
             handle(call("discover_papers")).await["result"]["content"][0]["text"],
             "IP rate limit"
         );
+        // A library tool the listing hides while signed out says why, not that it doesn't exist.
+        let described = print_tools(Some("list_library".into())).await.unwrap_err();
+        assert_eq!(described.to_string(), SIGNED_OUT);
+        let unknown = print_tools(Some("delete_folder".into())).await.unwrap_err();
+        assert!(unknown
+            .to_string()
+            .contains("`orx alphaxiv tools` lists them"));
         let config = crate::config::config_dir();
         std::fs::create_dir_all(&config).unwrap();
         std::fs::write(config.join("alphaxiv.json"), json!({"apiUrl":api,"accessToken":"test-access","refreshToken":"test-refresh","expiresAtMs":crate::store::now_ms()+3_600_000}).to_string()).unwrap();
@@ -313,6 +422,8 @@ mod tests {
             handle(call("list_library")).await["result"]["content"][0]["text"],
             FORWARDED_LAPSED
         );
+        let described = print_tools(Some("list_library".into())).await.unwrap_err();
+        assert_eq!(described.to_string(), FORWARDED_LAPSED);
         assert_eq!(
             handle(call("discover_papers")).await["result"]["content"][0]["text"],
             "IP rate limit"
@@ -328,11 +439,11 @@ mod tests {
         assert!(listing_is_complete(&handle(list).await));
 
         let calls = calls.lock().unwrap();
-        assert_eq!(calls[4], ("/mcp/v1/anonymous".to_owned(), None));
-        assert!(calls[..2]
+        assert_eq!(calls[6], ("/mcp/v1/anonymous".to_owned(), None));
+        assert!(calls[..4]
             .iter()
             .all(|(path, auth)| path == "/mcp/v1/anonymous" && auth.is_none()));
-        assert!(calls[2..4].iter().all(
+        assert!(calls[4..6].iter().all(
             |(path, auth)| path == "/mcp/v1" && auth.as_ref().unwrap() == "Bearer test-access"
         ));
         server.abort();

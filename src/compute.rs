@@ -502,8 +502,8 @@ backend_adapter!(
     false,
     "kubectl cp",
     false,
-    preflight | _args | {
-        let settings = crate::jobs::kubernetes::load_settings()?.unwrap_or_default();
+    preflight | args | {
+        let settings = crate::local::k8s::settings_for(args)?;
         let check =
             crate::jobs::kubernetes::preflight(settings.context.as_deref(), &settings.namespace)
                 .await;
@@ -774,6 +774,7 @@ pub struct Submission {
     pub source: SourceSnapshot,
     pub command: String,
     pub launch: LaunchSpec,
+    pub monitor_config: Option<String>,
 }
 
 /// Snapshots the source and prepares the launch intent, then hands it to `insert` while the
@@ -875,6 +876,12 @@ where
             ));
         }
     }
+    let settings = store.run_monitor_json(&experiment.id)?;
+    let has_time_limit = launch.options["timeout_seconds"]
+        .as_i64()
+        .is_some_and(|seconds| seconds > 0);
+    let monitor_config =
+        crate::engine::rules::freeze(&experiment.id, settings.as_deref(), has_time_limit)?;
     store.reserve_run_telemetry(&run_id, identity.as_ref(), report.as_ref())?;
     let branch = experiment.branch_name.clone();
     insert(Submission {
@@ -883,6 +890,7 @@ where
         source,
         command,
         launch,
+        monitor_config,
     })
     .await?;
     if project.github_enabled() {
@@ -1198,6 +1206,7 @@ echo ok
 
     pub(crate) fn tinker_args() -> crate::ExpRunArgs {
         crate::ExpRunArgs {
+            estimate: false,
             exp_id: "exp".into(),
             disk: None,
             provider: None,

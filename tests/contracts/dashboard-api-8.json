@@ -1,0 +1,512 @@
+[
+  {
+    "method": "DELETE",
+    "path": "/api/chat/sessions/chat_f1e20f5f-3307-4ccf-8401-68c95b1eeaf2"
+  },
+  {
+    "method": "GET",
+    "path": "/api/account/openresearch"
+  },
+  {
+    "method": "GET",
+    "path": "/api/chat/sessions?projectId=4ed9b0e2-fdde-4c13-ab25-088911f043f5"
+  },
+  {
+    "method": "GET",
+    "path": "/api/chat/sessions/chat_20a7c261-ce81-46ad-ad67-5b5ed9c8695e/experiments"
+  },
+  {
+    "method": "GET",
+    "path": "/api/chat/sessions/chat_ae3589d5-3814-4db2-b5d3-d8036e1b1943/lit-sources"
+  },
+  {
+    "method": "GET",
+    "path": "/api/chat/sessions/chat_ae3589d5-3814-4db2-b5d3-d8036e1b1943/messages"
+  },
+  {
+    "method": "GET",
+    "path": "/api/chat/sessions/chat_79f75222-7ac2-4467-accc-03d577ec3752/worktree"
+  },
+  {
+    "method": "GET",
+    "path": "/api/chat/sessions/chat_demo_nanochat_v1/lit-sources"
+  },
+  {
+    "method": "GET",
+    "path": "/api/chat/sessions/chat_demo_nanochat_v1/messages"
+  },
+  {
+    "method": "GET",
+    "path": "/api/chat/shown-runs?includeFailures=true"
+  },
+  {
+    "method": "GET",
+    "path": "/api/compute/hosts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/events"
+  },
+  {
+    "method": "GET",
+    "path": "/api/file-manager?locale=en"
+  },
+  {
+    "method": "GET",
+    "path": "/api/github/account"
+  },
+  {
+    "method": "GET",
+    "path": "/api/github/project-repo-preview?name="
+  },
+  {
+    "method": "GET",
+    "path": "/api/harnesses"
+  },
+  {
+    "method": "GET",
+    "path": "/api/harnesses/acp"
+  },
+  {
+    "method": "GET",
+    "path": "/api/harnesses/acp/presets"
+  },
+  {
+    "method": "GET",
+    "path": "/api/harnesses/setup/commands"
+  },
+  {
+    "method": "GET",
+    "path": "/api/local-models"
+  },
+  {
+    "method": "GET",
+    "path": "/api/model-feed"
+  },
+  {
+    "method": "GET",
+    "path": "/api/opencode/providers"
+  },
+  {
+    "method": "GET",
+    "path": "/api/pending-work"
+  },
+  {
+    "method": "GET",
+    "path": "/api/project-path/status?path=%7Broot%7D%2Fkept%2Ftokenizer-probes"
+  },
+  {
+    "method": "GET",
+    "path": "/api/projects"
+  },
+  {
+    "method": "GET",
+    "path": "/api/projects/1e536903-6da9-4680-a1bf-4877dbe20daa/code-tree?sessionId=chat_833cb54e-7cf5-4a70-a87e-7daa8c91c378"
+  },
+  {
+    "method": "GET",
+    "path": "/api/projects/4ed9b0e2-fdde-4c13-ab25-088911f043f5/experiments"
+  },
+  {
+    "method": "GET",
+    "path": "/api/projects/1e536903-6da9-4680-a1bf-4877dbe20daa/file?path=artifacts%2F.scratch%2Fnotes.md&sessionId=chat_833cb54e-7cf5-4a70-a87e-7daa8c91c378"
+  },
+  {
+    "method": "GET",
+    "path": "/api/projects/4ed9b0e2-fdde-4c13-ab25-088911f043f5/files"
+  },
+  {
+    "method": "GET",
+    "path": "/api/projects/1e536903-6da9-4680-a1bf-4877dbe20daa/files/file?path=report.md"
+  },
+  {
+    "method": "GET",
+    "path": "/api/projects/7c1c7670-ba1f-4c35-b31d-a855a21ef20a/git"
+  },
+  {
+    "method": "GET",
+    "path": "/api/projects/4ed9b0e2-fdde-4c13-ab25-088911f043f5/runs"
+  },
+  {
+    "method": "GET",
+    "path": "/api/projects/4ed9b0e2-fdde-4c13-ab25-088911f043f5/settings"
+  },
+  {
+    "method": "GET",
+    "path": "/api/projects/4ed9b0e2-fdde-4c13-ab25-088911f043f5/starter-prompts?harness=acp%3A2ec87131-dc06-4d75-a152-c1efe6649c71&model=e2e&locale=en"
+  },
+  {
+    "method": "GET",
+    "path": "/api/projects/4ed9b0e2-fdde-4c13-ab25-088911f043f5/ui-state"
+  },
+  {
+    "method": "GET",
+    "path": "/api/projects/activity"
+  },
+  {
+    "method": "GET",
+    "path": "/api/projects/demo_nanochat_v1/experiments"
+  },
+  {
+    "method": "GET",
+    "path": "/api/projects/demo_nanochat_v1/file?path=artifacts%2Fcpu-apple-silicon-pipeline-results.md&sessionId=chat_demo_nanochat_v1"
+  },
+  {
+    "method": "GET",
+    "path": "/api/projects/demo_nanochat_v1/files"
+  },
+  {
+    "method": "GET",
+    "path": "/api/projects/demo_nanochat_v1/files/file?path=nanochat-pipeline-results.html"
+  },
+  {
+    "method": "GET",
+    "path": "/api/projects/demo_nanochat_v1/runs"
+  },
+  {
+    "method": "GET",
+    "path": "/api/projects/demo_nanochat_v1/settings"
+  },
+  {
+    "method": "GET",
+    "path": "/api/projects/demo_nanochat_v1/ui-state"
+  },
+  {
+    "method": "GET",
+    "path": "/api/remote/hosts"
+  },
+  {
+    "method": "GET",
+    "path": "/api/remote/sessions"
+  },
+  {
+    "method": "GET",
+    "path": "/api/runs/486d3cfa-8cba-4d36-815a-e85b4e873da5/diff"
+  },
+  {
+    "method": "GET",
+    "path": "/api/runs/e5cc2653-ff74-43bc-b3ae-ccf7a65ac245/log?start=0&end=262144"
+  },
+  {
+    "method": "GET",
+    "path": "/api/runs/0fb89182-f697-4e90-bdcc-d1ec82dfabca/media?path=samples%2FFrame%204.png&v=8672-1784000003000000000"
+  },
+  {
+    "method": "GET",
+    "path": "/api/runs/e5cc2653-ff74-43bc-b3ae-ccf7a65ac245/monitor"
+  },
+  {
+    "method": "GET",
+    "path": "/api/settings/compute?projectId=7c1c7670-ba1f-4c35-b31d-a855a21ef20a"
+  },
+  {
+    "method": "GET",
+    "path": "/api/settings/lit-sources"
+  },
+  {
+    "method": "GET",
+    "path": "/api/settings/local"
+  },
+  {
+    "method": "GET",
+    "path": "/api/settings/projects"
+  },
+  {
+    "method": "GET",
+    "path": "/api/settings/ui-state"
+  },
+  {
+    "method": "GET",
+    "path": "/api/skills?harness=acp%3A2ec87131-dc06-4d75-a152-c1efe6649c71&project=4ed9b0e2-fdde-4c13-ab25-088911f043f5"
+  },
+  {
+    "method": "GET",
+    "path": "/api/trackio/projects/7c94848f-f71a-434d-88de-a00464cceefe/runs"
+  },
+  {
+    "method": "GET",
+    "path": "/api/update"
+  },
+  {
+    "method": "GET",
+    "path": "/api/usage"
+  },
+  {
+    "method": "HEAD",
+    "path": "/api/projects/1e536903-6da9-4680-a1bf-4877dbe20daa/file/raw?path=report.md&sessionId=chat_833cb54e-7cf5-4a70-a87e-7daa8c91c378"
+  },
+  {
+    "method": "HEAD",
+    "path": "/api/projects/1e536903-6da9-4680-a1bf-4877dbe20daa/files/file?path=missing_plot.png"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/chat/sessions/chat_2b230040-cc9a-4b45-81ce-8b88d7f3d2b5",
+    "body": {
+      "permissionMode": "auto-approve"
+    }
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/projects/ce55bbde-a0e0-4c81-a2b9-09c277ee9086",
+    "body": {
+      "name": "Tokenizer probes"
+    }
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/runs/0b8957e1-7611-4bf1-a03f-8a6a22745bc3/view/chart",
+    "body": {
+      "markup": "<signal name=\"loss\" label=\"Training loss\" smooth=\"0.25\"/>\n<view headline=\"loss\"><chart y=\"loss\"/></view>",
+      "isDefault": false,
+      "block": 0,
+      "edit": {
+        "kind": "y",
+        "log": true
+      }
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/chat/sessions",
+    "body": {
+      "projectId": "4ed9b0e2-fdde-4c13-ab25-088911f043f5",
+      "harness": "acp:2ec87131-dc06-4d75-a152-c1efe6649c71",
+      "profile": null,
+      "model": "e2e",
+      "serviceTier": null,
+      "permissionMode": null,
+      "reasoningLevel": "default"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/chat/sessions/chat_78a9a1e6-bcde-4862-9d3a-7d3a5d555ee0/interrupt"
+  },
+  {
+    "method": "POST",
+    "path": "/api/chat/sessions/chat_ae3589d5-3814-4db2-b5d3-d8036e1b1943/message",
+    "body": {
+      "text": "Prepare the late-request test.",
+      "clientTurnId": "ct_170d50a4-a668-4315-8306-6e3ef0db7adf",
+      "model": "e2e",
+      "serviceTier": null,
+      "permissionMode": null,
+      "reasoningLevel": "default",
+      "annotations": []
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/chat/sessions/chat_bb5ef8ad-fe89-4e56-9314-832bc7567312/project",
+    "body": {
+      "name": "Tokenizer probes",
+      "path": "{root}/kept/tokenizer-probes",
+      "project": "944050f9-22d3-47d0-b861-fddab7a84e60",
+      "scratch": true,
+      "proposal": "acp-tool-run-4"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/chat/sessions/chat_7f5b3beb-f07b-45ce-bd26-be9f7fad6587/respond",
+    "body": {
+      "promptId": "acp-permission-578c9ef133ae4af18d086db4846e7d53:1407",
+      "answers": [
+        "opaque-reject"
+      ],
+      "approve": false
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/chat/sessions/chat_823a8c3f-678e-48f3-9584-735f74098b57/shown-runs/32e64f19-e681-4947-9591-0c383cb7f0fc/dismiss"
+  },
+  {
+    "method": "POST",
+    "path": "/api/chat/sessions/chat_fe90a74f-b402-4875-b39e-f2c65e44eeba/stop-and-archive"
+  },
+  {
+    "method": "POST",
+    "path": "/api/chat/sessions/chat_020f87cb-f7e1-445c-8dd2-64c02ae2ed4c/turns/turn_384325a0-fb15-4003-9438-a88275bf8371/recover",
+    "body": {
+      "action": "continue"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/harnesses/acp",
+    "body": {
+      "name": "E2E Agent",
+      "executable": "{node}",
+      "arguments": [
+        "{agent}"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/harnesses/acp/test",
+    "body": {
+      "name": "E2E Agent",
+      "executable": "{node}",
+      "arguments": [
+        "{agent}"
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/local-models/discover",
+    "body": {
+      "baseUrl": "http://127.0.0.1:1234/v1",
+      "apiKey": ""
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/onboarding/complete",
+    "body": {
+      "harness": "acp:a4d5a2da-313f-4fae-b0f7-f33828d0225f",
+      "profile": null,
+      "model": "e2e",
+      "permissionMode": "ask",
+      "reasoningLevel": null
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/projects",
+    "body": {
+      "name": "dropout-sweep",
+      "path": "~/OpenResearch/dropout-sweep",
+      "creationMode": "blank",
+      "createFolder": true,
+      "requireNewFolder": true,
+      "initializeGit": true,
+      "githubSyncEnabled": false,
+      "locale": "en",
+      "starterAgent": {
+        "harness": "acp:a4d5a2da-313f-4fae-b0f7-f33828d0225f",
+        "model": "e2e",
+        "profile": null
+      }
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/projects/4ed9b0e2-fdde-4c13-ab25-088911f043f5/ui-state",
+    "body": {
+      "version": 1,
+      "lastTaskId": null,
+      "lastLocation": "/projects/4ed9b0e2-fdde-4c13-ab25-088911f043f5/tasks/new",
+      "tasks": {
+        "new": {
+          "tabs": [],
+          "active": null,
+          "previewKey": null,
+          "history": [],
+          "expanded": {
+            "files": []
+          },
+          "scroll": {},
+          "sourceModes": {},
+          "filesView": "files",
+          "scope": "project",
+          "panelMax": false,
+          "treeViewport": null
+        }
+      }
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/projects/demo_nanochat_v1/ui-state",
+    "body": {
+      "version": 1,
+      "lastTaskId": "chat_demo_nanochat_v1",
+      "lastLocation": "/projects/demo_nanochat_v1/tasks/chat_demo_nanochat_v1?pane=%7B%22kind%22%3A%22home%22%2C%22view%22%3A%22experiments%22%7D",
+      "tasks": {
+        "chat_demo_nanochat_v1": {
+          "tabs": [
+            {
+              "kind": "home",
+              "view": "experiments"
+            }
+          ],
+          "active": {
+            "kind": "home",
+            "view": "experiments"
+          },
+          "previewKey": null,
+          "history": [
+            "home:experiments"
+          ],
+          "expanded": {
+            "files": []
+          },
+          "scroll": {},
+          "sourceModes": {},
+          "filesView": "files",
+          "scope": "project",
+          "panelMax": false,
+          "treeViewport": null
+        }
+      }
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/projects/scratch",
+    "body": {}
+  },
+  {
+    "method": "POST",
+    "path": "/api/runs/82f4ba7e-604c-49fe-ae5e-5a5eae488df1/cancel"
+  },
+  {
+    "method": "POST",
+    "path": "/api/runs/8a2db6af-8a6e-42e4-93e8-dd81e21c357f/flag",
+    "body": {
+      "flagId": "fd19b7a3d",
+      "choice": "keep",
+      "requestId": "81e2ceea-463f-4807-8ad4-10ea9fabbea5"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/settings/ui-state",
+    "body": {
+      "workspace": {
+        "lastLocation": "/projects/4ed9b0e2-fdde-4c13-ab25-088911f043f5/tasks/new",
+        "railOpen": true,
+        "panelWidth": 360,
+        "railWidth": 300,
+        "experimentsView": "table"
+      }
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/telemetry/event",
+    "body": {
+      "name": "first_action",
+      "surface": "project",
+      "action": "typed_prompt"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/telemetry/locale",
+    "body": {
+      "locale": "en"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/api/update/restart",
+    "body": {
+      "stopAgents": false
+    }
+  }
+]

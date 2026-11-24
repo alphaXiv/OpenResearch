@@ -69,6 +69,8 @@ pub fn list(owned: &HashSet<String>, limit: usize) -> Vec<NativeChat> {
     chats
 }
 
+/// The model a chat stored without one last ran, to pin before its next turn. Claude's comes from
+/// its configuration: its transcript's API names drop context variants such as `[1m]`.
 pub(crate) fn selection_model(
     catalog: &Value,
     harness: &str,
