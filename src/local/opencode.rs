@@ -441,6 +441,8 @@ struct AgentChild {
     config: Option<std::ffi::OsString>,
     native_store: NativeStore,
     alphaxiv_signed_in: bool,
+    /// [`crate::local::user_skills::fingerprint`] at spawn; a change respawns the agent.
+    skills: u64,
     binary: ResolvedBinary,
     endpoint: AgentEndpoint,
     database: native_store::opencode_database::DatabaseLease,
@@ -469,6 +471,7 @@ async fn spawn_agent(
     binary: ResolvedBinary,
     database: native_store::opencode_database::DatabaseLease,
 ) -> Result<AgentChild> {
+    let skills = crate::local::user_skills::fingerprint("opencode");
     // The clone/worktree setup inside can hit the network; keep it off the
     // async workers.
     let (repo, config_override) = {
@@ -527,6 +530,7 @@ async fn spawn_agent(
         config,
         native_store,
         alphaxiv_signed_in: crate::alphaxiv::signed_in(),
+        skills,
         binary,
         endpoint,
         database,
@@ -948,11 +952,13 @@ impl AgentHost {
         let mut current = crate::process::tokio_command(&binary.path);
         prepare_chat_env(&mut current, model, session_id)?;
         let config = inline_config(&current);
+        let skills = crate::local::user_skills::fingerprint("opencode");
         {
             let mut guard = self.inner.lock().await;
             if let Some(agent) = guard.get_mut(session_id) {
                 if agent.project_id == project.id
                     && agent.alphaxiv_signed_in == crate::alphaxiv::signed_in()
+                    && agent.skills == skills
                     && agent.native_store == native_store
                     && agent.binary == binary
                     && agent.database.path() == database_path
@@ -1085,6 +1091,7 @@ impl AgentHost {
                 config: None,
                 native_store: NativeStore::Isolated,
                 alphaxiv_signed_in: false,
+                skills: crate::local::user_skills::fingerprint("opencode"),
                 binary,
                 endpoint,
                 database,
@@ -1237,6 +1244,7 @@ mod tests {
                 config: launch_config(&binary, "cloud/selected"),
                 native_store: NativeStore::Isolated,
                 alphaxiv_signed_in: false,
+                skills: crate::local::user_skills::fingerprint("opencode"),
                 binary: binary.clone(),
                 endpoint,
                 database,
@@ -1341,6 +1349,7 @@ mod tests {
                     config: launch_config(&binary, "cloud/selected"),
                     native_store: NativeStore::Isolated,
                     alphaxiv_signed_in: false,
+                    skills: crate::local::user_skills::fingerprint("opencode"),
                     binary: binary.clone(),
                     endpoint: AgentEndpoint {
                         base_url: format!("http://127.0.0.1:{port}"),

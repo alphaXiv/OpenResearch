@@ -1568,6 +1568,7 @@ impl Harness for ClaudeCode {
                 bridge_active: uses_permission_bridge(ctx.permission_mode)
                     && ctx.host.up_port().is_some(),
                 bin: find_claude(),
+                skills: crate::local::user_skills::fingerprint(ClaudeCode.id()),
             },
         };
         ctx.host
@@ -3165,6 +3166,7 @@ fn spawn_config(ctx: &TurnCtx, native_store: NativeStore) -> SpawnConfig {
         // A failed bridge setup must respawn next turn rather than reuse a child without input.
         bridge_active: uses_permission_bridge(ctx.permission_mode) && ctx.host.up_port().is_some(),
         bin: find_claude(),
+        skills: crate::local::user_skills::fingerprint(ClaudeCode.id()),
     }
 }
 
@@ -3831,6 +3833,7 @@ mod tests {
                 alphaxiv_signed_in: false,
                 bridge_active: false,
                 bin: None,
+                skills: 0,
             },
         };
 

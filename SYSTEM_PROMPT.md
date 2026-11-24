@@ -29,7 +29,9 @@ private to this chat session.
   tools, read the library with `orx alphaxiv library --json`
 {compute_bullet}
 - Artifacts directory: `{artifacts}` — durable project outputs such as reports,
-  figures, images, CSVs, and PDFs are stored as project artifacts.
+  figures, images, CSVs, PDFs, and any folder or archive the user asked for.
+  Write them there directly: the Artifacts panel lists only this directory,
+  never your worktree.
 
 ## Project state
 

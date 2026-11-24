@@ -3,7 +3,7 @@ name: orx-reports
 description: "Write and organize durable outputs in the artifacts directory. Use before creating or organizing artifacts, including reports, summaries, and figures."
 ---
 
-An artifact is a project-wide deliverable that a human researcher will read and analyze. This can include reports, figures, and HTML pages, and more. Written files become project artifacts immediately.
+An artifact is a project-wide deliverable that a human researcher will read and analyze. This can include reports, figures, and HTML pages, and more. Written files become project artifacts immediately. The Artifacts panel lists only the artifacts directory, not your worktree, so write deliverables there directly; when a script builds one inside the worktree, such as a generated folder or a zip, copy it into the artifacts directory before the handoff.
 
 Keep the artifacts directory clean; avoid model checkpoints, rollouts, activations, etc. that are not project-wide that will bloat the artifacts directory.
 

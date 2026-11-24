@@ -65,6 +65,8 @@ impl SessionIo {
 
 pub struct Client {
     alphaxiv_signed_in: bool,
+    /// [`crate::local::user_skills::fingerprint`] at spawn; a change respawns the agent.
+    skills: u64,
     launch: Definition,
     configuration_lock: tokio::sync::Mutex<()>,
     pub connection: ConnectionTo<Agent>,
@@ -549,6 +551,7 @@ impl Host {
         cwd: &Path,
     ) -> Result<Arc<Client>> {
         self.start_reaper();
+        let skills = crate::local::user_skills::fingerprint(&definition.id);
         let slot = self
             .clients
             .lock()
@@ -560,6 +563,7 @@ impl Host {
         if let Some(client) = saved.as_ref().filter(|client| {
             client.closed.borrow().is_none()
                 && client.alphaxiv_signed_in == crate::alphaxiv::signed_in()
+                && client.skills == skills
                 && client.launch == *definition
         }) {
             *client.idle_since.lock().unwrap() = None;
@@ -706,6 +710,7 @@ pub(super) async fn spawn(
     up_port: Option<u16>,
 ) -> Result<Arc<Client>> {
     definition.validate_launch()?;
+    let skills = crate::local::user_skills::fingerprint(&definition.id);
     let executable = super::executable_path(&definition.executable).ok_or_else(|| {
         anyhow!(
             "Executable not found: {}. Install {} or check its launch command.",
@@ -1138,6 +1143,7 @@ pub(super) async fn spawn(
         Ok(Ok(Ok((connection, initialized)))) => {
             return Ok(Arc::new(Client {
                 alphaxiv_signed_in: crate::alphaxiv::signed_in(),
+                skills,
                 launch: definition.clone(),
                 configuration_lock: tokio::sync::Mutex::new(()),
                 connection,

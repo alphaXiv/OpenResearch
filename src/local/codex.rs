@@ -224,6 +224,8 @@ pub struct CodexClient {
     native_store: NativeStore,
     pub(crate) profile: Option<String>,
     alphaxiv_signed_in: bool,
+    /// [`crate::local::user_skills::fingerprint`] at spawn; a change respawns the agent.
+    skills: u64,
     /// The executable this child runs; once detection picks another, the next turn respawns it.
     bin: PathBuf,
     session_id: String,
@@ -758,6 +760,7 @@ fn spawn_client(
     bin: PathBuf,
     codex_home: PathBuf,
 ) -> Result<Arc<CodexClient>> {
+    let skills = crate::local::user_skills::fingerprint("codex");
     let mut cmd = crate::process::tokio_command(&bin);
     cmd.arg("app-server");
     if let Some(override_arg) =
@@ -828,6 +831,7 @@ fn spawn_client(
         native_store,
         profile,
         alphaxiv_signed_in: crate::alphaxiv::signed_in(),
+        skills,
         bin,
         session_id: session_id.to_string(),
         turn_models: std::sync::Mutex::new(HashMap::new()),
@@ -1032,12 +1036,14 @@ impl CodexHost {
         profile: Option<&str>,
         bin: Option<&Path>,
     ) -> Option<Arc<CodexClient>> {
+        let skills = crate::local::user_skills::fingerprint("codex");
         let guard = self.inner.lock().await;
         let client = guard.get(session_id)?;
         if client.native_store() == native_store
             && client.profile.as_deref() == profile
             && bin.is_none_or(|bin| bin == client.bin)
             && client.alphaxiv_signed_in == crate::alphaxiv::signed_in()
+            && client.skills == skills
             && matches!(client.child.lock().await.try_wait(), Ok(None))
         {
             client.touch();
@@ -1437,6 +1443,7 @@ pub(crate) mod tests {
             native_store: NativeStore::Isolated,
             profile: None,
             alphaxiv_signed_in: false,
+            skills: crate::local::user_skills::fingerprint("codex"),
             bin: PathBuf::new(),
             session_id: String::new(),
             turn_models: std::sync::Mutex::new(HashMap::new()),
@@ -1506,6 +1513,7 @@ pub(crate) mod tests {
             native_store: NativeStore::Isolated,
             profile: None,
             alphaxiv_signed_in: false,
+            skills: crate::local::user_skills::fingerprint("codex"),
             bin: PathBuf::new(),
             session_id: String::new(),
             turn_models: std::sync::Mutex::new(HashMap::new()),
@@ -1603,6 +1611,24 @@ pub(crate) mod tests {
             )
             .await
             .is_none());
+        assert!(host
+            .reusable_client("chat", NativeStore::Isolated, None, None)
+            .await
+            .is_none());
+        host.kill_session("chat").await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn client_reuse_requires_the_same_skills() {
+        let host = Arc::new(CodexHost::new());
+        let mut client = idle_test_client(Instant::now());
+        Arc::get_mut(&mut client).unwrap().skills =
+            crate::local::user_skills::fingerprint("codex").wrapping_add(1);
+        host.inner
+            .lock()
+            .await
+            .insert("chat".into(), client.clone());
         assert!(host
             .reusable_client("chat", NativeStore::Isolated, None, None)
             .await
@@ -1891,6 +1917,7 @@ pub(crate) mod tests {
             native_store: NativeStore::Isolated,
             profile: None,
             alphaxiv_signed_in: false,
+            skills: crate::local::user_skills::fingerprint("codex"),
             bin: PathBuf::new(),
             session_id: String::new(),
             turn_models: std::sync::Mutex::new(HashMap::new()),

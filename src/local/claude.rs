@@ -264,6 +264,8 @@ pub struct SpawnConfig {
     pub bridge_active: bool,
     /// The executable detection selected, so a newer install respawns the child.
     pub bin: Option<PathBuf>,
+    /// [`crate::local::user_skills::fingerprint`], so a changed skill set respawns the child.
+    pub skills: u64,
 }
 
 /// Everything needed to spawn (or respawn) a session's child, built per turn by
@@ -1971,6 +1973,7 @@ pub(crate) mod tests {
             alphaxiv_signed_in: false,
             bridge_active: bridge,
             bin: None,
+            skills: 0,
         }
     }
 
