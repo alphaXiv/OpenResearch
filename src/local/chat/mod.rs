@@ -10714,18 +10714,26 @@ fn materialize_unfinished_turns(
                 "continue"
             }
         });
-        let mut message = store
-            .get_chat_message(&turn.assistant_message_id)?
-            .as_ref()
-            .map(stored_to_wire)
-            .unwrap_or(WireMessage {
-                id: turn.assistant_message_id.clone(),
-                role: "assistant".into(),
-                parts: Vec::new(),
-                created_at: turn.created_at,
-                completed_at: None,
-                parent_id: turn.user_message_id.clone(),
-            });
+        let mut message = match store.get_chat_message(&turn.assistant_message_id)? {
+            Some(stored) => stored_to_wire(&stored),
+            None => {
+                // A turn orx started on its own, such as a run notice, follows the chat's leaf.
+                let parent_id = match &turn.user_message_id {
+                    Some(id) => Some(id.clone()),
+                    None => store
+                        .get_chat_session(&turn.session_id)?
+                        .and_then(|session| session.active_leaf_id),
+                };
+                WireMessage {
+                    id: turn.assistant_message_id.clone(),
+                    role: "assistant".into(),
+                    parts: Vec::new(),
+                    created_at: turn.created_at,
+                    completed_at: None,
+                    parent_id,
+                }
+            }
+        };
         message.parts.retain(|part| part.id != "turn-retry");
         let mut part = WirePart::tool(
             "turn-recovery",

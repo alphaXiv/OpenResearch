@@ -1959,6 +1959,19 @@ impl Store {
             )?;
             schema.pragma_update(None, "user_version", 1)?;
         }
+        // A recovery card stored as a branch root, as a turn without a user message once left it,
+        // hides the chat's history above it.
+        schema.execute(
+            r#"UPDATE chat_messages AS m SET parent_id = (
+                   SELECT p.id FROM chat_messages p
+                   WHERE p.session_id = m.session_id
+                     AND (p.created_at, p.rowid) < (m.created_at, m.rowid)
+                   ORDER BY p.created_at DESC, p.rowid DESC LIMIT 1
+               )
+               WHERE m.parent_id IS NULL AND m.role = 'assistant'
+                 AND instr(m.parts_json, '"id":"turn-recovery"') > 0"#,
+            [],
+        )?;
         schema.execute_batch(include_str!("store/search.sql"))?;
         // Older builds of this branch created a one-root-per-project unique
         // index; multiple baselines are allowed, so make sure it's gone.
@@ -15545,6 +15558,56 @@ pub(crate) mod tests {
             .chat_session_awaiting_input("chat_pending", true)
             .unwrap());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_recovery_card_left_as_a_root_rejoins_the_history_above_it() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-root-card-{}", uuid::Uuid::new_v4()));
+        let card = serde_json::to_string(&vec![crate::local::chat::WirePart::tool(
+            "turn-recovery",
+            "error",
+            "error",
+            None,
+        )])
+        .unwrap();
+        let message =
+            |id: &str, role: &str, parent: Option<&str>, parts: &str, at: i64| StoredChatMessage {
+                id: id.into(),
+                session_id: "chat".into(),
+                role: role.into(),
+                parts_json: parts.into(),
+                created_at: at,
+                completed_at: None,
+                parent_id: parent.map(Into::into),
+                base_native_session_id: None,
+                result_native_session_id: None,
+                result_native_message_id: None,
+                native_harness: None,
+            };
+        {
+            let store = Store::open_at(dir.clone()).unwrap();
+            store
+                .create_chat_session(&chat_session_fixture("chat"))
+                .unwrap();
+            for stored in [
+                message("u1", "user", None, "[]", 1),
+                message("a1", "assistant", Some("u1"), "[]", 2),
+                message("card", "assistant", None, &card, 3),
+                message("u2", "user", None, "[]", 4),
+            ] {
+                store.upsert_chat_message(&stored).unwrap();
+            }
+        }
+
+        let store = Store::open_at(dir.clone()).unwrap();
+        let parent = |id: &str| store.get_chat_message(id).unwrap().unwrap().parent_id;
+        assert_eq!(parent("card").as_deref(), Some("a1"));
+        // A user's edit of the first message is a root of its own.
+        assert_eq!(parent("u1"), None);
+        assert_eq!(parent("u2"), None);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -657,3 +657,48 @@ fn a_hand_off_ends_the_agents_of_turns_it_stops_and_keeps_the_rest() {
             .signal(keep::Signal::Kill);
     });
 }
+
+#[test]
+fn a_restart_keeps_the_history_above_a_turn_without_a_user_message() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        register();
+        let store = Store::open().unwrap();
+        chat(&store, "notice", "test-plain");
+        for (id, role) in [("u1", "user"), ("a1", "assistant")] {
+            store
+                .upsert_chat_message_on_branch(&crate::store::StoredChatMessage {
+                    id: id.into(),
+                    session_id: "notice".into(),
+                    role: role.into(),
+                    parts_json: "[]".into(),
+                    created_at: crate::store::now_ms(),
+                    completed_at: None,
+                    parent_id: None,
+                    base_native_session_id: None,
+                    result_native_session_id: None,
+                    result_native_message_id: None,
+                    native_harness: None,
+                })
+                .unwrap();
+        }
+        // Started by orx, as a run notice is, with no answer stored before the restart.
+        let turn = running_turn(&store, "notice");
+
+        adopt_kept_work(&host(), true).await.unwrap();
+
+        let messages = store.list_chat_messages("notice").unwrap();
+        let leaf = store
+            .get_chat_session("notice")
+            .unwrap()
+            .unwrap()
+            .active_leaf_id;
+        let path: Vec<_> = super::super::active_path(&messages, leaf.as_deref())
+            .into_iter()
+            .map(|message| message.id.as_str())
+            .collect();
+        assert_eq!(path, ["u1", "a1", turn.assistant_message_id.as_str()]);
+    });
+}
