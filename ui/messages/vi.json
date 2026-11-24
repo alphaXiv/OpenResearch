@@ -1149,11 +1149,6 @@
   "model_picker_speed_flex": "Linh hoạt",
   "model_picker_speed_ultrafast": "Cực nhanh",
   "model_picker_ultracode_description": "Nỗ lực rất cao với quy trình làm việc linh hoạt.",
-  "model_picker_autonomy": "Quyền tự chủ",
-  "model_picker_autonomy_agentic": "Độc lập",
-  "model_picker_autonomy_agentic_description": "Tự thực hiện nghiên cứu và báo lại khi cần.",
-  "model_picker_autonomy_copilot": "Hợp tác",
-  "model_picker_autonomy_copilot_description": "Giải thích lý do và hỏi trước khi hành động.",
   "model_picker_not_available": "Không khả dụng",
   "service_tier_standard": "Tiêu chuẩn",
   "service_tier_default_speed": "Tốc độ mặc định",
@@ -1361,7 +1356,6 @@
   "chat_attachments_total_too_large": "Tệp đính kèm vượt quá tổng giới hạn {size}, hãy xóa một tệp và thử lại.",
   "chat_model_no_image_input": "{model} không thể xem hình ảnh. Xóa hình ảnh hoặc chuyển sang mô hình có hỗ trợ hình ảnh.",
   "chat_update_permissions_failed": "Không thể cập nhật quyền. Hãy thử lại.",
-  "chat_update_autonomy_failed": "Không thể cập nhật quyền tự chủ. Hãy thử lại.",
   "chat_exit_plan_failed": "Không thể thoát khỏi chế độ Kế hoạch. Hãy thử lại.",
   "chat_toggle_plan_failed": "Không thể chuyển đổi chế độ Kế hoạch. Hãy thử lại.",
   "chat_asked_about_selection": "Đã hỏi về văn bản đã chọn",
@@ -2582,6 +2576,5 @@
   "lit_sources_save_title": "Lưu làm mặc định",
   "lit_sources_save_project": "Lưu cho dự án này",
   "lit_sources_save_all": "Lưu cho mọi dự án",
-  "lit_sources_revert": "Dùng nguồn của dự án",
-  "project_settings_autonomy_title": "Mức tự chủ cho cuộc trò chuyện mới"
+  "lit_sources_revert": "Dùng nguồn của dự án"
 }

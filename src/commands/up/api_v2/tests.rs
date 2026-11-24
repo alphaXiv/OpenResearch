@@ -589,7 +589,7 @@ async fn accepting_a_flag_wake_updates_the_monitor_without_waiting_for_a_tick() 
     let store = Store::open().unwrap();
     let chat = "flag-chat";
     let now = crate::store::now_ms();
-    store.put_chat_session(chat, "claude-code", None);
+    store.put_chat_session(chat, "claude-code");
     store.subscribe_run("run", chat, now).unwrap();
     let run = store.get_run("run").unwrap().unwrap();
     let flag = crate::engine::flags::new_flag(
@@ -3541,10 +3541,9 @@ async fn a_chart_edit_preserves_the_agents_view_and_refuses_a_stale_copy() {
 async fn a_flag_is_settled_once_by_whoever_chooses_first() {
     let f = Fixture::new().await;
     let store = || f.api.store();
-    store().put_chat_session("chat-1", "claude-code", Some("copilot"));
+    store().put_chat_session("chat-1", "claude-code");
     for id in ["live", "other", "stop", "done"] {
         f.insert(id, "exp", "project", "running");
-        store().subscribe_run(id, "chat-1", 1).unwrap();
     }
     let look = {
         let store = store();
@@ -3572,6 +3571,10 @@ async fn a_flag_is_settled_once_by_whoever_chooses_first() {
     raise("other", "f2", Some(look.to_string()));
     raise("stop", "f3", None);
     raise("done", "f4", None);
+    // Followed only once raised, the flags woke no chat.
+    for id in ["live", "other", "stop", "done"] {
+        store().subscribe_run(id, "chat-1", 1).unwrap();
+    }
     store().set_run_status("done", "done");
     let choose = |run: &str, body: Value| {
         let client = f.client.clone();
@@ -3589,7 +3592,7 @@ async fn a_flag_is_settled_once_by_whoever_chooses_first() {
     assert_eq!(
         flag_of("live")["state"],
         "waiting",
-        "a Copilot flag waits for the user"
+        "a flag no chat was woken with waits for the user"
     );
     assert!(
         store().pending_run_notice_sessions().unwrap().is_empty(),
@@ -3716,15 +3719,15 @@ async fn a_flag_is_settled_once_by_whoever_chooses_first() {
 async fn a_stop_and_a_keep_that_race_leave_one_winner() {
     let f = Fixture::new().await;
     let store = || f.api.store();
-    store().put_chat_session("chat-1", "claude-code", Some("copilot"));
+    store().put_chat_session("chat-1", "claude-code");
     for (id, flag) in [("race", "f1"), ("cancelled", "f2")] {
         f.insert(id, "exp", "project", "running");
-        store().subscribe_run(id, "chat-1", 1).unwrap();
         let run = f.api.run(id).unwrap();
         let body = json!({"id": flag, "source": "tripwire", "at": 1, "template": "t", "detail": "t",
             "text": "t", "evidence": null, "whole": 0.5});
         let flag = crate::engine::flags::new_flag(&store(), &run, body, true).unwrap();
         store().raise_flags(&[flag], 1).unwrap();
+        store().subscribe_run(id, "chat-1", 1).unwrap();
     }
     let choose = |run: &str, body: Value| {
         let client = f.client.clone();

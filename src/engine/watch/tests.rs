@@ -43,7 +43,7 @@ fn calls(dir: &std::path::Path) -> usize {
 }
 
 fn chat(store: &Store, id: &str, harness: &str) {
-    store.put_chat_session(id, harness, None);
+    store.put_chat_session(id, harness);
 }
 
 /// A running run of its own experiment, launched by `chat`, whose log the laptop keeps.
@@ -234,7 +234,7 @@ async fn one_look_writes_each_runs_sentence_and_the_summary_through_the_agent_cl
         "Prints depth **4** though its title says 8."
     );
 
-    // The flagged run's flag cites the line it named, and wakes its Agentic chat with it.
+    // The flagged run's flag cites the line it named, and wakes its chat with it.
     let b = store.get_run("b").unwrap().unwrap();
     let flags = super::super::flags::read(&store, &b).unwrap();
     assert_eq!(flags.len(), 1, "{flags:?}");
@@ -1047,7 +1047,7 @@ async fn a_look_that_flags_while_a_flag_is_open_is_noted_under_it() {
     .to_string();
     fake_claude(&calls_dir, &[&reply, &reply]);
     let store = Store::open().unwrap();
-    store.put_chat_session("chat", "claude-code", Some("agentic"));
+    store.put_chat_session("chat", "claude-code");
     let a = run(
         &store,
         "a",
@@ -1089,7 +1089,7 @@ async fn a_look_that_flags_while_a_flag_is_open_is_noted_under_it() {
             && notice
                 .body
                 .contains("If it is still open, settle it before ending the turn.")),
-        "the Agentic chat's agent hears of it before it settles the open flag: {notices:?}"
+        "the chat's agent hears of it before it settles the open flag: {notices:?}"
     );
 
     // A Keep and a live config edit both reach the next look.
@@ -2048,8 +2048,7 @@ async fn instrumentation_warns_once_across_restart_and_shares_a_due_notice_turn(
     ] {
         assert!(warning.body.contains(&command), "{}", warning.body);
     }
-    assert!(warning.body.contains(AGENTIC_RELAUNCH));
-    assert!(!warning.body.contains(COPILOT_RELAUNCH));
+    assert!(warning.body.contains(RELAUNCH));
     assert!(warning.body.contains("total="));
     assert!(
         instrumentation(&mut Seen::default(), &current, now + 300_000)
@@ -2090,9 +2089,6 @@ async fn instrumentation_waits_for_data_or_two_minutes_and_ignores_queued_runs()
             .await
             .unwrap()
             .unwrap();
-    store
-        .set_chat_session_autonomy("quiet-owner", Autonomy::Copilot)
-        .unwrap();
     assert_eq!(
         notice
             .queue(&store, &row.id, &row.experiment_id, at)
@@ -2102,8 +2098,7 @@ async fn instrumentation_waits_for_data_or_two_minutes_and_ignores_queued_runs()
     );
     let batch = store.run_notice_batch("quiet-owner").unwrap();
     let warning = &batch[0].body;
-    assert!(warning.contains(COPILOT_RELAUNCH));
-    assert!(!warning.contains(AGENTIC_RELAUNCH));
+    assert!(warning.contains(RELAUNCH));
     assert!(store
         .last_notice_at(&row.id, "instrumentation")
         .unwrap()

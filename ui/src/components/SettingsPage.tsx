@@ -103,8 +103,6 @@ import {
   type ComputeDefault,
   type ProjectSettingsEdit,
   type ProjectSettings,
-  type Autonomy,
-  DEFAULT_AUTONOMY,
   type ComputeTargetId,
   type ComputeTargetSummary,
   type EnvVar,
@@ -5262,12 +5260,6 @@ function DefaultedInput({ label, value, placeholder, onCommit }: { label: string
   );
 }
 
-const AUTONOMIES: Autonomy[] = ["agentic", "copilot"];
-
-function autonomyLabel(autonomy: Autonomy) {
-  return autonomy === "copilot" ? m.model_picker_autonomy_copilot() : m.model_picker_autonomy_agentic();
-}
-
 const SLURM_FIELDS = [
   { key: "account", label: m.settings_page_account },
   { key: "partition", label: m.settings_page_partition },
@@ -5349,7 +5341,6 @@ function ProjectDefaults({ project, onOpenAgents }: { project: Project; onOpenAg
   }
 
   const agent = settings.data.agent ?? null;
-  const lastAutonomy = uiState?.preferredAutonomy ?? DEFAULT_AUTONOMY;
   const shownAgent = agent ?? uiState?.preferredAgent ?? null;
   const agentHarness = selectionHarness(harnesses, shownAgent);
   const reasoning = reasoningFor(agentHarness, shownAgent?.model);
@@ -5374,25 +5365,6 @@ function ProjectDefaults({ project, onOpenAgents }: { project: Project; onOpenAg
           defaultReasoningId={reasoning.defaultId}
           onSelectReasoning={(id) => { if (shownAgent) void save({ agent: { ...shownAgent, reasoningLevel: id } }); }}
         />
-      </ProjectSettingRow>
-      <ProjectSettingRow
-        title={m.project_settings_autonomy_title()}
-        own={settings.data.autonomy !== undefined}
-        defaultValue={autonomyLabel(lastAutonomy)}
-        onReset={() => void save({ autonomy: null })}
-      >
-        <div className="w-72 max-w-full">
-          <OptionPicker
-            choices={[
-              { id: DEFAULT_TARGET_ID, label: m.project_setting_default_choice({ value: autonomyLabel(lastAutonomy) }) },
-              ...AUTONOMIES.map((id) => ({ id, label: autonomyLabel(id) })),
-            ]}
-            value={settings.data.autonomy ?? DEFAULT_TARGET_ID}
-            variant="field"
-            dropDown
-            onSelect={(id) => void save({ autonomy: id === DEFAULT_TARGET_ID ? null : id as Autonomy })}
-          />
-        </div>
       </ProjectSettingRow>
       <ProjectSettingRow
         title={m.project_settings_lit_title()}

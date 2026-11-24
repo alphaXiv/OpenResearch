@@ -300,8 +300,7 @@ fn compare(seen: &mut Seen, run: &Now) {
     }
 }
 
-/// Wakes the run's Agentic chats with its open flag, when none was woken with it yet: the chat
-/// was Copilot when it was raised.
+/// Wakes the run's chats with its open flag, when none was woken with it yet.
 fn route(store: &Store, run: &StoredRun) -> Result<()> {
     let flags = super::super::flags::read(store, run)?;
     let Some(flag) = super::super::flags::open(&flags) else {

@@ -14,7 +14,6 @@ use serde_json::{json, Map, Value};
 
 use super::{lock, ByteRange, LogPage, Phase};
 use crate::error::{anyhow, Result};
-use crate::local::autonomy::Autonomy;
 use crate::local::harness::{
     sign_in_revision, OneShot, OneShotAuthError, OneShotQuality, OneShotUsage,
 };
@@ -420,9 +419,7 @@ struct Seen {
 }
 
 const INSTRUMENTATION: &str = "instrumentation";
-const AGENTIC_RELAUNCH: &str = "In Agentic mode you may cancel and relaunch on your own.";
-const COPILOT_RELAUNCH: &str =
-    "In Copilot mode, ask the user before cancelling healthy compute or relaunching.";
+const RELAUNCH: &str = "You may cancel and relaunch on your own, or ask the user first.";
 
 struct Instrumentation {
     chat: String,
@@ -435,13 +432,9 @@ impl Instrumentation {
         if store.run_monitor_json(experiment)? != self.settings {
             return Ok(None);
         }
-        let Some(chat) = store.get_chat_session(&self.chat)? else {
+        if store.get_chat_session(&self.chat)?.is_none() {
             return Ok(None);
-        };
-        let relaunch = match Autonomy::from_stored(chat.autonomy.as_deref()) {
-            Autonomy::Agentic => AGENTIC_RELAUNCH,
-            Autonomy::Copilot => COPILOT_RELAUNCH,
-        };
+        }
         let problems = self
             .problems
             .replace("view set EXP ", &format!("view set {experiment} "));
@@ -451,7 +444,7 @@ impl Instrumentation {
              Inspect `orx exp view show {run}`, `orx exp view check {run}` and `orx logs {run}`. \
              Repair the view, plan or patterns on this run with `orx exp view set {experiment}`. \
              If the missing report requires a code change, weigh the work already done before relaunching. \
-             {relaunch} To restart, cancel an active run with \
+             {RELAUNCH} To restart, cancel an active run with \
              `orx exp cancel --run {run} --reason 'Fixing run reports'`, then fix and commit the code before the next launch. \
              This check sends at most one notice per run."
         );

@@ -166,7 +166,6 @@ import {
   type ChatToolState,
   type FailureCause,
   type OrxSource,
-  type Autonomy,
   type ChatSession,
   type SidebarChatCursor,
   type CitedMessage,
@@ -6170,8 +6169,6 @@ export function ChatPanel({
   onStartHarnessDraft,
   preferredAgent,
   onPreferredAgentChange,
-  preferredAutonomy,
-  onPreferredAutonomyChange,
   embedded = false,
   sideParentSessionId,
   onOpenSideChat,
@@ -6259,8 +6256,6 @@ export function ChatPanel({
   /** Opens the main draft to start `agent`, which it starts with over the project's. */
   onStartHarnessDraft?: (agent: ModelSelection) => void;
   onPreferredAgentChange: (selection: ModelSelection) => Promise<void>;
-  preferredAutonomy: Autonomy;
-  onPreferredAutonomyChange: (autonomy: Autonomy) => void;
   /** A second instance hosting a side chat in the right pane: no rail, and
    * global shortcuts act on it only while focus is inside it. */
   embedded?: boolean;
@@ -6583,8 +6578,6 @@ export function ChatPanel({
   // active session changes. Distinct from `selection`, which is the sticky
   // global preference that seeds *new* sessions.
   const [sessionOverride, setSessionOverride] = useState<Partial<ModelSelection>>({});
-  const [draftAutonomy, setDraftAutonomy] = useState<Autonomy | null>(null);
-  useEffect(() => setDraftAutonomy(null), [sideParentSessionId, projectId]);
   const [recoveryOverrides, setRecoveryOverrides] = useState<
     Partial<ModelSelection> & { planMode?: boolean }
   >(EMPTY_RECOVERY_OVERRIDES);
@@ -7163,21 +7156,6 @@ export function ChatPanel({
   const withFullAccessRef = useRef(withFullAccess);
   withFullAccessRef.current = withFullAccess;
   const setReasoningLevel = (id: string) => selectModel({ reasoningLevel: id });
-  const setAutonomy = (autonomy: Autonomy) => {
-    if (autonomy !== (openSession?.autonomy ?? preferredAutonomy)) invalidatePendingRetry();
-    if (!openSession) {
-      setDraftAutonomy(autonomy);
-      if (!sideParentSessionId) onPreferredAutonomyChange(autonomy);
-      return;
-    }
-    const mutation = ++settingsMutationSeq.current;
-    setSettingsError(null);
-    void patchSession(openSession, { autonomy })
-      .then((session) => onPreferredAutonomyChange(session.autonomy))
-      .catch(() => {
-        if (settingsMutationSeq.current === mutation) setSettingsError(m.chat_update_autonomy_failed());
-      });
-  };
   const sessionGoal = openSession?.goal?.trim() || "";
   const planActive = acpMode ? acpMode.currentValue === "plan" : composerSelection?.harness === "claude-code"
     ? composerSelection.permissionMode === "plan"
@@ -8253,7 +8231,7 @@ export function ChatPanel({
   async function openNewSession(selection: ModelSelection, planMode: boolean | undefined, launchMessage?: ChatMessage) {
     const scope = composerScopeRef.current;
     const visit = projectVisitRef.current;
-    let session = sideParentSessionId
+    const session = sideParentSessionId
       ? await mutOpenSideChat.runAsHeadlessPromise(workspace, sideParentSessionId, {})
       : await mutCreateChatSession.runAsHeadlessPromise(workspace, projectId, selection.harness, {
         profile: selection.profile,
@@ -8262,15 +8240,9 @@ export function ChatPanel({
         permissionMode: selection.permissionMode,
         planMode,
         reasoningLevel: selection.reasoningLevel,
-        // Unset, the server takes the project's autonomy, which may not have loaded here yet.
-        autonomy: draftAutonomy ?? undefined,
         disabledLitSources: draftLitSources ?? undefined,
       }, {});
     setLitDraft({ projectId, disabled: null });
-    setDraftAutonomy(null);
-    if (sideParentSessionId && draftAutonomy !== null && session.autonomy !== draftAutonomy) {
-      session = await patchSession(session, { autonomy: draftAutonomy });
-    }
     if (sideParentSessionId && draftLitSources !== null) {
       await mutSetChatLitSources.runAsHeadlessPromise(workspace, session.id, draftLitSources, {});
     }
@@ -10295,8 +10267,6 @@ export function ChatPanel({
                   reasoningChoices={activeHarness?.agentReady ? reasoning.choices : []}
                   defaultReasoningId={reasoning.defaultId}
                   onSelectReasoning={setReasoningLevel}
-                  autonomy={openSession?.autonomy ?? draftAutonomy ?? preferredAutonomy}
-                  onSelectAutonomy={setAutonomy}
                   disabled={switchingAgent}
                   lockHarness={busy || switchingAgent || (!openSession && !!sideParentSessionId)}
                   openRequest={modelPickerRequest}

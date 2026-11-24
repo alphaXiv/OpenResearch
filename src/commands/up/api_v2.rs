@@ -732,7 +732,7 @@ struct FlagRequest {
     chat_session_id: Option<String>,
 }
 
-/// `orx exp flag`, and the Copilot choice: keep going, stop the run, or ask. The user's Ask wakes
+/// `orx exp flag`, and the user's choice: keep going, stop the run, or ask. The user's Ask wakes
 /// the run's chat with the flag and every open flag its look raised beside it; the agent's Ask
 /// leaves the choice to the user. A repeated request answers as the first did.
 async fn choose(

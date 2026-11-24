@@ -88,8 +88,6 @@ import {
   isDemoProjectId,
   type FirstAction,
   type AgentSelection,
-  type Autonomy,
-  DEFAULT_AUTONOMY,
   type Project,
   type RuntimeInfo,
   type Run,
@@ -894,9 +892,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   const persistPreferredAgent = useCallback(async (selection: AgentSelection) => {
     mutUpdateUiState.run(workspace, { preferredAgent: selection });
-  }, []);
-  const persistPreferredAutonomy = useCallback((autonomy: Autonomy) => {
-    mutUpdateUiState.run(workspace, { preferredAutonomy: autonomy });
   }, []);
 
   useEffect(() => {
@@ -2044,8 +2039,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             preferredAgent={chosenDraftAgent ?? (projectSettingsQuery.isSuccess ? projectSettings?.agent ?? uiState.preferredAgent : null)}
             onPreferredAgentChange={persistPreferredAgent}
             onStartHarnessDraft={(agent) => { setDraftAgent({ projectId, agent }); onActiveSessionChange(null, { projectId }); }}
-            preferredAutonomy={projectSettings?.autonomy ?? uiState.preferredAutonomy ?? DEFAULT_AUTONOMY}
-            onPreferredAutonomyChange={persistPreferredAutonomy}
           >
             {mainView !== "chat" ? (
               <SettingsView
@@ -2519,8 +2512,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                       onStartHarnessDraft={(agent) => { setDraftAgent({ projectId, agent }); onActiveSessionChange(null, { projectId }); }}
                       preferredAgent={sideTab.sessionId === null ? sideDraftAgent : uiState.preferredAgent}
                       onPreferredAgentChange={persistPreferredAgent}
-                      preferredAutonomy={sideTab.sessionId === null ? sideParentSession?.autonomy ?? DEFAULT_AUTONOMY : uiState.preferredAutonomy ?? DEFAULT_AUTONOMY}
-                      onPreferredAutonomyChange={persistPreferredAutonomy}
                     />
                   </div>
                 ) : (

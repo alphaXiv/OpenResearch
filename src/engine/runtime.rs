@@ -4185,7 +4185,7 @@ mod tests {
         let dir = crate::local::git::TemporaryDirectory::new("orx-monitor-drift").unwrap();
         let runtime = ended_signal_run(dir.path());
         let mut store = Store::open_at(dir.path().to_path_buf()).unwrap();
-        store.put_chat_session("chat", "claude-code", None);
+        store.put_chat_session("chat", "claude-code");
         store.set_run_watching(true).unwrap();
         let run = store.get_run("run").unwrap().unwrap();
         let other = rusqlite::Connection::open(dir.path().join("orx.db")).unwrap();

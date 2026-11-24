@@ -22,7 +22,7 @@ import { DirectionProvider } from "@base-ui/react/direction-provider";
 
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
-import { Bot, Brain, Check, ChevronDown, ChevronRight, Handshake, ListChecks, Lock, LockOpen, Minus, Pencil, Plus, Rocket, Ruler, Settings, ShieldCheck, Turtle, Workflow, Zap, type LucideIcon } from "lucide-react";
+import { Brain, Check, ChevronDown, ChevronRight, ListChecks, Lock, LockOpen, Minus, Pencil, Plus, Rocket, Ruler, Settings, ShieldCheck, Turtle, Workflow, Zap, type LucideIcon } from "lucide-react";
 import {
   modelLabel,
   reasoningFor,
@@ -39,8 +39,6 @@ import {
   type OpenCodeProvider,
   type OptionChoice,
   type AgentSelection,
-  type Autonomy,
-  DEFAULT_AUTONOMY,
 } from "../api";
 import type { NativeOption } from "../acp";
 import { HarnessLogo, LABS, ModelGlyph, ModelMark } from "./HarnessLogo";
@@ -306,8 +304,6 @@ export function ModelPicker({
   reasoningChoices = [],
   defaultReasoningId,
   onSelectReasoning,
-  autonomy,
-  onSelectAutonomy,
   lockHarness = false,
   disabled = false,
   openRequest = 0,
@@ -327,8 +323,6 @@ export function ModelPicker({
   reasoningChoices?: OptionChoice[];
   defaultReasoningId?: string | null;
   onSelectReasoning?: (id: string) => void;
-  autonomy?: Autonomy;
-  onSelectAutonomy?: (autonomy: Autonomy) => void;
   lockHarness?: boolean;
   disabled?: boolean;
   openRequest?: number;
@@ -570,25 +564,7 @@ export function ModelPicker({
   // One tier beside the standard one is a switch; more are a choice.
   const switchTier = speeds.length === 2 && speeds.includes(null) ? speeds.find((tier) => tier !== null) : undefined;
   const speedLabel = (tier: string) => (tier === "fast" ? m.model_picker_fast_mode() : speedName(tier));
-  const autonomyChoices: (OptionChoice & { id: Autonomy; icon: ReactNode })[] = [
-    {
-      id: "agentic",
-      label: m.model_picker_autonomy_agentic(),
-      description: m.model_picker_autonomy_agentic_description(),
-      icon: <Bot size={14} aria-hidden="true" className="shrink-0 text-accent-purple" />,
-    },
-    {
-      id: "copilot",
-      label: m.model_picker_autonomy_copilot(),
-      description: m.model_picker_autonomy_copilot_description(),
-      icon: <Handshake size={14} aria-hidden="true" className="shrink-0 text-accent-green" />,
-    },
-  ];
-  const autonomyLabel = autonomyChoices.find((choice) => choice.id === autonomy)?.label;
-  const permissionSummary = [
-    permissionLabel && `${m.model_picker_permissions()}: ${permissionLabel}`,
-    autonomyLabel && `${m.model_picker_autonomy()}: ${autonomyLabel}`,
-  ].filter(Boolean).join(" · ") || m.model_picker_permissions();
+  const permissionSummary = permissionLabel ? `${m.model_picker_permissions()}: ${permissionLabel}` : m.model_picker_permissions();
   const moveFocus = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.nativeEvent.isComposing || event.keyCode === 229) return;
 
@@ -951,7 +927,7 @@ export function ModelPicker({
             </Menu.Portal>
           </Menu.Root>
         )}
-        {(permissionChoices.length > 0 || onSelectAutonomy) && (
+        {permissionChoices.length > 0 && (
           <Menu.Root
             open={!disabled && menu === "permissions"}
             modal={false}
@@ -970,38 +946,19 @@ export function ModelPicker({
                   className={MENU_POPUP}
                   style={{ width: "min(320px, calc(100vw - 16px))", maxHeight: "min(560px, var(--available-height))" }}
                 >
-                  {permissionChoices.length > 0 && (
-                    <Menu.Group>
-                      <Menu.GroupLabel className={MENU_LABEL}>{m.model_picker_permissions()}</Menu.GroupLabel>
-                      <Menu.RadioGroup
-                        value={effectivePermissionId}
-                        onValueChange={(id) => {
-                          if (typeof id === "string") onSelectPermission?.(id);
-                        }}
-                      >
-                        {permissionChoices.map((choice) => (
-                          <DescribedRadioItem key={choice.id} choice={choice} icon={<PermissionIcon id={choice.id} />} isDefault={choice.id === defaultPermissionId} />
-                        ))}
-                      </Menu.RadioGroup>
-                    </Menu.Group>
-                  )}
-                  {permissionChoices.length > 0 && onSelectAutonomy && <Menu.Separator className={MENU_SEPARATOR} />}
-                  {onSelectAutonomy && (
-                    <Menu.Group>
-                      <Menu.GroupLabel className={MENU_LABEL}>{m.model_picker_autonomy()}</Menu.GroupLabel>
-                      <Menu.RadioGroup
-                        value={autonomy ?? DEFAULT_AUTONOMY}
-                        onValueChange={(id) => {
-                          const choice = autonomyChoices.find((entry) => entry.id === id);
-                          if (choice) onSelectAutonomy(choice.id);
-                        }}
-                      >
-                        {autonomyChoices.map((choice) => (
-                          <DescribedRadioItem key={choice.id} choice={choice} icon={choice.icon} isDefault={choice.id === DEFAULT_AUTONOMY} />
-                        ))}
-                      </Menu.RadioGroup>
-                    </Menu.Group>
-                  )}
+                  <Menu.Group>
+                    <Menu.GroupLabel className={MENU_LABEL}>{m.model_picker_permissions()}</Menu.GroupLabel>
+                    <Menu.RadioGroup
+                      value={effectivePermissionId}
+                      onValueChange={(id) => {
+                        if (typeof id === "string") onSelectPermission?.(id);
+                      }}
+                    >
+                      {permissionChoices.map((choice) => (
+                        <DescribedRadioItem key={choice.id} choice={choice} icon={<PermissionIcon id={choice.id} />} isDefault={choice.id === defaultPermissionId} />
+                      ))}
+                    </Menu.RadioGroup>
+                  </Menu.Group>
                 </Menu.Popup>
               </Menu.Positioner>
             </Menu.Portal>

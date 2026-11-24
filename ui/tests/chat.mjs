@@ -23,7 +23,7 @@ export const codex = {
 
 export const session = (id, fields = {}) => ({
   id, projectId: "p", harness: "codex", title: `Chat ${id}`, model: "gpt-6.1-sol", serviceTier: null, permissionMode: "auto", planMode: false,
-  autonomy: "agentic", reasoningLevel: null, archived: false, createdAt: 1, updatedAt: 1, busy: false, activeLeafId: null, ...fields,
+  reasoningLevel: null, archived: false, createdAt: 1, updatedAt: 1, busy: false, activeLeafId: null, ...fields,
 });
 
 export const userMessage = (id, text, parentId = null) =>
