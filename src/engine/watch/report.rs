@@ -84,6 +84,12 @@ fn writing() -> &'static Mutex<HashSet<String>> {
     WRITING.get_or_init(Default::default)
 }
 
+/// Chats whose need of a model pick was sent to the page since `orx up` started.
+fn offered() -> &'static Mutex<HashSet<String>> {
+    static OFFERED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    OFFERED.get_or_init(Default::default)
+}
+
 fn wake() -> &'static tokio::sync::Notify {
     static WAKE: OnceLock<tokio::sync::Notify> = OnceLock::new();
     WAKE.get_or_init(tokio::sync::Notify::new)
@@ -346,6 +352,15 @@ async fn pass(host: &Arc<ChatHost>) -> Result<()> {
             if store.chat_report_blocked(&chat.id, &why, now)? {
                 emit(host, &chat.id);
             }
+        } else if watching == Watching::NeedsPick {
+            let fresh = offered()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(chat.id.clone());
+            // A page may have read the report while the routes were unknown, with no offer.
+            if fresh {
+                emit(host, &chat.id);
+            }
         }
     }
     Ok(())
@@ -511,7 +526,7 @@ async fn update(
                 Err(why) if last => {
                     eprintln!(
                         "orx up: report: chat {chat}: edits that could not be applied ({why}): {}",
-                        answer.text
+                        logged(&answer.text)
                     );
                     return Ok(Ended::Failed(format!(
                         "{label}'s edits to the report could not be applied: {why}. The previous report stays."
@@ -555,7 +570,7 @@ async fn update(
         if last || crate::local::share::find_secret(&body).is_some() {
             eprintln!(
                 "orx up: report: chat {chat}: a reply that was not kept ({errors}): {}",
-                answer.text
+                logged(&answer.text)
             );
             return Ok(Ended::Failed(format!(
                 "{label}'s update was not kept: {errors}. The previous report stays."
@@ -572,6 +587,14 @@ async fn update(
         };
     }
     unreachable!("the last call returns")
+}
+
+/// A model's reply as the server log keeps it: never one that holds what looks like a credential.
+fn logged(reply: &str) -> std::borrow::Cow<'_, str> {
+    match crate::local::share::find_secret(reply) {
+        Some(kind) => digest::withheld_text(kind).into(),
+        None => reply.into(),
+    }
 }
 
 /// Whether `line` is an edit's marker: 5 to 9 of `mark`, then `word`, alone on the line.
@@ -994,7 +1017,15 @@ impl Known {
             .flat_map(|key| inputs[key].as_array().into_iter().flatten())
         {
             if let Some(run) = item["run"].as_str() {
-                let own = numbers_in(item);
+                // The parent's name and the watcher's comparisons with it hold numbers that are not
+                // this run's results.
+                let mut own = item.clone();
+                if let Some(fields) = own.as_object_mut() {
+                    for key in ["parent", "watcher", "flag"] {
+                        fields.remove(key);
+                    }
+                }
+                let own = numbers_in(&own);
                 known.by_run.entry(run.to_owned()).or_default().extend(own);
             }
         }

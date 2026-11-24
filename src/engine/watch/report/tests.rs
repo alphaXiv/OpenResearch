@@ -880,6 +880,15 @@ fn a_run_tags_label_gives_that_runs_own_numbers() {
         checked(&ruled_out, &known).is_empty(),
         "a Ruled out tag is labeled with the change it made"
     );
+    let watched = Known::of(&json!({"runs": [{
+        "run": "seed0", "parent": "Cosine, peak LR 0.05", "status": "done",
+        "measures": {"Val loss": "0.34"}, "watcher": "Val loss 0.34, 0.02 better than its parent.",
+    }]}));
+    assert!(
+        checked("Cosine won. <run id=\"seed0\" label=\"0.02\"/>", &watched)[0]
+            .contains("0.02 for seed0"),
+        "a difference the watcher gave is not the run's result"
+    );
     let relabelled = format!("Cosine holds across seeds.\n- Warmup was worse. <run id=\"old\" label=\"0.0136\"/>{figure}");
     assert!(
         checked(&relabelled, &known).is_empty(),
@@ -1250,7 +1259,20 @@ async fn the_user_turns_a_chats_report_off_and_on() {
         .unwrap()
         .unwrap();
     assert_eq!(offered["needsModel"], json!({"same": false}));
+    let told = |events: &mut tokio::sync::broadcast::Receiver<(&'static str, Value)>| {
+        std::iter::from_fn(|| events.try_recv().ok())
+            .filter(|(name, data)| *name == "chat.report" && data["sessionId"] == "opencode")
+            .count()
+    };
+    let mut events = host.subscribe();
     settle(&host).await;
+    assert_eq!(
+        told(&mut events),
+        1,
+        "the page hears once that it needs a pick"
+    );
+    settle(&host).await;
+    assert_eq!(told(&mut events), 0);
     assert!(store
         .chat_report("opencode")
         .unwrap()

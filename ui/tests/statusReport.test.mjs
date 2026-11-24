@@ -195,6 +195,14 @@ test("the folded line shows a run tag as text, as the open status does", async (
   assert.equal(section().querySelector(".run-chip"), null);
 });
 
+test("a figure of a run with no chart to draw leaves no empty frame", async () => {
+  const statsOnly = { ...running, view: { ...running.view, blocks: [{ stats: ["loss"] }] } };
+  await card({ open: true, report: report({ body: 'Cosine decay is done.\n\n<run id="r1" figure/>' }) }, figureRoutes(statsOnly));
+  await settle();
+  assert.ok(opened().textContent.includes("Cosine decay is done."));
+  assert.equal(opened().querySelector(".border"), null);
+});
+
 test("a figure of a run without a parent has no Logs chip, and its experiment's name opens the experiment", async () => {
   const state = { open: true, report: report({ body: 'Cosine decay is running.\n\n<run id="r1" figure/>' }), opened: [] };
   await card(state, figureRoutes(running));

@@ -110,7 +110,7 @@ function CompactChart({ run, monitor, onOpenRun }: { run: Run; monitor: RunMonit
   const live = runActive(run.status) && monitor.availability.state === "live";
 
   return (
-    <section aria-label={title}>
+    <section aria-label={title} className="min-w-0 rounded-md border border-border px-3 py-2.5">
       <div className="mb-1.5 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
         {/* Important, to win over the Markdown heading styles around it. */}
         <h3 className="m-0! min-w-0 text-sm font-medium! text-text!">
@@ -161,11 +161,7 @@ export function RunFigure({ id, onOpenRun, children }: { id: string; onOpenRun?:
   if (compact) {
     return (
       <div className="my-2.5 min-w-0">
-        {failed ? retry : run && data && (
-          <div className="min-w-0 rounded-md border border-border px-3 py-2.5">
-            <CompactChart run={run} monitor={data} onOpenRun={onOpenRun} />
-          </div>
-        )}
+        {failed ? retry : run && data && <CompactChart run={run} monitor={data} onOpenRun={onOpenRun} />}
       </div>
     );
   }
