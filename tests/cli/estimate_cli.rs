@@ -133,6 +133,45 @@ fn estimate_reads_parent_counts_without_launching_or_changing_the_command() {
     );
     assert!(stdout.contains("Cost: about $3.10"), "{stdout}");
 
+    let unlisted = command()
+        .args(["exp", "run", "child", "--estimate"])
+        .args(["--backend", "hf", "--flavor", "a100-large"])
+        .env("HF_ENDPOINT", &endpoint)
+        .env("NO_PROXY", "127.0.0.1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&unlisted.stdout);
+    assert!(unlisted.status.success(), "{stdout}");
+    assert!(stdout.contains("Total: about 31 min"), "{stdout}");
+    assert!(
+        stdout.contains("Cost: unknown for --backend hf --flavor a100-large: "),
+        "{stdout}"
+    );
+
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let silent_endpoint = format!("http://{}", silent.local_addr().unwrap());
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in silent.incoming() {
+            held.push(stream.unwrap());
+        }
+    });
+    let stalled = command()
+        .args(["exp", "run", "child", "--estimate"])
+        .args(["--backend", "hf", "--flavor", "h200"])
+        .env("HF_ENDPOINT", &silent_endpoint)
+        .env("NO_PROXY", "127.0.0.1")
+        .env("ORX_TEST_SPEEDUP", "60")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&stalled.stdout);
+    assert!(stalled.status.success(), "{stdout}");
+    assert!(stdout.contains("Total: about 31 min"), "{stdout}");
+    assert!(
+        stdout.contains("Cost: unknown for --backend hf --flavor h200: no price within"),
+        "{stdout}"
+    );
+
     let refused = command()
         .args(["exp", "run", "child", "--estimate"])
         .args(["--backend", "ssh", "--flavor", "h200"])

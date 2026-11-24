@@ -58,7 +58,8 @@ pub(super) async fn run(store: &Store, mut args: crate::ExpRunArgs) -> Result<()
         Some(flavor) => format!("--backend {backend} --flavor {flavor}"),
         None => format!("--backend {backend}"),
     };
-    let quote = tokio::time::timeout(Duration::from_secs(60), price(&backend, &args))
+    let limit = crate::config::paced(Duration::from_secs(60));
+    let quote = tokio::time::timeout(limit, price(&backend, &args))
         .await
         .unwrap_or_else(|_| Err(anyhow!("no price within 60 s")));
     println!("Command: {command}");
