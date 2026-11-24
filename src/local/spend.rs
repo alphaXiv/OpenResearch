@@ -1,15 +1,30 @@
 //! What OpenResearch's chats and runs spent: agent cost per day, and compute
-//! cost from the price each run was quoted when it launched.
+//! cost from what the provider billed, else from the price each run was quoted.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+use std::time::Duration;
 
 use crate::error::Result;
+use crate::jobs::modal;
 use crate::local::usage::{AgentSpend, BackendSpend, ChatCompute, PlanUsage, UsageReport};
-use crate::store::{BilledRun, Store};
+use crate::store::{BilledRun, Cost, Store};
 
 /// Backends that bill for running time and have a price to read. The user's own machines and
 /// clusters cost nothing orx can see; Vercel and Tinker have no per-run price.
 pub(crate) const BILLED: [&str; 3] = ["openresearch_job", "hf_job", "modal_job"];
+
+/// Billed backends whose price is a list price, still readable after a run ends; a box's price
+/// went with the box.
+pub(crate) const LIST_PRICED: [&str; 2] = ["hf_job", "modal_job"];
+
+const HOUR: i64 = 3_600_000;
+/// How long after an hour ends Modal's report is read for it, since it can lag.
+const BILL_SETTLE: i64 = HOUR;
+/// The longest span Modal's hourly report covers.
+const REPORT_SPAN: i64 = 7 * 24 * HOUR;
+/// Runs that ended longer ago keep their estimate, since a sandbox runs at most a day.
+const BILL_WINDOW: i64 = REPORT_SPAN - 24 * HOUR;
 
 /// The currency of a row with nothing priced in it: every price source orx reads is in dollars.
 const UNPRICED_CURRENCY: &str = "USD";
@@ -82,16 +97,17 @@ pub fn seven_days(store: &Store, now: i64, plans: Option<&[PlanUsage]>) -> Resul
         if start >= to || end <= from {
             continue;
         }
-        let (Some(_), Some(quote)) = (running, &run.quote) else {
-            *unpriced.entry(run.backend).or_default() += 1;
-            continue;
+        let (currency, micros) = match (&run.billed, running, &run.quote) {
+            (Some(billed), ..) => (billed.currency.clone(), billed.micros),
+            (None, Some(_), Some(quote)) => (quote.currency.clone(), cost(quote, end - start)),
+            _ => {
+                *unpriced.entry(run.backend).or_default() += 1;
+                continue;
+            }
         };
-        let row = backends
-            .entry((run.backend, quote.currency.clone()))
-            .or_default();
+        let row = backends.entry((run.backend, currency)).or_default();
         for (day, spent) in row.iter_mut().enumerate() {
-            let overlap = end.min(midnights[day + 1]) - start.max(midnights[day]);
-            *spent += cost(quote, overlap);
+            *spent += share(micros, (start, end), (midnights[day], midnights[day + 1]));
         }
     }
     let mut compute: Vec<BackendSpend> = backends
@@ -133,11 +149,14 @@ pub fn chat_compute(store: &Store, chat_id: &str, now: i64) -> Result<Option<Cha
     let mut spent: BTreeMap<String, u64> = BTreeMap::new();
     let mut unpriced = 0;
     for run in &runs {
-        match (running_time(run, now), &run.quote) {
-            (Some((start, end)), Some(quote)) => {
+        match (&run.billed, running_time(run, now), &run.quote) {
+            (Some(billed), ..) => {
+                *spent.entry(billed.currency.clone()).or_default() += billed.micros
+            }
+            (None, Some((start, end)), Some(quote)) => {
                 *spent.entry(quote.currency.clone()).or_default() += cost(quote, end - start)
             }
-            (None, _) if !run.finished => {}
+            (None, None, _) if !run.finished => {}
             _ => unpriced += 1,
         }
     }
@@ -158,6 +177,63 @@ fn running_time(run: &BilledRun, now: i64) -> Option<(i64, i64)> {
     let start = run.started_at?;
     let end = if run.finished { run.ended_at? } else { now };
     Some((start, end.max(start)))
+}
+
+/// The part of `micros`, spent evenly over `[start, end)`, that falls in `[from, to)`; all of it
+/// at `start` when the run took no time orx saw.
+fn share(micros: u64, (start, end): (i64, i64), (from, to): (i64, i64)) -> u64 {
+    if start == end {
+        return if (from..to).contains(&start) {
+            micros
+        } else {
+            0
+        };
+    }
+    let overlap = (end.min(to) - start.max(from)).max(0) as u128;
+    let span = (end - start) as u128;
+    ((u128::from(micros) * overlap + span / 2) / span) as u64
+}
+
+/// Reads what Modal billed each finished run that had an app of its own, once Modal has
+/// settled its last hour. A run whose app the report doesn't name, as when the token now reaches
+/// another workspace, keeps its estimate.
+pub(crate) async fn read_modal_bills(data_dir: &Path, now: i64) -> Result<()> {
+    let settled = (now - BILL_SETTLE).div_euclid(HOUR) * HOUR;
+    let runs: Vec<_> = Store::open_at(data_dir.to_path_buf())?
+        .unbilled_runs("modal_job", now - BILL_WINDOW)?
+        .into_iter()
+        .filter(|run| run.ended_at < settled && run.app == Some(modal::run_app(&run.id)))
+        .collect();
+    let Some(since) = runs.iter().map(|run| run.created_at).min() else {
+        return Ok(());
+    };
+    let billed = modal::billed_by_app(since.max(now - REPORT_SPAN + HOUR)).await?;
+    let store = Store::open_at(data_dir.to_path_buf())?;
+    for run in runs {
+        let Some(&micros) = run.app.and_then(|app| billed.get(&app)) else {
+            continue;
+        };
+        let cost = Cost {
+            micros,
+            currency: "USD".into(),
+        };
+        store.record_run_bill(&run.id, &cost)?;
+    }
+    Ok(())
+}
+
+/// Reads Modal's bills while `orx up` runs; a plan without billing reports keeps estimates.
+pub(crate) async fn keep_modal_bills(data_dir: std::path::PathBuf) {
+    loop {
+        let wait = match read_modal_bills(&data_dir, crate::store::now_ms()).await {
+            Ok(()) => Duration::from_secs(15 * 60),
+            Err(error) => {
+                eprintln!("orx up: could not read what Modal billed: {error:#}");
+                Duration::from_secs(6 * 60 * 60)
+            }
+        };
+        tokio::time::sleep(crate::config::paced(wait)).await;
+    }
 }
 
 /// What `millis` of running time costs at `quote`.
@@ -385,6 +461,49 @@ mod tests {
             }
         );
         assert_eq!(chat_compute(&store, "quiet", NOW).unwrap(), None);
+        drop((store, conn));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// What the provider billed replaces the estimate, and prices a run orx never saw running.
+    #[test]
+    fn a_billed_run_counts_what_was_billed() {
+        let Some((dir, store, conn)) = store_west_of_utc("billed") else {
+            return;
+        };
+        runs(
+            &conn,
+            &[
+                (
+                    "modal_job",
+                    "chat",
+                    Done(TODAY - HOUR, TODAY + HOUR),
+                    HOURLY,
+                ),
+                ("modal_job", "chat", DoneUnseen(TODAY + 2 * HOUR), None),
+                ("modal_job", "chat", DoneUnseen(TODAY + 3 * HOUR), None),
+            ],
+        );
+        for (ended, micros) in [(TODAY + HOUR, 3_000_000), (TODAY + 2 * HOUR, 500_000)] {
+            conn.execute(
+                "UPDATE runs SET billed_json = ?2 WHERE ended_at = ?1",
+                params![
+                    ended,
+                    serde_json::json!({"micros": micros, "currency": "USD"}).to_string()
+                ],
+            )
+            .unwrap();
+        }
+
+        let week = seven_days(&store, NOW, Some(&[])).unwrap();
+        assert_eq!(week.compute.len(), 1);
+        assert_eq!(
+            week.compute[0].day_micros,
+            [0, 0, 0, 0, 0, 1_500_000, 2_000_000]
+        );
+        assert_eq!(week.compute[0].unpriced, 1);
+        let compute = chat_compute(&store, "chat", NOW).unwrap().unwrap();
+        assert_eq!((compute.cost_micros, compute.unpriced), (3_500_000, 1));
         drop((store, conn));
         std::fs::remove_dir_all(dir).unwrap();
     }

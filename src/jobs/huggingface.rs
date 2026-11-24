@@ -195,6 +195,12 @@ pub struct JobStatus {
 pub struct JobInfo {
     pub id: String,
     pub status: JobStatus,
+    /// ISO 8601; None until the job runs.
+    #[serde(default)]
+    pub started_at: Option<String>,
+    /// ISO 8601; None until the job ends.
+    #[serde(default)]
+    pub finished_at: Option<String>,
 }
 
 async fn check(res: reqwest::Response, what: &str) -> Result<reqwest::Response> {
@@ -443,6 +449,8 @@ pub async fn run_job_with_source(
             stage: "SCHEDULING".to_string(),
             message: None,
         },
+        started_at: None,
+        finished_at: None,
     })
 }
 

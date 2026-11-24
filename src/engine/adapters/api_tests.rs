@@ -3657,6 +3657,38 @@ async fn hf_exit_evidence_requires_the_provider_failure_format() {
     }
 }
 
+/// A job orx wasn't watching when it ended keeps the times Hugging Face recorded.
+#[tokio::test]
+async fn hf_terminal_observations_keep_the_jobs_own_times() {
+    let Some(root) = isolated().await else {
+        return;
+    };
+    let account = HfAccount::new("org".into());
+    let run = WatchedRun {
+        id: "run".into(),
+        handle: super::api::test_handle("hf_job", Some("org"), None, vec!["job".into()]),
+    };
+    std::fs::write(
+        root.join("inspect-response.json"),
+        json!({"id": "job", "status": {"stage": "COMPLETED"},
+               "createdAt": "2026-11-11T00:00:00.000Z",
+               "startedAt": "2026-11-11T00:00:06.079Z",
+               "finishedAt": "2026-11-11T02:00:00Z"})
+        .to_string(),
+    )
+    .unwrap();
+    let start = 1_794_355_200_000;
+    assert_eq!(
+        super::api::Api::inspect(&account, &run).await.unwrap(),
+        Observation::Exited {
+            started_at: Some(start + 6_079),
+            finished_at: Some(start + 2 * 3_600_000),
+            code: Some(0),
+            signal: None
+        }
+    );
+}
+
 #[tokio::test]
 async fn hf_refusals_fail_the_run_with_the_step_that_refused() {
     let Some(root) = isolated().await else {
