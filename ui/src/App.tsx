@@ -2581,9 +2581,9 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                     onOpenExperiment={(id, intent) =>
                       openFromRightTab(expTab, () => openExperimentTab(id, "overview", intent))
                     }
-                    onOpenFile={(path, line, exp, ref, intent) =>
+                    onOpenFile={(path, sessionId, line, exp, ref, intent) =>
                       openFromRightTab(expTab, () =>
-                        openChatFile(path, tabExperiment.chatSessionId ?? undefined, line, exp, ref, intent),
+                        openChatFile(path, sessionId ?? undefined, line, exp, ref, intent),
                       )
                     }
                     project={activeProject}

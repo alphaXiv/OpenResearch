@@ -14,7 +14,6 @@ import { ExperimentOverview } from "./ExperimentOverview";
 import type { CodeView } from "./CodeTab";
 import { LogTerminal } from "./LogTerminal";
 import type { LogSeek } from "../logWindow";
-import type { OpenFile } from "./FileReference";
 import { RunContactNotice } from "./RunContactNotice";
 import { StatusBadge } from "./StatusBadge";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
@@ -55,7 +54,7 @@ export function DetailDrawer({
   onOpenView: (view: ExperimentView, runId: string | undefined, intent: TabOpenIntent) => void;
   onOpenCode: (view: CodeView, intent: TabOpenIntent) => void;
   onOpenExperiment: (id: string, intent: TabOpenIntent) => void;
-  onOpenFile: OpenFile;
+  onOpenFile: (path: string, sessionId: string | null | undefined, line: number | undefined, exp: string | undefined, ref: string | undefined, intent: TabOpenIntent) => void;
   /** Where the user asked a run's log to open; the log of that run takes it. */
   logSeek?: (LogSeek & { runId: string }) | null;
   onLogSeekTaken?: (seek: LogSeek) => void;

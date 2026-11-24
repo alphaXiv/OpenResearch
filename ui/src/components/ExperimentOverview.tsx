@@ -76,7 +76,7 @@ export function ExperimentOverview({
   experiment: Experiment;
   lineageNode: HistoryNode | null;
   onOpenExperiment: (id: string, intent: TabOpenIntent) => void;
-  onOpenFile: OpenFile;
+  onOpenFile: (path: string, sessionId: string | null | undefined, line: number | undefined, exp: string | undefined, ref: string | undefined, intent: TabOpenIntent) => void;
   parentExperiment: Experiment | null;
   project: Project;
   runs: Run[];
@@ -106,6 +106,7 @@ export function ExperimentOverview({
   // The experiment outlives its chat; the file route 404s a deleted session.
   const chatDeleted = sessions?.every((session) => session.id !== experiment.chatSessionId);
   const chatSessionId = chatDeleted ? null : experiment.chatSessionId;
+  const openFile: OpenFile = (path, line, exp, ref, intent) => onOpenFile(path, chatSessionId, line, exp, ref, intent);
   const hasTrackio = run !== null && trackioRunUrl(trackio, run.id) !== null;
 
   useEffect(() => {
@@ -169,7 +170,7 @@ export function ExperimentOverview({
         {experiment.description && (
           <section className="experiment-overview-section mt-5.5 pt-4.5 border-t border-t-border-variant [&_h2]:mt-0 [&_h2]:mx-0 [&_h2]:mb-3.5 [&_h2]:text-text [&_h2]:text-sm [&_h2]:font-semibold overview-description [&_.md]:text-text [&_.md]:leading-relaxed">
             <h2>{m.experiment_overview_description()}</h2>
-            <Md text={experiment.description} onOpenFile={onOpenFile} />
+            <Md text={experiment.description} onOpenFile={openFile} />
           </section>
         )}
 
@@ -213,7 +214,7 @@ export function ExperimentOverview({
                 <div
                   className={`experiment-overview-result mt-4 [&.failed]:text-accent-red ${run.status === "failed" ? "failed" : ""}`}
                 >
-                  <Md text={result} onOpenFile={onOpenFile} />
+                  <Md text={result} onOpenFile={openFile} />
                 </div>
               )}
             </>
