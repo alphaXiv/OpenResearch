@@ -1514,6 +1514,8 @@
   "local_models_guide_install_rapid_mlx": "Install Rapid-MLX:",
   "local_models_guide_serve_rapid_mlx": "Download a model and start the server, for example:",
   "chat_session_limit_reached": "Session limit reached",
+  "chat_try_again": "Try again",
+  "chat_usage_resets_in": "Resets in {time}",
   "chat_model_unavailable": "Model unavailable",
   "chat_failure_signed_out": "{name} is signed out.",
   "chat_failure_credits": "This account is out of credits.",

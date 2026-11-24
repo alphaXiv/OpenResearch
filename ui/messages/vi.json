@@ -1514,6 +1514,8 @@
   "local_models_guide_install_rapid_mlx": "Cài đặt Rapid-MLX:",
   "local_models_guide_serve_rapid_mlx": "Tải xuống một mô hình và khởi động máy chủ, ví dụ:",
   "chat_session_limit_reached": "Đã đạt đến giới hạn phiên",
+  "chat_try_again": "Thử lại",
+  "chat_usage_resets_in": "Đặt lại sau {time}",
   "chat_model_unavailable": "Mô hình không khả dụng",
   "chat_failure_signed_out": "{name} đã đăng xuất.",
   "chat_failure_credits": "Tài khoản này đã hết credit.",

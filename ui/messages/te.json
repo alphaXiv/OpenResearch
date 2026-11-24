@@ -1514,6 +1514,8 @@
   "local_models_guide_install_rapid_mlx": "Rapid-MLX ఇన్‌స్టాల్ చేయండి:",
   "local_models_guide_serve_rapid_mlx": "ఒక మోడల్‌ను డౌన్‌లోడ్ చేసి, సర్వర్‌ను ప్రారంభించండి, ఉదాహరణకు:",
   "chat_session_limit_reached": "సెషన్ పరిమితిని చేరుకున్నారు",
+  "chat_try_again": "మళ్లీ ప్రయత్నించండి",
+  "chat_usage_resets_in": "{time}లో రీసెట్ అవుతుంది",
   "chat_model_unavailable": "మోడల్ అందుబాటులో లేదు",
   "chat_failure_signed_out": "{name} సైన్ అవుట్ అయి ఉంది.",
   "chat_failure_credits": "ఈ ఖాతాలో క్రెడిట్‌లు అయిపోయాయి.",

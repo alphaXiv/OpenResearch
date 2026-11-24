@@ -392,6 +392,7 @@ impl Turn<'_> {
     ) -> Result<()> {
         let prompt_id = self.checkpoint.prompt_id.as_str();
         let mut failure = None;
+        let mut failure_retry_after = None;
         let mut stopped = false;
         let mut stale = false;
         while !ended {
@@ -446,6 +447,7 @@ impl Turn<'_> {
                     ended = self.finished(ctx).await?;
                     if ended {
                         failure = data.get("error").map(error_text);
+                        failure_retry_after = data.get("error").and_then(error_retry_after_ms);
                         stopped = kind == "session.execution.interrupted";
                     }
                 }
@@ -487,6 +489,7 @@ impl Turn<'_> {
             if let (true, Some(message)) = (delivered, &failure) {
                 // Failures before a step (e.g. an unavailable model) leave no assistant message.
                 ctx.mark_native_retry_exhausted();
+                ctx.mark_usage_reset(failure_retry_after);
                 ctx.mark_terminal_failure("opencode_terminal", message);
                 return Err(anyhow!("OpenCode V2: {message}"));
             }
@@ -608,6 +611,7 @@ async fn merge_projection(
             {
                 let message = error_text(error);
                 ctx.mark_native_retry_exhausted();
+                ctx.mark_usage_reset(error_retry_after_ms(error));
                 ctx.mark_terminal_failure("opencode_terminal", &message);
                 return Err(anyhow!("OpenCode V2: {message}"));
             }
@@ -706,6 +710,16 @@ fn messages(projection: &Value) -> Result<&Vec<Value>> {
         .pointer("/data/messages")
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow!("OpenCode V2 history response is invalid"))
+}
+
+/// Usage and rate limits carry how long the provider asked to wait before
+/// trying again, so the dashboard can show the remaining wait next to its
+/// recovery button. Read from the same structured error `error_text` reports.
+fn error_retry_after_ms(error: &Value) -> Option<i64> {
+    ["/data/retryAfterMs", "/retryAfterMs"]
+        .into_iter()
+        .find_map(|path| error.pointer(path).and_then(Value::as_i64))
+        .filter(|ms| *ms >= 0)
 }
 
 fn error_text(error: &Value) -> String {
@@ -2198,6 +2212,36 @@ mod tests {
         for part in finished.iter().filter(|part| part["kind"] == "text") {
             assert_eq!(part["text"], streamed[part["id"].as_str().unwrap()]);
         }
+    }
+
+    #[test]
+    fn error_retry_after_ms_reads_the_provider_wait() {
+        // A free-limit failure carries the provider's wait inside the error payload.
+        assert_eq!(
+            error_retry_after_ms(&json!({
+                "type":"provider.free-limit",
+                "data":{"message":"Free usage limit reached.","retryAfterMs":86_400_000}
+            })),
+            Some(86_400_000)
+        );
+        // A flat retry-after on the error itself also counts.
+        assert_eq!(
+            error_retry_after_ms(
+                &json!({"type":"provider.rate-limit","message":"Slow down","retryAfterMs":250})
+            ),
+            Some(250)
+        );
+        // Negative or absent waits are not times.
+        assert_eq!(
+            error_retry_after_ms(
+                &json!({"type":"provider.quota","message":"Quota exceeded","retryAfterMs":-5})
+            ),
+            None
+        );
+        assert_eq!(
+            error_retry_after_ms(&json!({"name":"APIError","data":{"message":"Invalid API key"}})),
+            None
+        );
     }
 
     #[test]
