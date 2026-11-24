@@ -49,7 +49,7 @@ The rules around it:
 
 The laptop and the remote run whatever versions they were last updated to.
 
-- **Dashboard protocol** (`src/commands/up_remote.rs`): what the laptop's UI expects of the remote API. It must match exactly. A newer remote asks the user to update the laptop; an older one is offered an update, which first requires stopping a host still running the old binary.
+- **Dashboard protocol** (`src/commands/up_remote.rs`): what the laptop's UI expects of the remote API. It must match exactly. A newer remote asks the user to update the laptop; an older one is offered an update, which installs beside the running host and asks it to restart with its work kept ([restarts](restarts.md)); a host too old to restart must be stopped first.
 - **Control protocol** (`src/commands/remote_host.rs`): the control channel's shape. A mismatch reports the host as incompatible.
 - **Host protocol** (`crates/orx-host-proto`): Hello requires the exact version and binary SHA. The engine uploads its own `orx-host`, so `serve` never skews; only wrappers and files outlive a version.
 

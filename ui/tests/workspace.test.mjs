@@ -116,18 +116,36 @@ test("pane history keeps task readiness and saved tabs; task switches restore th
   const document = { ...workspace.emptyProjectWorkspace(), tasks: { one: savedTask(), two: savedTask([{ kind: "home", view: "artifacts" }, { kind: "home", view: "terminal" }]) } };
   const app = await host({ load: () => document, save: async (...args) => { writes.push(args); } });
   assert.equal(app.state.panelOpen, false);
-  assert.equal(app.projects.getCachedProjectWorkspace("p").tasks.one.active.kind, "file");
+  assert.equal(app.projects.getCachedProjectWorkspace("p").tasks.one.active, null, "a chat shown without a pane is remembered as closed");
   app.readiness.length = 0;
   await app.navigate("p", "one", { ...file, line: 23 });
   assert(app.readiness.every(Boolean));
   assert.equal(app.state.fileTabs[0].line, 23);
   await app.navigate("p", "two", undefined);
   assert.equal(app.state.fileTabs.length, 0); assert.equal(app.state.artifactsTabOpen, true); assert.equal(app.state.terminalTabOpen, true);
+  assert.equal(app.projects.getCachedProjectWorkspace("p").tasks.one.active.line, 23, "an open panel is remembered when switching chats");
   await app.navigate("p", "one", undefined);
   assert.equal(app.state.fileTabs[0].line, 23);
   assert.equal(app.state.panelOpen, false);
-  assert.equal(app.projects.getCachedProjectWorkspace("p").tasks.one.active.line, 23);
+  assert.equal(app.projects.getCachedProjectWorkspace("p").tasks.one.active, null, "returning to a chat without a pane saves it closed");
   assert(writes.length > 0);
+  await app.unmount();
+});
+
+test("a panel closed in a chat stays closed after switching away and back", async () => {
+  const document = { ...workspace.emptyProjectWorkspace(), tasks: { one: savedTask(), two: savedTask([{ kind: "home", view: "artifacts" }]) } };
+  const app = await host({ load: () => document });
+  const remembered = (task) => app.projects.getCachedProjectWorkspace("p").tasks[task].active ?? undefined;
+  await app.navigate("p", "one", file);
+  await app.navigate("p", "two", remembered("two"));
+  await app.navigate("p", "one", remembered("one"));
+  assert.equal(app.state.panelOpen, true);
+  await app.navigate("p", "one", undefined);
+  await app.navigate("p", "two", remembered("two"));
+  assert.equal(app.projects.getCachedProjectWorkspace("p").tasks.one.active, null);
+  await app.navigate("p", "one", remembered("one"));
+  assert.equal(app.state.panelOpen, false);
+  assert.equal(app.state.fileTabs[0].path, "paper.tex");
   await app.unmount();
 });
 

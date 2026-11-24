@@ -7,6 +7,7 @@ fn main() {
         Some("wrap") if args.len() == 4 && args[2] == "--keep-awake" => {
             orx_host::wrapper::wrap(Path::new(&args[3]), true)
         }
+        Some("keep") if args.len() == 3 => orx_keep::run(Path::new(&args[2])),
         Some("check-run") if args.len() == 3 => orx_host::wrapper::has_live_processes(Path::new(&args[2])).map(|busy| {
             println!("{}", if busy { "busy" } else { "idle" });
         }),
@@ -24,7 +25,7 @@ fn main() {
         })(),
         _ => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "usage: orx-host serve --root ROOT | wrap [--keep-awake] RUN_DIR | check-run RUN_DIR | verify-self SHA256",
+            "usage: orx-host serve --root ROOT | wrap [--keep-awake] RUN_DIR | keep KEEPER_DIR | check-run RUN_DIR | verify-self SHA256",
         )),
     };
     if let Err(error) = result {

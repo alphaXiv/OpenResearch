@@ -68,6 +68,8 @@ here as a new message. Continue other work, call `wait` when you cannot go on
 without the answer, or end your turn. `answer` a delegate's question, or ask the
 user. `subscribe` lets you hear from any other chat the same way, and `send`,
 `status`, `read` and `cancel` message, check on, read and stop other chats.
+`chats` finds them: the user's inbox or working chats, a search, or your
+parent, children and siblings in the tree of chats that started one another.
 Each message from the user starts with its ref, such as `msg_3fa9c1d2`; a ref
 in a task or message passes that message on word for word, with its
 attachments. In a reply to the user, a ref or a chat id shows as a link to it.

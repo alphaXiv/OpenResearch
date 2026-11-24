@@ -151,6 +151,18 @@ impl Harness for Antigravity {
         self.detect_at(true).await
     }
 
+    fn supports_resume(&self) -> bool {
+        true
+    }
+
+    async fn adopt(
+        &self,
+        chat: &std::sync::Arc<crate::local::chat::ChatHost>,
+        adoption: super::Adoption,
+    ) -> Result<()> {
+        chat.acp.adopt(adoption).await
+    }
+
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
         match run_turn(ctx).await {
             Ok(()) => Ok(TurnOutcome::Completed),
@@ -348,7 +360,7 @@ fn parse_agy_model_list(text: &str) -> Vec<ModelInfo> {
 }
 
 /// agy's log for the chat's resident process.
-fn log_path(session_id: &str) -> PathBuf {
+pub(crate) fn log_path(session_id: &str) -> PathBuf {
     crate::store::data_dir().join(format!("agent-antigravity-{session_id}.log"))
 }
 
@@ -363,11 +375,10 @@ pub(crate) fn approvals_path(session_id: &str) -> PathBuf {
     crate::store::data_dir().join(format!("agent-antigravity-{session_id}.approvals"))
 }
 
-/// The error the `Stop` hook saved for this conversation's turn, consumed.
-fn take_stop_error(session_id: &str, conversation: &str) -> Option<String> {
+/// The error the `Stop` hook saved for this conversation's turn.
+fn read_stop_error(session_id: &str, conversation: &str) -> Option<String> {
     let path = stop_error_path(session_id);
     let saved: Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
-    let _ = std::fs::remove_file(path);
     (saved["conversationId"] == conversation)
         .then(|| saved["error"].as_str().map(str::to_owned))
         .flatten()
@@ -452,19 +463,24 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
 }
 
 async fn turn(ctx: &mut TurnCtx, log: &Path, logged: u64) -> Result<()> {
-    let (definition, repo) = prepare(
-        &ctx.project,
-        &ctx.session_id,
-        ctx.permission_mode,
-        ctx.plan_mode,
-    )
-    .await?;
-    let session = super::acp::open_session(ctx, &definition, &repo, false).await?;
+    let resuming = ctx.resume.is_some();
+    let session = if resuming {
+        super::acp::resumed_session(ctx).await?
+    } else {
+        let (definition, repo) = prepare(
+            &ctx.project,
+            &ctx.session_id,
+            ctx.permission_mode,
+            ctx.plan_mode,
+        )
+        .await?;
+        super::acp::open_session(ctx, &definition, &repo, false).await?
+    };
     let native_id = session.native_id.clone();
     if let Some(model) = ctx
         .model
         .as_deref()
-        .filter(|model| !model.is_empty() && *model != REASONING_DEFAULT_ID)
+        .filter(|model| !resuming && !model.is_empty() && *model != REASONING_DEFAULT_ID)
     {
         session
             .client
@@ -475,15 +491,21 @@ async fn turn(ctx: &mut TurnCtx, log: &Path, logged: u64) -> Result<()> {
             .await
             .map_err(|error| anyhow!("Antigravity could not select model {model}: {error}"))?;
     }
-    session
+    if !resuming {
+        session
         .client
         .request(
             "session/set_mode",
             json!({"sessionId": native_id, "modeId": if ctx.plan_mode { "plan" } else { "default" }}),
         )
         .await?;
-    let _ = std::fs::remove_file(stop_error_path(&ctx.session_id));
-    let started = crate::store::now_ms();
+        let _ = std::fs::remove_file(stop_error_path(&ctx.session_id));
+    }
+    let started = if resuming {
+        ctx.assistant.created_at
+    } else {
+        crate::store::now_ms()
+    };
     let result = super::acp::prompt_session(ctx, &session).await?;
     if let Some(usage) = turn_usage(&result) {
         let model = turn_model(&ctx.session_id, started);
@@ -491,20 +513,18 @@ async fn turn(ctx: &mut TurnCtx, log: &Path, logged: u64) -> Result<()> {
         ctx.record_native_usage(&sample, model.as_deref(), None, usage, None);
     }
     if take_notices(ctx) {
-        let cause = take_stop_error(&ctx.session_id, &native_id)
+        let cause = read_stop_error(&ctx.session_id, &native_id)
             .or_else(|| logged_network_failure(log, logged));
         let message = match cause {
             Some(cause) => format!("Antigravity stopped with an error: {cause}"),
             None => format!("Antigravity stopped with an error; see {}", log.display()),
         };
         ctx.mark_terminal_failure("antigravity_terminal", message);
-        ctx.flush()?;
         return Ok(());
     }
     if ctx.plan_mode {
         if let Some(card) = plan_card(&ctx.assistant.parts, &ctx.assistant.id) {
             ctx.upsert_part(card);
-            ctx.flush()?;
         }
     }
     Ok(())
@@ -725,7 +745,7 @@ async fn compact(ctx: &CompactCtx, native_id: &str) -> Result<()> {
         }
     }
     compaction_outcome(&result, &answer, || {
-        take_stop_error(&ctx.session_id, native_id)
+        read_stop_error(&ctx.session_id, native_id)
             .or_else(|| logged_network_failure(&log, logged))
             .unwrap_or_else(|| format!("see {}", log.display()))
     })
@@ -1287,7 +1307,7 @@ mod tests {
     }
 
     #[test]
-    fn the_stop_hooks_error_belongs_to_its_own_conversation_once() {
+    fn the_stop_hooks_error_survives_rereading_for_its_own_conversation() {
         let session = format!("chat-{}", uuid::Uuid::new_v4());
         std::fs::create_dir_all(crate::store::data_dir()).unwrap();
         let save = |conversation: &str| {
@@ -1299,14 +1319,18 @@ mod tests {
             .unwrap()
         };
         save("other");
-        assert_eq!(take_stop_error(&session, "mine"), None);
-        assert!(!stop_error_path(&session).exists());
+        assert_eq!(read_stop_error(&session, "mine"), None);
+        assert!(stop_error_path(&session).exists());
         save("mine");
         assert_eq!(
-            take_stop_error(&session, "mine").as_deref(),
+            read_stop_error(&session, "mine").as_deref(),
             Some("RESOURCE_EXHAUSTED: quota")
         );
-        assert_eq!(take_stop_error(&session, "mine"), None);
+        assert_eq!(
+            read_stop_error(&session, "mine").as_deref(),
+            Some("RESOURCE_EXHAUSTED: quota")
+        );
+        std::fs::remove_file(stop_error_path(&session)).unwrap();
     }
 
     #[test]

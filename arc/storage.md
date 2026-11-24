@@ -7,7 +7,7 @@ orx keeps a researcher's work on their own machine. Projects, experiments, runs,
 | Directory | Default location | Holds |
 | --- | --- | --- |
 | config | `~/.config/openresearch` | settings, credentials, the SSH hosts saved in orx, the telemetry outbox, the locks that cover the data directory as a whole |
-| data | `~/.local/share/openresearch` | the store, repositories, worktrees, agent homes, run logs, artifacts, attachments, per-run state |
+| data | `~/.local/share/openresearch` | the store, repositories, worktrees, agent homes, run logs, artifacts, attachments, per-run state, and the keepers of agents and terminals that outlive a server ([restarts](restarts.md)) |
 | cache | `~/.cache/openresearch` | what orx can download again: managed agent copies, price lists, the model feed; also the repositories older versions kept here, which [migrations](#migrations-follow-paths) move out |
 
 Config and data honour their XDG variable; data and cache take an environment override and a setting (`src/config.rs`, `store::data_dir`).
@@ -81,7 +81,7 @@ Leases are rows in the store, each with a way to lapse when its holder dies:
 
 ## Moving the data directory
 
-**A move never destroys the old tree before the new one is proven.** Only the dashboard moves it (`src/local/datadir.rs`), and only while nothing is active: it refuses under an environment override or while any turn, run or project operation runs, then holds the move lock and lease so none starts.
+**A move never destroys the old tree before the new one is proven.** Only the dashboard moves it (`src/local/datadir.rs`), and only while nothing is active: it refuses under an environment override or while any turn, run, project operation or project terminal runs, then holds the move lock and lease so none starts.
 
 The tree is renamed on the same filesystem, or copied and verified. Every absolute path recorded inside it is then rewritten (`src/local/storage.rs`), and the move fails if any reference to the old location survives. Only then does the persisted path swap. A copy keeps the old tree and reports it instead of deleting it, because a detached supervisor or a request that resolved the old path just before the swap may still be writing there.
 

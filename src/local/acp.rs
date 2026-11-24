@@ -4,17 +4,7 @@ use crate::error::{bail, Result};
 
 mod delegated;
 pub mod host;
-
-struct OwnedProcess {
-    child: tokio::process::Child,
-    id: Option<u32>,
-}
-
-impl Drop for OwnedProcess {
-    fn drop(&mut self) {
-        crate::local::chat::kill_shell_group(self.id);
-    }
-}
+pub(crate) mod wire;
 
 fn initialization() -> agent_client_protocol::schema::v1::InitializeRequest {
     use agent_client_protocol::schema::{
@@ -348,7 +338,7 @@ pub async fn test_connection(definition: &Definition) -> Result<serde_json::Valu
             definition.name
         )
     })?;
-    let client = host::spawn(definition, &cwd, &definition.id, None, None, None).await?;
+    let client = host::spawn_here(definition, &cwd, &definition.id).await?;
     let result = serde_json::json!({
         "status": "connected",
         "agentInfo": client.initialized["agentInfo"],
@@ -414,7 +404,7 @@ pub async fn discover_models(definition: &Definition) -> Result<serde_json::Valu
     let directory = Directory::create(&id)?;
     let models = async {
         let cwd = &directory.0;
-        let client = host::spawn(definition, cwd, &id, None, None, None).await?;
+        let client = host::spawn_here(definition, cwd, &id).await?;
         let response = tokio::time::timeout(
             std::time::Duration::from_secs(20),
             client.request(
@@ -462,7 +452,7 @@ fn running_one_shots<R>(update: impl FnOnce(&mut Vec<RunningOneShot>) -> R) -> R
 
 /// Stops the one-shots still answering or cleaning up, and waits for their cleanup, so
 /// that their children and directories do not outlive `orx up`.
-async fn stop_one_shots() {
+pub(crate) async fn stop_one_shots() {
     for (client, finished) in running_one_shots(std::mem::take) {
         if let Some(client) = client.upgrade() {
             client.shutdown().await;
@@ -520,7 +510,7 @@ fn spawn_one_shot(
         };
         let mut reply = Some(sender);
         let spawned = {
-            let spawn = host::spawn(&definition, &directory.0, &id, None, None, None);
+            let spawn = host::spawn_here(&definition, &directory.0, &id);
             tokio::pin!(spawn);
             tokio::select! {
                 spawned = &mut spawn => spawned,
@@ -602,7 +592,7 @@ async fn prompt_once(
     let native_id = session["sessionId"]
         .as_str()
         .ok_or_else(|| anyhow!("{name} did not return a session ID"))?;
-    client.set_native_id(native_id);
+    client.set_native_id(native_id)?;
     let has_model_selection = session["models"].is_object()
         || session["configOptions"]
             .as_array()
@@ -637,6 +627,7 @@ async fn prompt_once(
     let mut answer = String::new();
     let result = loop {
         tokio::select! {
+            biased;
             result = &mut response => break result.map_err(|error| {
                 let exited = error
                     .downcast_ref::<agent_client_protocol::Error>()
@@ -752,7 +743,7 @@ fn one_shot_event(
                 client.cancel_permissions();
             }
         }
-        host::Event::TerminalOutput { .. } => {}
+        host::Event::TerminalOutput { .. } | host::Event::Checkpoint => {}
     }
 }
 

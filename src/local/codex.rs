@@ -15,15 +15,14 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::keep::{self, KeptHandle, KeptStdin, KeptStdout};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::error::{anyhow, Result};
@@ -135,7 +134,7 @@ pub fn classify_line(line: &str) -> Line {
 /// * `Other` — a reply schema we don't speak (e.g.
 ///   `item/permissions/requestApproval`, whose reply is a permission-profile
 ///   object) → a JSON-RPC method-not-found error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ServerReqKind {
     Approval,
     McpApproval,
@@ -160,6 +159,11 @@ pub fn server_req_kind(method: &str) -> ServerReqKind {
 /// One event delivered to the session's in-flight turn.
 #[derive(Debug)]
 pub enum TurnEvent {
+    StartResult(std::result::Result<Value, JsonRpcError>),
+    At {
+        offset: u64,
+        event: Box<TurnEvent>,
+    },
     Notification {
         method: String,
         params: Value,
@@ -177,20 +181,12 @@ pub enum TurnEvent {
 
 /// A live JSON-RPC connection to one session's `codex app-server` child.
 pub struct CodexClient {
-    child: Mutex<Child>,
-    /// npm installs run a node wrapper whose native child survives a SIGKILL
-    /// to the wrapper alone, so teardown must signal the whole group.
-    #[cfg(unix)]
-    process_group_id: u32,
-    /// Windows has no process groups: the npm `codex.cmd` chain's native
-    /// descendants are confined to this Job Object so `terminate()` can kill
-    /// the tree (OR-409). `None` if job enrollment failed at spawn.
-    #[cfg(windows)]
-    job: Option<std::os::windows::io::OwnedHandle>,
-    /// Once set, the group id may be reused — never signal it again.
+    child: KeptHandle,
     terminated: AtomicBool,
     /// Closes only to stop the child: stdin EOF ends the app-server.
-    stdin: Mutex<Option<ChildStdin>>,
+    stdin: Mutex<Option<KeptStdin>>,
+    durable: std::sync::Mutex<ClientState>,
+    reader_ready: tokio::sync::Notify,
     next_id: AtomicI64,
     /// Our outstanding requests. Sync mutex: touched from the reader task and
     /// from `request()`, held only for map ops, never across an await.
@@ -235,6 +231,34 @@ pub struct CodexClient {
     last_active: std::sync::Mutex<Instant>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct OutboundRequest {
+    method: String,
+    response_at: Option<u64>,
+}
+
+#[derive(Default, Clone, Serialize, Deserialize)]
+struct ClientState {
+    legacy: bool,
+    profile: Option<String>,
+    bin: PathBuf,
+    alphaxiv_signed_in: bool,
+    #[serde(default)]
+    skills: Option<u64>,
+    initialize: Option<Value>,
+    offset: u64,
+    models: Vec<((String, String), String)>,
+    collab_mode: Option<String>,
+    next_id: i64,
+    outbound: HashMap<i64, OutboundRequest>,
+    inbound: HashMap<String, (String, Value)>,
+    answered: std::collections::HashSet<String>,
+    outbox: HashMap<String, Value>,
+    thread: Option<String>,
+    model: Option<String>,
+    active_turn: Option<String>,
+}
+
 impl CodexClient {
     /// Send a client→server request; `Ok(Err(msg))` is a *server-reported*
     /// JSON-RPC error, `Err(..)` a transport failure (child gone / timeout).
@@ -257,7 +281,26 @@ impl CodexClient {
         params: Value,
         timeout: Duration,
     ) -> Result<std::result::Result<Value, JsonRpcError>> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let id = self
+            .next_id
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .map_err(|_| anyhow!("Codex request id space is exhausted"))?;
+        {
+            let mut state = self.durable.lock().unwrap();
+            state.next_id = state.next_id.max(id + 1);
+            state.outbound.insert(
+                id,
+                OutboundRequest {
+                    method: method.into(),
+                    response_at: None,
+                },
+            );
+            if method == "turn/start" {
+                state.active_turn = None;
+                *self.active_turn.lock().unwrap() = None;
+            }
+            self.save_owner(&state)?;
+        }
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(id, tx);
         let _pending = PendingRequest { client: self, id };
@@ -358,8 +401,8 @@ impl CodexClient {
         }
     }
 
-    /// Let the child exit on its own, then kill its whole process group and reap
-    /// it; an orphaned native app-server would keep the thread's writer lock.
+    /// Let the child exit on its own, then stop the keeper's process tree; an orphaned
+    /// native app-server would keep the thread's writer lock.
     async fn terminate(self: &Arc<Self>) {
         self.end(false).await;
     }
@@ -375,56 +418,31 @@ impl CodexClient {
     }
 
     async fn end_detached(&self, interrupt: bool) {
-        // Locked first so a racing caller returns only after the reap.
-        let mut child = self.child.lock().await;
-        if self.terminated.swap(true, Ordering::AcqRel) {
+        if keep::handing_off() || self.terminated.swap(true, Ordering::AcqRel) {
             return;
         }
-        #[cfg(unix)]
-        let group = Some(self.process_group_id);
-        #[cfg(not(unix))]
-        let group = None;
         // A writer blocked on a wedged child holds stdin; that child gets SIGTERM instead.
         let input_closed = self.stdin.try_lock().map(|mut stdin| stdin.take()).is_ok();
-        if input_closed && !interrupt {
-            crate::process::let_agent_exit(&mut child, group).await;
-        } else {
-            crate::process::ask_agent_to_stop(&mut child, group).await;
-        }
-        // Also reaps what the app-server left behind: the npm wrapper's native child, tool shells.
-        #[cfg(unix)]
-        if let Ok(process_group_id) = i32::try_from(self.process_group_id) {
-            // SAFETY: spawn assigns the child its own process group before this id is captured.
-            unsafe {
-                libc::kill(-process_group_id, libc::SIGKILL);
-            }
-        }
-        #[cfg(windows)]
-        match self.job.as_ref() {
-            // Kills the wrapper and every descendant it spawned, at once,
-            // then waits them out: the replacement's thread/resume must not
-            // race a still-exiting writer lock holder.
-            Some(job) => {
-                windows_job::terminate(job);
-                windows_job::drain(job).await;
-            }
-            // Job enrollment failed at spawn — best-effort tree kill.
-            None => {
-                if let Some(pid) = child.id() {
-                    windows_job::kill_tree(pid);
-                }
-            }
-        }
-        let _ = child.start_kill();
-        if tokio::time::timeout(TERMINATION_TIMEOUT, child.wait())
+        // Also ends what the app-server left behind: the npm wrapper's native child, tool shells.
+        if self
+            .child
+            .end_agent(input_closed && !interrupt, TERMINATION_TIMEOUT)
             .await
-            .is_err()
+            .is_none()
+            && !keep::handing_off()
         {
             eprintln!("orx up: timed out reaping codex app-server");
         }
     }
 
     async fn write_line(&self, msg: &Value) -> Result<()> {
+        if msg.get("method").is_none() {
+            if let Some(id) = msg.get("id") {
+                let mut state = self.durable.lock().unwrap();
+                state.outbox.insert(id.to_string(), msg.clone());
+                self.save_owner(&state)?;
+            }
+        }
         let mut stdin = self.stdin.lock().await;
         let stdin = stdin
             .as_mut()
@@ -440,10 +458,80 @@ impl CodexClient {
         Ok(())
     }
 
+    fn save_owner(&self, state: &ClientState) -> Result<()> {
+        let mut state = state.clone();
+        state.models = self
+            .turn_models
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        self.child.set_owner(
+            &keep::Owner::Agent {
+                harness: "codex".into(),
+                session_id: self.session_id.clone(),
+                state: serde_json::to_value(&state)?,
+            }
+            .to_value(),
+        )
+    }
+
+    pub fn checkpoint_offset(&self) -> u64 {
+        self.durable.lock().unwrap().offset
+    }
+
+    pub fn saved_through(&self, offset: u64) -> Result<()> {
+        let mut state = self.durable.lock().unwrap();
+        state.offset = state.offset.max(offset);
+        state
+            .outbound
+            .retain(|_, request| request.response_at.is_none_or(|end| end > offset));
+        self.save_owner(&state)
+    }
+
+    pub fn preparing_turn(&self) -> Result<()> {
+        *self.active_turn.lock().unwrap() = None;
+        let mut state = self.durable.lock().unwrap();
+        state.active_turn = None;
+        self.save_owner(&state)
+    }
+
+    pub fn awaiting_turn_start(&self) -> bool {
+        self.durable
+            .lock()
+            .unwrap()
+            .outbound
+            .values()
+            .any(|request| request.method == "turn/start")
+    }
+
+    pub fn active_turn(&self) -> Option<String> {
+        self.active_turn.lock().unwrap().clone()
+    }
+
+    pub fn keeper(&self) -> &KeptHandle {
+        &self.child
+    }
+
     /// Register the session's turn event sink. The returned guard deregisters
     /// on drop (including task abort mid-turn).
     pub fn register_turn(self: &Arc<Self>, tx: mpsc::UnboundedSender<TurnEvent>) -> TurnRoute {
         *self.turn.lock().unwrap() = Some(tx.clone());
+        let state = self.durable.lock().unwrap();
+        for (id, (method, params)) in &state.inbound {
+            if state.outbox.contains_key(id) {
+                continue;
+            }
+            if let Ok(id) = serde_json::from_str(id) {
+                let _ = tx.send(TurnEvent::Request {
+                    id,
+                    method: method.clone(),
+                    params: params.clone(),
+                });
+            }
+        }
+        self.reader_ready.notify_one();
         TurnRoute {
             client: self.clone(),
             tx,
@@ -456,9 +544,7 @@ impl CodexClient {
 
     /// A background terminal outlives its turn, and a skills respawn must not end it.
     async fn running_a_command(&self) -> bool {
-        let Some(pid) = self.child.lock().await.id() else {
-            return false;
-        };
+        let pid = self.child.pid();
         tokio::task::spawn_blocking(move || crate::local::chat::runs_a_detached_command(pid))
             .await
             .unwrap_or(true)
@@ -482,6 +568,11 @@ impl CodexClient {
 
     pub fn set_resumed_thread(&self, thread_id: &str) {
         *self.resumed_thread.lock().unwrap() = Some(thread_id.to_string());
+        let mut state = self.durable.lock().unwrap();
+        state.thread = Some(thread_id.to_string());
+        if let Err(error) = self.save_owner(&state) {
+            eprintln!("codex owner state: {error:#}");
+        }
     }
 
     /// The effective model codex reported for this child's thread, if known.
@@ -495,6 +586,11 @@ impl CodexClient {
     pub fn set_thread_model(&self, model: Option<&str>) {
         if let Some(model) = model.filter(|m| !m.is_empty()) {
             *self.thread_model.lock().unwrap() = Some(model.to_string());
+            let mut state = self.durable.lock().unwrap();
+            state.model = Some(model.to_string());
+            if let Err(error) = self.save_owner(&state) {
+                eprintln!("codex owner state: {error:#}");
+            }
         }
     }
 
@@ -506,6 +602,11 @@ impl CodexClient {
 
     pub fn set_last_collab_mode(&self, mode: &'static str) {
         *self.last_collab_mode.lock().unwrap() = Some(mode);
+        let mut state = self.durable.lock().unwrap();
+        state.collab_mode = Some(mode.into());
+        if let Err(error) = self.save_owner(&state) {
+            eprintln!("codex collaboration mode: {error:#}");
+        }
     }
 
     pub fn native_store(&self) -> NativeStore {
@@ -522,6 +623,11 @@ impl CodexClient {
 
     pub fn set_active_turn(&self, turn_id: &str) {
         *self.active_turn.lock().unwrap() = Some(turn_id.to_string());
+        let mut state = self.durable.lock().unwrap();
+        state.active_turn = Some(turn_id.to_string());
+        if let Err(error) = self.save_owner(&state) {
+            eprintln!("codex owner state: {error:#}");
+        }
     }
 
     pub async fn read_turn_items(&self, thread_id: &str, turn_id: &str) -> Option<Vec<Value>> {
@@ -606,19 +712,94 @@ impl Drop for TurnRoute {
 
 /// Reader task: pump child stdout, route each line. On EOF every pending
 /// request fails and the live turn (if any) gets [`TurnEvent::Closed`].
-async fn read_loop(client: Arc<CodexClient>, stdout: tokio::process::ChildStdout) {
-    let mut lines = BufReader::new(stdout).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
+async fn read_loop(client: Arc<CodexClient>, stdout: KeptStdout) {
+    read_loop_at(client, stdout, None).await;
+}
+
+/// Reads from `resume_at`, or from wherever this attachment's output starts.
+async fn read_loop_at(client: Arc<CodexClient>, stdout: KeptStdout, resume_at: Option<u64>) {
+    let mut lines = stdout.lines();
+    if let Some(Err(error)) = resume_at.map(|offset| lines.skip_to(offset)) {
+        eprintln!("codex resume offset: {error}");
+        client.terminate().await;
+        return;
+    }
+    let mut deferred_usage: Vec<(u64, String, Value)> = Vec::new();
+    loop {
+        deferred_usage.retain(|(offset, _, _)| *offset > client.checkpoint_offset());
+        let next = tokio::select! {
+            biased;
+            line = lines.next_line() => line,
+            _ = client.child.wait() => break,
+        };
+        let (line, offset) = match next {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            Err(error) => {
+                eprintln!("codex app-server stdout: {error}");
+                break;
+            }
+        };
         match classify_line(&line) {
             Line::Response { id, result } => {
                 client.touch();
+                let starting;
+                {
+                    let mut state = client.durable.lock().unwrap();
+                    starting = state.outbound.get_mut(&id).is_some_and(|request| {
+                        request.response_at = Some(offset);
+                        request.method == "turn/start"
+                    });
+                    if starting {
+                        if let Ok(value) = &result {
+                            state.active_turn = value
+                                .pointer("/turn/id")
+                                .and_then(Value::as_str)
+                                .map(str::to_string);
+                            *client.active_turn.lock().unwrap() = state.active_turn.clone();
+                        }
+                    }
+                    if let Err(error) = client.save_owner(&state) {
+                        eprintln!("codex request state: {error:#}");
+                        break;
+                    }
+                }
                 if let Some(tx) = client.pending.lock().unwrap().remove(&id) {
                     let _ = tx.send(result);
+                } else if starting {
+                    if let Some(tx) = client.turn.lock().unwrap().as_ref() {
+                        let _ = tx.send(TurnEvent::At {
+                            offset,
+                            event: Box::new(TurnEvent::StartResult(result)),
+                        });
+                    }
                 }
             }
             Line::Request { id, method, params } => {
                 client.touch();
                 let kind = server_req_kind(&method);
+                if client
+                    .durable
+                    .lock()
+                    .unwrap()
+                    .outbox
+                    .contains_key(&id.to_string())
+                {
+                    continue;
+                }
+                {
+                    let mut state = client.durable.lock().unwrap();
+                    if state.answered.contains(&id.to_string()) {
+                        continue;
+                    }
+                    state
+                        .inbound
+                        .insert(id.to_string(), (method.clone(), params.clone()));
+                    if let Err(error) = client.save_owner(&state) {
+                        eprintln!("codex inbound request state: {error:#}");
+                        break;
+                    }
+                }
                 client
                     .unanswered
                     .lock()
@@ -627,15 +808,22 @@ async fn read_loop(client: Arc<CodexClient>, stdout: tokio::process::ChildStdout
                 let routed = {
                     let turn = client.turn.lock().unwrap();
                     turn.as_ref().is_some_and(|tx| {
-                        tx.send(TurnEvent::Request {
-                            id: id.clone(),
-                            method,
-                            params,
+                        tx.send(TurnEvent::At {
+                            offset,
+                            event: Box::new(TurnEvent::Request {
+                                id: id.clone(),
+                                method,
+                                params,
+                            }),
                         })
                         .is_ok()
                     })
                 };
                 if !routed {
+                    // The next server replays it unanswered from the keeper.
+                    if keep::handing_off() {
+                        continue;
+                    }
                     // No turn is listening (raced an abort). Never leave the
                     // server hanging on a request nobody will answer — each
                     // kind gets the reply shape its method can parse.
@@ -662,6 +850,14 @@ async fn read_loop(client: Arc<CodexClient>, stdout: tokio::process::ChildStdout
                 // pending set so the stale-answer guard stays truthful.
                 if method == "serverRequest/resolved" {
                     if let Some(request_id) = params.get("requestId") {
+                        let mut state = client.durable.lock().unwrap();
+                        state.inbound.remove(&request_id.to_string());
+                        state.outbox.remove(&request_id.to_string());
+                        state.answered.insert(request_id.to_string());
+                        if let Err(error) = client.save_owner(&state) {
+                            eprintln!("codex resolved request state: {error:#}");
+                            break;
+                        }
                         client
                             .unanswered
                             .lock()
@@ -699,30 +895,69 @@ async fn read_loop(client: Arc<CodexClient>, stdout: tokio::process::ChildStdout
                             .unwrap_or("-")
                     );
                 }
+                if turn.is_some()
+                    && matches!(
+                        method.as_str(),
+                        "thread/tokenUsage/updated" | "turn/completed"
+                    )
+                {
+                    deferred_usage.push((offset, method.clone(), params.clone()));
+                }
                 let event = TurnEvent::Notification { method, params };
                 let unsent = match turn.as_ref() {
-                    Some(tx) => tx.send(event).err().map(|error| error.0),
+                    Some(tx) => tx
+                        .send(TurnEvent::At {
+                            offset,
+                            event: Box::new(event),
+                        })
+                        .err()
+                        .map(|error| error.0),
                     None => Some(event),
                 };
                 drop(turn);
                 if let Some(TurnEvent::Notification { method, params }) = unsent {
-                    crate::local::harness::codex::record_unowned(
-                        &client.session_id,
-                        &client.turn_models,
-                        &method,
-                        &params,
-                    );
+                    if keep::handing_off() {
+                        continue;
+                    }
+                    match crate::store::Store::open().and_then(|store| {
+                        for (_, method, params) in &deferred_usage {
+                            crate::local::harness::codex::record_unowned_in(
+                                &store,
+                                &client.session_id,
+                                &client.turn_models,
+                                method,
+                                params,
+                            )?;
+                        }
+                        crate::local::harness::codex::record_unowned_in(
+                            &store,
+                            &client.session_id,
+                            &client.turn_models,
+                            &method,
+                            &params,
+                        )
+                    }) {
+                        Ok(()) => {
+                            deferred_usage.clear();
+                            if let Err(error) = client.saved_through(offset) {
+                                eprintln!("codex idle offset: {error:#}");
+                                break;
+                            }
+                            client.child.ack(offset);
+                        }
+                        Err(error) => {
+                            eprintln!("codex idle output: {error:#}");
+                            break;
+                        }
+                    }
                 }
             }
             Line::Junk => {}
         }
     }
-    // EOF or read error: the connection is unusable either way. Kill the child
-    // if it is somehow still alive (a half-dead child left in the registry
-    // would eat a request timeout per turn until restart), then drop pending
-    // senders so callers classify this as an ambiguous transport close rather
-    // than a structured server rejection that would be safe to replay.
-    client.terminate().await;
+    if client.child.try_wait().is_none() {
+        client.terminate().await;
+    }
     client.pending.lock().unwrap().clear();
     client.unanswered.lock().unwrap().clear();
     if let Some(tx) = client.turn.lock().unwrap().as_ref() {
@@ -761,7 +996,7 @@ pub(crate) fn alphaxiv_config(servers: &Value) -> Result<Value> {
 /// Spawn `codex app-server` (no handshake yet — see `CodexHost::ensure`, which
 /// registers the client *before* the handshake so every kill path can reach
 /// the child even if the spawning turn task is aborted mid-handshake).
-fn spawn_client(
+async fn spawn_client(
     session_id: &str,
     up_port: Option<u16>,
     native_store: NativeStore,
@@ -777,77 +1012,89 @@ fn spawn_client(
     {
         cmd.args(["-c", &override_arg]);
     }
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::from(crate::local::chat::harness_log("codex")?))
-        .kill_on_drop(true);
+
     crate::local::chat::prepare_env(&mut cmd);
     cmd.env("CODEX_HOME", codex_home);
     // Stamp the launching session (one app-server child per orx session) so a
     // run the agent starts via `orx exp run` is tagged with it and can be
     // explicitly subscribed to. After prepare_env so it isn't shadowed.
     crate::local::chat::set_chat_session_env(&mut cmd, session_id, "codex", up_port)?;
-    // Own process group: a terminal SIGINT reaches orx up alone, which then
-    // tears the child's group down deliberately (terminate()).
-    #[cfg(unix)]
-    cmd.process_group(0);
-    // Windows has no process groups: spawn suspended so the npm wrapper's
-    // native descendants can be confined to a Job Object before any of them
-    // start (OR-409 — mirrors `jobs::localbox::windows`).
-    #[cfg(windows)]
-    cmd.creation_flags(windows_job::SPAWN_FLAGS);
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| anyhow!("Could not spawn {} app-server: {}", bin.display(), e))?;
-    #[cfg(unix)]
-    let process_group_id = child
-        .id()
-        .ok_or_else(|| anyhow!("codex app-server: spawned child has no process id"))?;
-    #[cfg(windows)]
-    let job = {
-        let pid = child
-            .id()
-            .ok_or_else(|| anyhow!("codex app-server: spawned child has no process id"))?;
-        windows_job::enroll(&mut child, pid)
-            .map_err(|e| anyhow!("Could not spawn {} app-server: {}", bin.display(), e))?
-    };
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow!("codex app-server: no stdout"))?;
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow!("codex app-server: no stdin"))?;
-
-    let client = Arc::new(CodexClient {
-        child: Mutex::new(child),
-        #[cfg(unix)]
-        process_group_id,
-        #[cfg(windows)]
-        job,
-        terminated: AtomicBool::new(false),
-        stdin: Mutex::new(Some(stdin)),
-        next_id: AtomicI64::new(1),
-        pending: std::sync::Mutex::new(HashMap::new()),
-        turn: std::sync::Mutex::new(None),
-        unanswered: std::sync::Mutex::new(HashMap::new()),
-        active_turn: std::sync::Mutex::new(None),
-        resumed_thread: std::sync::Mutex::new(None),
-        thread_model: std::sync::Mutex::new(None),
-        last_collab_mode: std::sync::Mutex::new(None),
-        native_store,
-        profile,
+    let state = ClientState {
+        legacy: native_store == NativeStore::Legacy,
+        profile: profile.clone(),
+        bin: bin.clone(),
         alphaxiv_signed_in: crate::alphaxiv::signed_in(),
         skills,
-        bin,
-        session_id: session_id.to_string(),
-        turn_models: std::sync::Mutex::new(HashMap::new()),
-        last_active: std::sync::Mutex::new(Instant::now()),
-    });
+        next_id: 1,
+        ..Default::default()
+    };
+    let mut child = keep::spawn(keep::Keep {
+        command: cmd.as_std(),
+        io: keep::Io::Pipes {
+            stderr: Some(crate::store::data_dir().join("agent-codex.log")),
+        },
+        retain: keep::LOSSLESS,
+        owner: keep::Owner::Agent {
+            harness: "codex".into(),
+            session_id: session_id.into(),
+            state: serde_json::to_value(&state)?,
+        }
+        .to_value(),
+    })
+    .await?;
+    let stdout = child
+        .take_stdout()
+        .ok_or_else(|| anyhow!("Codex keeper has no stdout"))?;
+    let client = client_from_kept(child, session_id, state)?;
     tokio::spawn(read_loop(client.clone(), stdout));
     Ok(client)
+}
+
+fn client_from_kept(
+    mut child: keep::Kept,
+    session_id: &str,
+    state: ClientState,
+) -> Result<Arc<CodexClient>> {
+    let stdin = child
+        .take_stdin()
+        .ok_or_else(|| anyhow!("Codex keeper has no stdin"))?;
+    let unanswered = state
+        .inbound
+        .iter()
+        .filter(|(id, _)| !state.outbox.contains_key(*id))
+        .map(|(id, (method, _))| (id.clone(), server_req_kind(method)))
+        .collect();
+    Ok(Arc::new(CodexClient {
+        child: child.handle(),
+        stdin: Mutex::new(Some(stdin)),
+        next_id: AtomicI64::new(state.next_id.max(1)),
+        pending: std::sync::Mutex::new(HashMap::new()),
+        turn: std::sync::Mutex::new(None),
+        unanswered: std::sync::Mutex::new(unanswered),
+        active_turn: std::sync::Mutex::new(state.active_turn.clone()),
+        resumed_thread: std::sync::Mutex::new(state.thread.clone()),
+        thread_model: std::sync::Mutex::new(state.model.clone()),
+        last_collab_mode: std::sync::Mutex::new(match state.collab_mode.as_deref() {
+            Some("plan") => Some("plan"),
+            Some("default") => Some("default"),
+            _ => None,
+        }),
+        native_store: if state.legacy {
+            NativeStore::Legacy
+        } else {
+            NativeStore::Isolated
+        },
+        profile: state.profile.clone(),
+        alphaxiv_signed_in: state.alphaxiv_signed_in,
+        skills: state.skills,
+        bin: state.bin.clone(),
+        session_id: session_id.into(),
+        turn_models: std::sync::Mutex::new(state.models.iter().cloned().collect()),
+        last_active: std::sync::Mutex::new(Instant::now()),
+        durable: std::sync::Mutex::new(state),
+        reader_ready: tokio::sync::Notify::new(),
+        terminated: AtomicBool::new(false),
+    }))
 }
 
 /// The `initialize` → `initialized` handshake. Split from `spawn_client` so
@@ -869,8 +1116,8 @@ async fn handshake(client: &CodexClient) -> Result<()> {
             "capabilities": { "experimentalApi": true },
         }),
     );
-    match tokio::time::timeout(HANDSHAKE_TIMEOUT, init).await {
-        Ok(Ok(_)) => {}
+    let result = match tokio::time::timeout(HANDSHAKE_TIMEOUT, init).await {
+        Ok(Ok(result)) => result,
         Ok(Err(e)) => return Err(e),
         Err(_) => {
             return Err(anyhow!(
@@ -879,8 +1126,13 @@ async fn handshake(client: &CodexClient) -> Result<()> {
                 crate::store::data_dir().join("agent-codex.log").display()
             ));
         }
-    }
-    client.write_line(&json!({ "method": "initialized" })).await
+    };
+    client
+        .write_line(&json!({ "method": "initialized" }))
+        .await?;
+    let mut state = client.durable.lock().unwrap();
+    state.initialize = Some(result);
+    client.save_owner(&state)
 }
 
 /// The `orx up` codex host: one `codex app-server` child per chat session,
@@ -906,6 +1158,49 @@ impl CodexHost {
             inner: Mutex::new(HashMap::new()),
             up_port: std::sync::OnceLock::new(),
         }
+    }
+
+    pub async fn adopt(&self, adoption: crate::local::harness::Adoption) -> Result<()> {
+        let _spawning = self.spawn_lock.lock().await;
+        let state: ClientState = serde_json::from_value(adoption.state)?;
+        if state.initialize.is_none() {
+            return Err(anyhow!(
+                "Codex keeper has no completed initialize handshake"
+            ));
+        }
+        if self.inner.lock().await.contains_key(&adoption.session_id) {
+            return Err(anyhow!(
+                "Codex session {} already has an app-server",
+                adoption.session_id
+            ));
+        }
+        let mut child = keep::attach(&adoption.keep_id).await?;
+        let stdout = child
+            .take_stdout()
+            .ok_or_else(|| anyhow!("Codex keeper has no stdout"))?;
+        let client = client_from_kept(child, &adoption.session_id, state)?;
+        let answers: Vec<_> = client
+            .durable
+            .lock()
+            .unwrap()
+            .outbox
+            .values()
+            .cloned()
+            .collect();
+        for answer in answers {
+            client.write_line(&answer).await?;
+        }
+        self.inner
+            .lock()
+            .await
+            .insert(adoption.session_id, client.clone());
+        tokio::spawn(async move {
+            if adoption.resume_at.is_some() {
+                client.reader_ready.notified().await;
+            }
+            read_loop_at(client, stdout, adoption.resume_at).await;
+        });
+        Ok(())
     }
 
     pub fn set_up_port(&self, port: u16) {
@@ -951,7 +1246,7 @@ impl CodexHost {
             async move {
                 let bin = find_codex_required()
                     .map_err(|e| SetupFailure::tag("codex_setup_binary", e))?;
-                Ok(move || {
+                Ok(move || async move {
                     spawn_client(
                         &session,
                         host.up_port.get().copied(),
@@ -961,13 +1256,14 @@ impl CodexHost {
                         codex_home,
                         skills,
                     )
+                    .await
                 })
             },
         )
         .await
     }
 
-    async fn ensure_with_spawn<F>(
+    async fn ensure_with_spawn<F, Fut>(
         self: &Arc<Self>,
         session_id: &str,
         native_store: NativeStore,
@@ -977,7 +1273,8 @@ impl CodexHost {
         prepare: impl std::future::Future<Output = Result<F>>,
     ) -> Result<Arc<CodexClient>>
     where
-        F: FnOnce() -> Result<Arc<CodexClient>> + Send + 'static,
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<Arc<CodexClient>>> + Send,
     {
         {
             let _spawning = self.spawn_lock.lock().await;
@@ -1025,9 +1322,7 @@ impl CodexHost {
             if ready_tx.is_closed() {
                 return;
             }
-            // The process launch itself has no await; a detached owner always
-            // registers or reaps the child, even if the caller is cancelled.
-            let client = match spawn() {
+            let client = match spawn().await {
                 Ok(client) => client,
                 Err(error) => {
                     let _ = ready_tx.send(Err(SetupFailure::tag("codex_setup_spawn", error)));
@@ -1080,7 +1375,7 @@ impl CodexHost {
             && client.alphaxiv_signed_in == crate::alphaxiv::signed_in()
             && (!crate::local::user_skills::changed(client.skills, skills)
                 || client.running_a_command().await)
-            && matches!(client.child.lock().await.try_wait(), Ok(None))
+            && client.child.try_wait().is_none()
         {
             client.touch();
             Some(client)
@@ -1101,11 +1396,20 @@ impl CodexHost {
         client.terminate().await;
     }
 
+    pub async fn resume_client(&self, session_id: &str, keep_id: &str) -> Option<Arc<CodexClient>> {
+        self.inner
+            .lock()
+            .await
+            .get(session_id)
+            .filter(|client| client.child.id() == keep_id)
+            .cloned()
+    }
+
     /// The session's live client, if any (for inline replies / interrupts).
     pub async fn client_for(&self, session_id: &str) -> Option<Arc<CodexClient>> {
         let mut guard = self.inner.lock().await;
         let client = guard.get(session_id)?;
-        if matches!(client.child.lock().await.try_wait(), Ok(None)) {
+        if client.child.try_wait().is_none() {
             client.touch();
             return Some(client.clone());
         }
@@ -1124,9 +1428,7 @@ impl CodexHost {
         let _spawning = self.spawn_lock.lock().await;
         let clients: Vec<_> = self.inner.lock().await.values().cloned().collect();
         for client in clients {
-            if client.profile.as_deref() == profile
-                && matches!(client.child.lock().await.try_wait(), Ok(None))
-            {
+            if client.profile.as_deref() == profile && client.child.try_wait().is_none() {
                 return Some(client);
             }
         }
@@ -1193,7 +1495,7 @@ impl CodexHost {
             if client.terminated.load(Ordering::Acquire) {
                 continue;
             }
-            let exited = !matches!(client.child.lock().await.try_wait(), Ok(None));
+            let exited = !client.child.try_wait().is_none();
             let Some(idle_since) = client.idle_since() else {
                 continue;
             };
@@ -1263,193 +1565,14 @@ impl CodexHost {
         }
     }
 
-    /// Kill and reap every child's process group. The shutdown already ended their
-    /// turns without telling them.
+    /// Stop every keeper unless handing children to the next server. The shutdown already
+    /// ended their turns without telling them.
     pub async fn shutdown(&self) {
+        if keep::handing_off() {
+            return;
+        }
         let clients = self.inner.lock().await.drain().collect::<Vec<_>>();
         futures::future::join_all(clients.iter().map(|(_, client)| client.end(true))).await;
-    }
-}
-
-/// Windows process-tree teardown (OR-409). npm's `codex` is a `cmd.exe` shim
-/// spawning `node.exe`/`codex.exe`; a wrapper-only kill orphans the native
-/// app-server, which keeps the thread's writer lock and breaks the
-/// replacement's `thread/resume`. The Job Object (`KILL_ON_JOB_CLOSE`)
-/// confines the whole tree: `TerminateJobObject` kills every descendant, and
-/// orx's own death can't orphan them either. Mirrors
-/// `crate::jobs::localbox::windows`.
-#[cfg(windows)]
-mod windows_job {
-    use std::io;
-    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-    use std::time::Duration;
-
-    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
-    };
-    use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
-        JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
-        TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    };
-    use windows_sys::Win32::System::Threading::{
-        OpenThread, ResumeThread, CREATE_NO_WINDOW, CREATE_SUSPENDED, THREAD_SUSPEND_RESUME,
-    };
-
-    use crate::error::{anyhow, Result};
-
-    use super::Child;
-
-    /// Suspended until the child is inside the job — a runnable npm wrapper
-    /// could spawn its native descendants before enrollment; no console
-    /// window, matching the localbox spawns.
-    pub(super) const SPAWN_FLAGS: u32 = CREATE_SUSPENDED | CREATE_NO_WINDOW;
-
-    fn own(handle: HANDLE) -> io::Result<OwnedHandle> {
-        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: callers pass newly opened handles, transferred exactly once.
-        Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
-    }
-
-    /// Confine a suspended `child`'s process tree to a fresh Job Object, then
-    /// resume it. Job-setup failure degrades to `Ok(None)` — `terminate()`
-    /// falls back to `kill_tree`; a resume failure is fatal (`Err`) because a
-    /// suspended child can never answer a request.
-    pub(super) fn enroll(child: &mut Child, pid: u32) -> Result<Option<OwnedHandle>> {
-        let assigned = (|| -> Result<OwnedHandle> {
-            // Anonymous job: the handle lives only on the client.
-            let job = own(unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) })?;
-            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            // SAFETY: limits is live and correctly sized for the class requested.
-            if unsafe {
-                SetInformationJobObject(
-                    job.as_raw_handle(),
-                    JobObjectExtendedLimitInformation,
-                    std::ptr::from_ref(&limits).cast(),
-                    std::mem::size_of_val(&limits) as u32,
-                )
-            } == 0
-            {
-                return Err(io::Error::last_os_error().into());
-            }
-            let handle = child
-                .raw_handle()
-                .ok_or_else(|| anyhow!("codex app-server: spawned child has no handle"))?;
-            // SAFETY: both handles are live; the suspended child cannot have
-            // spawned descendants outside the job yet.
-            if unsafe { AssignProcessToJobObject(job.as_raw_handle(), handle) } == 0 {
-                return Err(io::Error::last_os_error().into());
-            }
-            Ok(job)
-        })();
-        if let Err(error) = resume(pid) {
-            // A suspended child would hang every request — kill it.
-            let _ = child.start_kill();
-            return Err(error.context("codex app-server: could not resume spawned child"));
-        }
-        match assigned {
-            Ok(job) => Ok(Some(job)),
-            Err(error) => {
-                eprintln!("orx up: codex app-server job setup failed: {error}");
-                Ok(None)
-            }
-        }
-    }
-
-    /// Resume the suspended spawn's threads (the toolhelp enumeration from
-    /// `jobs::localbox::windows::resume`).
-    fn resume(pid: u32) -> Result<()> {
-        // SAFETY: the snapshot owns no process resources and is closed by OwnedHandle.
-        let snapshot = own(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) })?;
-        let mut entry = THREADENTRY32 {
-            dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
-            ..Default::default()
-        };
-        // SAFETY: entry has the required size and remains writable throughout enumeration.
-        let mut found = unsafe { Thread32First(snapshot.as_raw_handle(), &mut entry) };
-        let mut resumed = false;
-        while found != 0 {
-            if entry.th32OwnerProcessID == pid {
-                // SAFETY: this is the primary thread of our still-suspended child.
-                let thread =
-                    own(unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) })?;
-                // SAFETY: the thread handle has suspend/resume access.
-                let previous = unsafe { ResumeThread(thread.as_raw_handle()) };
-                if previous == u32::MAX {
-                    return Err(io::Error::last_os_error().into());
-                }
-                resumed |= previous == 1;
-            }
-            // SAFETY: same initialized entry and live snapshot as above.
-            found = unsafe { Thread32Next(snapshot.as_raw_handle(), &mut entry) };
-        }
-        if resumed {
-            Ok(())
-        } else {
-            Err(anyhow!("codex app-server: no suspended thread to resume"))
-        }
-    }
-
-    /// Kill every process the job confines — npm wrapper and all descendants.
-    pub(super) fn terminate(job: &OwnedHandle) {
-        // SAFETY: our job handle; terminating an already-empty job is a no-op.
-        if unsafe { TerminateJobObject(job.as_raw_handle(), 1) } == 0 {
-            eprintln!(
-                "orx up: codex app-server job terminate failed: {}",
-                io::Error::last_os_error()
-            );
-        }
-    }
-
-    /// Wait until the job's tree is empty — the wrapper's exit does not mean
-    /// its descendants finished exiting, and the native app-server must be
-    /// fully gone (writer lock released) before a replacement resumes.
-    pub(super) async fn drain(job: &OwnedHandle) {
-        for _ in 0..250 {
-            if active_processes(job) == 0 {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        eprintln!("orx up: timed out draining codex app-server's process tree");
-    }
-
-    /// Fallback for an unenrolled child: `taskkill /T` the tree. `/T` fails if
-    /// any descendant already exited, so the result is not checked — the
-    /// caller still reaps the wrapper.
-    pub(super) fn kill_tree(pid: u32) {
-        use std::os::windows::process::CommandExt;
-        let _ = crate::process::command("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    }
-
-    /// Processes still confined by the job — `drain` waits for this to reach
-    /// zero, and the tests assert teardown empties it.
-    pub(super) fn active_processes(job: &OwnedHandle) -> u32 {
-        let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
-        // SAFETY: info is writable and its size matches the class requested.
-        if unsafe {
-            QueryInformationJobObject(
-                job.as_raw_handle(),
-                JobObjectBasicAccountingInformation,
-                std::ptr::from_mut(&mut info).cast(),
-                std::mem::size_of_val(&info) as u32,
-                std::ptr::null_mut(),
-            )
-        } == 0
-        {
-            return u32::MAX;
-        }
-        info.ActiveProcesses
     }
 }
 
@@ -1457,41 +1580,10 @@ mod windows_job {
 pub(crate) mod tests {
     use super::*;
 
-    #[cfg(windows)]
-    use std::os::windows::io::OwnedHandle;
-
-    #[cfg(windows)]
-    fn windows_test_client(mut child: Child, job: Option<OwnedHandle>) -> Arc<CodexClient> {
-        let stdin = child.stdin.take().unwrap();
-        Arc::new(CodexClient {
-            child: Mutex::new(child),
-            job,
-            terminated: AtomicBool::new(false),
-            stdin: Mutex::new(Some(stdin)),
-            next_id: AtomicI64::new(1),
-            pending: std::sync::Mutex::new(HashMap::new()),
-            turn: std::sync::Mutex::new(None),
-            unanswered: std::sync::Mutex::new(HashMap::new()),
-            active_turn: std::sync::Mutex::new(None),
-            resumed_thread: std::sync::Mutex::new(None),
-            thread_model: std::sync::Mutex::new(None),
-            last_collab_mode: std::sync::Mutex::new(None),
-            native_store: NativeStore::Isolated,
-            profile: None,
-            alphaxiv_signed_in: false,
-            skills: None,
-            bin: PathBuf::new(),
-            session_id: String::new(),
-            turn_models: std::sync::Mutex::new(HashMap::new()),
-            last_active: std::sync::Mutex::new(Instant::now()),
-        })
-    }
-
     #[cfg(unix)]
-    fn idle_test_client(last_active: Instant) -> Arc<CodexClient> {
-        test_client_running("cat >/dev/null", last_active)
+    async fn idle_test_client(last_active: Instant) -> Arc<CodexClient> {
+        test_client("cat >/dev/null", last_active, false).await
     }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn stopping_an_app_server_lets_codex_finish_saving_its_sign_in() {
@@ -1499,7 +1591,7 @@ pub(crate) mod tests {
         let saved = dir.path().join("auth.json");
         // Like Codex, the fake app-server exits only once its input closes.
         let shell = format!("cat >/dev/null; echo refreshed > '{}'", saved.display());
-        let client = test_client_running(&shell, Instant::now());
+        let client = test_client_running(&shell, Instant::now()).await;
 
         client.terminate().await;
 
@@ -1507,55 +1599,37 @@ pub(crate) mod tests {
     }
 
     #[cfg(unix)]
-    fn test_client_running(shell: &str, last_active: Instant) -> Arc<CodexClient> {
-        test_client(shell, last_active, false)
+    async fn test_client_running(shell: &str, last_active: Instant) -> Arc<CodexClient> {
+        test_client(shell, last_active, false).await
     }
-
     #[cfg(unix)]
-    pub(crate) fn rpc_test_client(shell: &str) -> Arc<CodexClient> {
-        test_client(shell, Instant::now(), true)
+    pub(crate) async fn rpc_test_client(shell: &str) -> Arc<CodexClient> {
+        test_client(shell, Instant::now(), true).await
     }
-
     #[cfg(unix)]
-    fn test_client(shell: &str, last_active: Instant, read_events: bool) -> Arc<CodexClient> {
-        let mut command = crate::process::tokio_command("sh");
-        command
-            .args(["-c", shell])
-            .stdin(Stdio::piped())
-            .stdout(if read_events {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stderr(Stdio::null())
-            .process_group(0);
-        let mut child = command.spawn().unwrap();
-        let process_group_id = child.id().unwrap();
-        let stdin = child.stdin.take().unwrap();
-        let stdout = child.stdout.take();
-        let client = Arc::new(CodexClient {
-            child: Mutex::new(child),
-            process_group_id,
-            terminated: AtomicBool::new(false),
-            stdin: Mutex::new(Some(stdin)),
-            next_id: AtomicI64::new(1),
-            pending: std::sync::Mutex::new(HashMap::new()),
-            turn: std::sync::Mutex::new(None),
-            unanswered: std::sync::Mutex::new(HashMap::new()),
-            active_turn: std::sync::Mutex::new(None),
-            resumed_thread: std::sync::Mutex::new(None),
-            thread_model: std::sync::Mutex::new(None),
-            last_collab_mode: std::sync::Mutex::new(None),
-            native_store: NativeStore::Isolated,
-            profile: None,
-            alphaxiv_signed_in: false,
-            skills: None,
-            bin: PathBuf::new(),
-            session_id: String::new(),
-            turn_models: std::sync::Mutex::new(HashMap::new()),
-            last_active: std::sync::Mutex::new(last_active),
-        });
-        if let Some(stdout) = stdout {
+    async fn test_client(shell: &str, last_active: Instant, read_events: bool) -> Arc<CodexClient> {
+        let mut command = crate::process::command("sh");
+        command.args(["-c", shell]);
+        let mut child = keep::spawn(keep::Keep {
+            command: &command,
+            io: keep::Io::Pipes { stderr: None },
+            retain: keep::LOSSLESS,
+            owner: serde_json::Value::Null,
+        })
+        .await
+        .unwrap();
+        let stdout = child.take_stdout().unwrap();
+        let client = client_from_kept(
+            child,
+            "",
+            ClientState {
+                next_id: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        *client.last_active.lock().unwrap() = last_active;
+        if read_events {
             tokio::spawn(read_loop(client.clone(), stdout));
         }
         client
@@ -1584,7 +1658,7 @@ pub(crate) mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn mcp_approval_accepts_and_declines_in_its_native_reply_shape() {
-        let client = idle_test_client(Instant::now());
+        let client = idle_test_client(Instant::now()).await;
         let id = json!(0);
         client
             .unanswered
@@ -1605,7 +1679,7 @@ pub(crate) mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn cancelled_request_does_not_leave_the_child_busy() {
-        let client = idle_test_client(Instant::now());
+        let client = idle_test_client(Instant::now()).await;
 
         let cancelled = tokio::time::timeout(
             Duration::from_millis(20),
@@ -1623,7 +1697,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn client_reuse_requires_the_same_profile() {
         let host = Arc::new(CodexHost::new());
-        let mut client = idle_test_client(Instant::now());
+        let mut client = idle_test_client(Instant::now()).await;
         Arc::get_mut(&mut client).unwrap().profile = Some("codex-012345abcd".into());
         host.inner
             .lock()
@@ -1660,7 +1734,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn client_reuse_requires_the_same_known_skills() {
         let host = Arc::new(CodexHost::new());
-        let mut client = idle_test_client(Instant::now());
+        let mut client = idle_test_client(Instant::now()).await;
         Arc::get_mut(&mut client).unwrap().skills = Some(1);
         host.inner
             .lock()
@@ -1684,7 +1758,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn client_reuse_requires_the_selected_binary() {
         let host = Arc::new(CodexHost::new());
-        let mut client = idle_test_client(Instant::now());
+        let mut client = idle_test_client(Instant::now()).await;
         Arc::get_mut(&mut client).unwrap().bin = PathBuf::from("/user/codex");
         host.inner
             .lock()
@@ -1718,7 +1792,7 @@ pub(crate) mod tests {
         let result = r#"{"rateLimits":{"limitId":"codex","primary":{"usedPercent":2,"windowDurationMins":10080,"resetsAt":1795202690},"planType":"pro"}}"#;
         let client = rpc_test_client(&format!(
             r#"IFS= read -r request; case "$request" in *account/rateLimits/read*) printf '%s\n' '{{"id":1,"result":{result}}}' ;; esac; cat >/dev/null"#
-        ));
+        )).await;
         host.inner.lock().await.insert("chat".into(), client);
         // No binary to spawn: an answer can only come from the live child.
         let missing = Path::new("/nonexistent/codex");
@@ -1744,7 +1818,7 @@ pub(crate) mod tests {
         host.inner
             .lock()
             .await
-            .insert("chat".into(), rpc_test_client("cat >/dev/null"));
+            .insert("chat".into(), rpc_test_client("cat >/dev/null").await);
         assert!(
             host.live_client(None).now_or_never().is_none(),
             "waits for the handshake"
@@ -1760,19 +1834,20 @@ pub(crate) mod tests {
         let host = Arc::new(CodexHost::new());
         let client = rpc_test_client(
             r#"IFS= read -r request; printf '%s\n' '{"id":1,"result":{}}'; cat >/dev/null"#,
-        );
+        )
+        .await;
         let spawned = client.clone();
         let ensured = tokio::time::timeout(
             Duration::from_secs(2),
             host.ensure_with_spawn("compact", NativeStore::Isolated, None, None, None, async {
-                Ok(move || Ok(spawned))
+                Ok(move || async move { Ok(spawned) })
             }),
         )
         .await;
         let reused = tokio::time::timeout(
             Duration::from_secs(2),
             host.ensure_with_spawn("compact", NativeStore::Isolated, None, None, None, async {
-                Ok(|| panic!("initialized client must be reused"))
+                Ok(|| async { panic!("initialized client must be reused") })
             }),
         )
         .await;
@@ -1785,7 +1860,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn cancelled_bring_up_does_not_block_other_chats_or_leak_children() {
         let host = Arc::new(CodexHost::new());
-        let warm = idle_test_client(Instant::now());
+        let warm = idle_test_client(Instant::now()).await;
         host.inner.lock().await.insert("warm".into(), warm.clone());
         let (started_tx, started_rx) = oneshot::channel();
         let (release_tx, release_rx) = oneshot::channel();
@@ -1803,9 +1878,9 @@ pub(crate) mod tests {
                     async move {
                         let _ = started_tx.send(());
                         let _ = release_rx.await;
-                        Ok(move || {
+                        Ok(move || async move {
                             spawn_flag.store(true, Ordering::Release);
-                            Ok(idle_test_client(Instant::now()))
+                            Ok(idle_test_client(Instant::now()).await)
                         })
                     },
                 )
@@ -1816,7 +1891,7 @@ pub(crate) mod tests {
         let reused = tokio::time::timeout(
             Duration::from_secs(2),
             host.ensure_with_spawn("warm", NativeStore::Isolated, None, None, None, async {
-                Ok(|| panic!("a warm client must not be spawned again"))
+                Ok(|| async { panic!("a warm client must not be spawned again") })
             }),
         )
         .await
@@ -1826,7 +1901,9 @@ pub(crate) mod tests {
         let cold = tokio::time::timeout(
             Duration::from_secs(2),
             host.ensure_with_spawn("other", NativeStore::Isolated, None, None, None, async {
-                Err::<fn() -> Result<Arc<CodexClient>>, _>(anyhow!("preparation reached"))
+                Err::<fn() -> std::future::Ready<Result<Arc<CodexClient>>>, _>(anyhow!(
+                    "preparation reached"
+                ))
             }),
         )
         .await
@@ -1839,13 +1916,13 @@ pub(crate) mod tests {
         host.kill_session("warm").await;
 
         // Cancellation after process launch still reaps the registered child.
-        let client = idle_test_client(Instant::now());
+        let client = idle_test_client(Instant::now()).await;
         let spawned = client.clone();
         let operation_host = host.clone();
         let operation = tokio::spawn(async move {
             operation_host
                 .ensure_with_spawn("compact", NativeStore::Isolated, None, None, None, async {
-                    Ok(move || Ok(spawned))
+                    Ok(move || async move { Ok(spawned) })
                 })
                 .await
         });
@@ -1870,10 +1947,10 @@ pub(crate) mod tests {
     async fn reaper_releases_an_exited_wrapper_instead_of_keeping_it_warm() {
         let now = Instant::now();
         let host = CodexHost::new();
-        let warm = idle_test_client(now - Duration::from_secs(60));
+        let warm = idle_test_client(now - Duration::from_secs(60)).await;
         // The npm shape: the wrapper exits while its native child keeps running.
-        let exited = test_client_running("sleep 600 & exit 0", now - Duration::from_secs(40));
-        exited.child.lock().await.wait().await.unwrap();
+        let exited = test_client_running("sleep 600 & exit 0", now - Duration::from_secs(40)).await;
+        exited.child.wait().await;
         for (session_id, client) in [("warm", &warm), ("exited", &exited)] {
             host.inner
                 .lock()
@@ -1886,16 +1963,6 @@ pub(crate) mod tests {
         let live = host.inner.lock().await.keys().cloned().collect::<Vec<_>>();
         assert_eq!(live, ["warm"]);
         assert!(exited.terminated.load(Ordering::Acquire));
-        let group = -(exited.process_group_id as i32);
-        let mut survivor = true;
-        for _ in 0..50 {
-            survivor = unsafe { libc::kill(group, 0) == 0 };
-            if !survivor {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert!(!survivor, "the wrapper's native child survived the release");
         host.shutdown().await;
     }
 
@@ -1904,11 +1971,11 @@ pub(crate) mod tests {
     async fn reaper_releases_idle_children_and_spares_busy_ones() {
         let now = Instant::now();
         let host = CodexHost::new();
-        let expired = idle_test_client(now - IdlePolicy::DEFAULT.idle_timeout);
-        let recent = idle_test_client(now - Duration::from_secs(60));
-        let newest = idle_test_client(now - Duration::from_secs(40));
-        let in_turn = idle_test_client(now - Duration::from_secs(3600));
-        let in_request = idle_test_client(now - Duration::from_secs(3600));
+        let expired = idle_test_client(now - IdlePolicy::DEFAULT.idle_timeout).await;
+        let recent = idle_test_client(now - Duration::from_secs(60)).await;
+        let newest = idle_test_client(now - Duration::from_secs(40)).await;
+        let in_turn = idle_test_client(now - Duration::from_secs(3600)).await;
+        let in_request = idle_test_client(now - Duration::from_secs(3600)).await;
         let (tx, _rx) = mpsc::unbounded_channel();
         let _route = in_turn.register_turn(tx);
         let (request_tx, _request_rx) = oneshot::channel();
@@ -1943,103 +2010,275 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn terminate_kills_the_native_child_behind_a_wrapper() {
-        // The npm `codex.js` shape: a wrapper whose child outlives its SIGKILL.
-        let mut command = crate::process::tokio_command("sh");
-        command
-            .args(["-c", "sleep 30 & echo $!; wait"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .process_group(0);
-        let mut child = command.spawn().unwrap();
-        let process_group_id = child.id().unwrap();
-        let stdin = child.stdin.take().unwrap();
-        let mut stdout = BufReader::new(child.stdout.take().unwrap());
-        let mut native_pid = String::new();
-        stdout.read_line(&mut native_pid).await.unwrap();
-        let client = Arc::new(CodexClient {
-            child: Mutex::new(child),
-            process_group_id,
-            terminated: AtomicBool::new(false),
-            stdin: Mutex::new(Some(stdin)),
-            next_id: AtomicI64::new(1),
-            pending: std::sync::Mutex::new(HashMap::new()),
-            turn: std::sync::Mutex::new(None),
-            unanswered: std::sync::Mutex::new(HashMap::new()),
-            active_turn: std::sync::Mutex::new(None),
-            resumed_thread: std::sync::Mutex::new(None),
-            thread_model: std::sync::Mutex::new(None),
-            last_collab_mode: std::sync::Mutex::new(None),
-            native_store: NativeStore::Isolated,
-            profile: None,
-            alphaxiv_signed_in: false,
-            skills: None,
-            bin: PathBuf::new(),
-            session_id: String::new(),
-            turn_models: std::sync::Mutex::new(HashMap::new()),
-            last_active: std::sync::Mutex::new(Instant::now()),
-        });
-
-        client.terminate().await;
-        // A second call must not signal the (possibly reused) group again.
-        client.terminate().await;
-        assert!(client.terminated.load(Ordering::Acquire));
-
-        // EOF, not a pid probe: a killed child can linger as an unreaped zombie.
-        let mut rest = Vec::new();
-        let eof = tokio::time::timeout(
-            Duration::from_secs(1),
-            tokio::io::AsyncReadExt::read_to_end(&mut stdout, &mut rest),
-        )
-        .await;
-        assert!(
-            eof.is_ok(),
-            "native child {} survived terminate",
-            native_pid.trim()
-        );
+    async fn adoption_preserves_pending_approval_and_request_ids_without_initialize() {
+        let old = test_client(
+            r#"printf '%s\n' '{"id":7,"result":{"late":true}}'; IFS= read -r approval; IFS= read -r request; printf '{"id":42,"result":{"approval":%s,"request":%s}}\n' "$approval" "$request"; cat >/dev/null"#,
+            Instant::now(), false,
+        ).await;
+        let state = ClientState {
+            initialize: Some(json!({"capabilities":{}})),
+            next_id: 42,
+            thread: Some("thread".into()),
+            outbound: HashMap::from([(
+                7,
+                OutboundRequest {
+                    method: "account/rateLimits/read".into(),
+                    response_at: None,
+                },
+            )]),
+            inbound: HashMap::from([(
+                "5".into(),
+                (
+                    "item/commandExecution/requestApproval".into(),
+                    json!({"threadId":"thread","turnId":"turn","itemId":"tool"}),
+                ),
+            )]),
+            ..Default::default()
+        };
+        old.child
+            .set_owner(
+                &keep::Owner::Agent {
+                    harness: "codex".into(),
+                    session_id: "chat".into(),
+                    state: serde_json::to_value(&state).unwrap(),
+                }
+                .to_value(),
+            )
+            .unwrap();
+        let id = old.child.id().to_string();
+        old.child.detach();
+        drop(old);
+        let host = CodexHost::new();
+        host.adopt(crate::local::harness::Adoption {
+            keep_id: id,
+            session_id: "chat".into(),
+            state: serde_json::to_value(state).unwrap(),
+            resume_at: Some(0),
+            commands: Vec::new(),
+        })
+        .await
+        .unwrap();
+        let client = host.client_for("chat").await.unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let _route = client.register_turn(tx);
+        let event = rx.recv().await.unwrap();
+        assert!(matches!(event, TurnEvent::Request { id, .. } if id == json!(5)));
+        client
+            .respond(&json!(5), json!({"decision":"accept"}))
+            .await
+            .unwrap();
+        assert!(client
+            .respond(&json!(5), json!({"decision":"accept"}))
+            .await
+            .is_err());
+        let result = client
+            .request("account/rateLimits/read", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(result["approval"]["id"], 5);
+        assert_eq!(result["request"]["id"], 42);
+        assert_eq!(result["request"]["method"], "account/rateLimits/read");
+        assert_eq!(client.next_id.load(Ordering::Relaxed), 43);
+        assert!(client.pending.lock().unwrap().is_empty());
+        host.kill_session("chat").await;
     }
 
-    /// The npm wrapper's child can outlive a wrapper-only kill (OR-409).
-    #[cfg(windows)]
+    #[cfg(unix)]
     #[tokio::test]
-    async fn terminate_kills_the_native_child_behind_a_wrapper() {
-        let mut command = crate::process::tokio_command("cmd");
-        command
-            .args(["/c", "ping.exe -n 600 127.0.0.1 > nul"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .creation_flags(windows_job::SPAWN_FLAGS);
-        let mut child = command.spawn().unwrap();
-        let pid = child.id().unwrap();
-        let job = windows_job::enroll(&mut child, pid)
-            .unwrap()
-            .expect("job enrollment should succeed");
-        let client = windows_test_client(child, Some(job));
-
-        // Terminating before the wrapper spawns its native child would prove
-        // nothing — wait for the tree to hold both.
-        let job = client.job.as_ref().unwrap();
-        let mut populated = false;
-        for _ in 0..250 {
-            if windows_job::active_processes(job) >= 2 {
-                populated = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+    async fn a_request_during_a_hand_off_is_left_for_the_successor() {
+        if !crate::config::in_test_child(&[]) {
+            return;
         }
-        assert!(populated, "the wrapper never spawned its native child");
+        keep::hand_off();
+        let client = test_client(
+            r#"IFS= read -r ping; printf '%s\n' '{"id":7,"method":"item/commandExecution/requestApproval","params":{}}' '{"id":1,"result":{}}'; sleep 600"#,
+            Instant::now(),
+            true,
+        )
+        .await;
 
-        client.terminate().await;
-        // A second call must not signal the (possibly reused) job again.
-        client.terminate().await;
-        assert!(client.terminated.load(Ordering::Acquire));
+        // The response follows the request on the same stream, so the request has been handled.
+        client.request("ping", json!({})).await.unwrap();
+
+        let state = client.durable.lock().unwrap();
+        assert!(state.inbound.contains_key("7"));
+        assert!(state.outbox.is_empty());
+        drop(state);
+        client.child.signal(keep::Signal::Kill);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn idle_adoption_resends_an_unconfirmed_reply_before_accepting_requests() {
+        for resume_at in [None, Some(0)] {
+            let old = test_client(
+                r#"IFS= read -r approval; IFS= read -r request; printf '{"id":42,"result":{"approval":%s,"request":%s}}\n' "$approval" "$request"; cat >/dev/null"#,
+                Instant::now(), false,
+            ).await;
+            let reply = json!({"id":5,"result":{"decision":"accept"}});
+            let state = ClientState {
+                initialize: Some(json!({})),
+                next_id: 42,
+                thread: Some("thread".into()),
+                inbound: HashMap::from([(
+                    "5".into(),
+                    ("item/commandExecution/requestApproval".into(), json!({})),
+                )]),
+                outbox: HashMap::from([("5".into(), reply.clone())]),
+                ..Default::default()
+            };
+            let keep_id = old.child.id().to_string();
+            old.child.detach();
+            drop(old);
+            let host = CodexHost::new();
+            host.adopt(crate::local::harness::Adoption {
+                keep_id,
+                session_id: "chat".into(),
+                state: serde_json::to_value(state).unwrap(),
+                resume_at,
+                commands: Vec::new(),
+            })
+            .await
+            .unwrap();
+            let client = host.client_for("chat").await.unwrap();
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let _route = client.register_turn(tx);
+            assert!(rx.try_recv().is_err());
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                client.request("account/rateLimits/read", json!({})),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(result["approval"], reply);
+            assert_eq!(result["request"]["method"], "account/rateLimits/read");
+            assert!(Arc::ptr_eq(
+                &client,
+                &host
+                    .reusable_client("chat", NativeStore::Isolated, None, None, None)
+                    .await
+                    .unwrap()
+            ));
+            host.kill_session("chat").await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_idle_app_server_whose_output_was_acknowledged_is_adopted_alive() {
+        let mut command = crate::process::command("sh");
+        command.args([
+            "-c",
+            r#"printf '%s\n' '{"method":"thread/started","params":{}}'; IFS= read -r go; printf '%s\n' '{"method":"thread/started","params":{}}'; IFS= read -r request; printf '{"id":42,"result":{"request":%s}}\n' "$request"; sleep 600"#,
+        ]);
+        let mut child = keep::spawn(keep::Keep {
+            command: &command,
+            io: keep::Io::Pipes { stderr: None },
+            retain: keep::LOSSLESS,
+            owner: serde_json::Value::Null,
+        })
+        .await
+        .unwrap();
+        let mut lines = child.take_stdout().unwrap().lines();
+        let (_, acked) = lines.next_line().await.unwrap().unwrap();
+        let old = client_from_kept(child, "", ClientState::default()).unwrap();
+        old.keeper().ack(acked);
+        old.write_line(&json!({"go":true})).await.unwrap();
+        // The keeper reads the acknowledgement before the input that prompts this line.
+        lines.next_line().await.unwrap().unwrap();
+        let state = ClientState {
+            initialize: Some(json!({})),
+            next_id: 42,
+            thread: Some("thread".into()),
+            ..Default::default()
+        };
+        let keep_id = old.child.id().to_string();
+        old.child.detach();
+        drop(old);
+
+        let host = CodexHost::new();
+        host.adopt(crate::local::harness::Adoption {
+            keep_id,
+            session_id: "chat".into(),
+            state: serde_json::to_value(state).unwrap(),
+            resume_at: None,
+            commands: Vec::new(),
+        })
+        .await
+        .unwrap();
+        let client = host.client_for("chat").await.unwrap();
+        assert_eq!(client.keeper().start(), acked);
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.request("account/rateLimits/read", json!({})),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result["request"]["method"], "account/rateLimits/read");
+        host.kill_session("chat").await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn app_server_resumes_the_same_turn_without_repeating_prompt_or_text() {
+        use crate::local::chat::{Resume, TurnCtx, WirePart};
+        use crate::local::harness::{codex::Codex, Harness};
+
+        let prefix = "{\"method\":\"item/agentMessage/delta\",\"params\":{\"threadId\":\"thread\",\"turnId\":\"turn\",\"itemId\":\"item\",\"delta\":\"Hel\"}}\n";
+        let old = test_client(
+            r#"printf '%s\n' '{"method":"item/agentMessage/delta","params":{"threadId":"thread","turnId":"turn","itemId":"item","delta":"Hel"}}'; IFS= read -r go; printf '%s\n' '{"method":"item/agentMessage/delta","params":{"threadId":"thread","turnId":"turn","itemId":"item","delta":"lo"}}' '{"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"turn","status":"completed"}}}'; IFS= read -r request; case "$request" in *thread/read*) printf '%s\n' '{"id":42,"result":{"thread":{"turns":[{"id":"turn","items":[]}]}}}' ;; *) exit 23 ;; esac; cat >/dev/null"#,
+            Instant::now(), false,
+        ).await;
+        let owner = ClientState {
+            initialize: Some(json!({})),
+            next_id: 42,
+            thread: Some("thread".into()),
+            active_turn: Some("turn".into()),
+            ..Default::default()
+        };
+        let state = json!({"turn_id":"turn","open_requests":{},"sub_threads":{},"parent_done":false,"finished":false});
+        let mut ctx = TurnCtx::test_stub();
+        ctx.upsert_part(WirePart::text("item", "Hel"));
+        ctx.set_native_session_id("thread");
+        let offset = prefix.len() as u64;
+        ctx.flush_at(old.keeper(), offset, &state).unwrap();
+        old.write_line(&json!({"go":true})).await.unwrap();
+        let keep_id = old.child.id().to_string();
+        old.child.detach();
+        drop(old);
+        ctx.host
+            .codex
+            .adopt(crate::local::harness::Adoption {
+                keep_id: keep_id.clone(),
+                session_id: ctx.session_id.clone(),
+                state: serde_json::to_value(owner).unwrap(),
+                resume_at: Some(offset),
+                commands: Vec::new(),
+            })
+            .await
+            .unwrap();
+        ctx.resume = Some(Resume {
+            keep_id,
+            offset,
+            state,
+        });
+        let result = tokio::time::timeout(Duration::from_secs(10), Codex.run_turn(&mut ctx))
+            .await
+            .unwrap();
+        assert!(result.is_ok(), "{result:?}");
         assert_eq!(
-            windows_job::active_processes(job),
-            0,
-            "the wrapper's native child survived terminate"
+            ctx.assistant
+                .parts
+                .iter()
+                .filter_map(|part| part.text.as_deref())
+                .collect::<String>(),
+            "Hello"
         );
+        let client = ctx.host.codex.client_for(&ctx.session_id).await.unwrap();
+        assert_eq!(client.next_id.load(Ordering::Relaxed), 43);
+        ctx.host.codex.shutdown().await;
     }
 
     #[test]

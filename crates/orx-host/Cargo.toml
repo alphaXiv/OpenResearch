@@ -16,6 +16,7 @@ fd-lock = "4"
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 orx-host-proto = { path = "../orx-host-proto" }
+orx-keep = { path = "../orx-keep" }
 libc = "0.2"
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }

@@ -317,12 +317,13 @@ async fn ensure() -> Result<Endpoint> {
         }
     }
     let executable = crate::paths::spawnable_exe()?;
+    // Cargo nests unit-test binaries at a varying depth below the profile directory holding `orx`.
     #[cfg(test)]
     let executable = executable
-        .parent()
-        .and_then(|path| path.parent())
-        .ok_or_else(|| anyhow!("Missing test binary directory"))?
-        .join(format!("orx{}", std::env::consts::EXE_SUFFIX));
+        .ancestors()
+        .map(|dir| dir.join(format!("orx{}", std::env::consts::EXE_SUFFIX)))
+        .find(|path| path.is_file())
+        .ok_or_else(|| anyhow!("no orx in any directory above {}", executable.display()))?;
     let mut command = crate::process::command(executable);
     command
         .arg("ssh-service")

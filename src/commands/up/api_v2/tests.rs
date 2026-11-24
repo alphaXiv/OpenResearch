@@ -1,5 +1,5 @@
 use super::*;
-use crate::commands::remote_host::ServerDescriptor;
+use crate::commands::remote_host::{ServerDescriptor, RELAUNCH_WAIT};
 use crate::engine::handle::Handle;
 use crate::engine::{
     CancelOutcome, Fence, FileIdent, LaunchError, Observation, Recovery, RunIntent,
@@ -9,6 +9,7 @@ use crate::store::{LaunchSpec, SubmittingRun};
 use futures::StreamExt;
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 
 #[derive(Default)]
 struct Fake {
@@ -520,7 +521,7 @@ async fn wait_is_one_sse_request_completed_by_first_matching_bus_event() {
         wait: true,
         ..Default::default()
     };
-    let mut events = f.client.events(&filter).await.unwrap();
+    let mut events = f.client.events(&filter, None).await.unwrap();
     assert_eq!(f.api.sse_clients(), 1);
     // A monitor event is the dashboard's, and never ends a wait.
     f.api.engine.bus.publish(RunEvent::Monitor {
@@ -563,11 +564,14 @@ async fn wait_is_one_sse_request_completed_by_first_matching_bus_event() {
     assert!(events.next().await.is_none());
     assert_eq!(f.requests.load(Ordering::SeqCst), 1);
     f.client
-        .wait(Filter {
-            run: Some("run".into()),
-            wait: true,
-            ..Default::default()
-        })
+        .wait(
+            Filter {
+                run: Some("run".into()),
+                wait: true,
+                ..Default::default()
+            },
+            Instant::now() + RELAUNCH_WAIT,
+        )
         .await
         .unwrap();
     assert_eq!(f.backend.reads.load(Ordering::SeqCst), 0);
@@ -638,22 +642,28 @@ async fn project_wait_returns_drained_and_filters_other_projects() {
     f.insert("old", "exp", "project", "done");
     let mut events = f
         .client
-        .events(&Filter {
-            project: Some("project".into()),
-            wait: true,
-            ..Default::default()
-        })
+        .events(
+            &Filter {
+                project: Some("project".into()),
+                wait: true,
+                ..Default::default()
+            },
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(completion(&mut events).await["drained"], true);
     f.insert("new", "exp", "project", "running");
     let mut events = f
         .client
-        .events(&Filter {
-            project: Some("project".into()),
-            wait: true,
-            ..Default::default()
-        })
+        .events(
+            &Filter {
+                project: Some("project".into()),
+                wait: true,
+                ..Default::default()
+            },
+            None,
+        )
         .await
         .unwrap();
     f.api
@@ -841,11 +851,14 @@ async fn idle_requires_ten_uninterrupted_minutes_and_all_blockers_clear() {
     }
     let events = f
         .client
-        .events(&Filter {
-            run: Some("run".into()),
-            follow: true,
-            ..Default::default()
-        })
+        .events(
+            &Filter {
+                run: Some("run".into()),
+                follow: true,
+                ..Default::default()
+            },
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(f.backend.follows.load(Ordering::SeqCst), 1);
@@ -1006,11 +1019,14 @@ async fn project_wait_resync_excludes_already_completed_runs() {
     f.insert("run", "exp", "project", "running");
     let mut events = f
         .client
-        .events(&Filter {
-            project: Some("project".into()),
-            wait: true,
-            ..Default::default()
-        })
+        .events(
+            &Filter {
+                project: Some("project".into()),
+                wait: true,
+                ..Default::default()
+            },
+            None,
+        )
         .await
         .unwrap();
     for _ in 0..2048 {
@@ -1045,11 +1061,14 @@ async fn log_feed_is_refcounted_and_pushes_without_a_cli_poll() {
     f.insert("run", "exp", "project", "running");
     let mut events = f
         .client
-        .events(&Filter {
-            run: Some("run".into()),
-            follow: true,
-            ..Default::default()
-        })
+        .events(
+            &Filter {
+                run: Some("run".into()),
+                follow: true,
+                ..Default::default()
+            },
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(events.next().await.unwrap().unwrap()["id"], "run");
@@ -1194,11 +1213,14 @@ async fn experiment_wait_excludes_older_completed_runs_after_subscribing() {
         .unwrap();
     let mut events = f
         .client
-        .events(&Filter {
-            experiment: Some("exp".into()),
-            wait: true,
-            ..Default::default()
-        })
+        .events(
+            &Filter {
+                experiment: Some("exp".into()),
+                wait: true,
+                ..Default::default()
+            },
+            None,
+        )
         .await
         .unwrap();
     f.api.engine.bus.publish(RunEvent::Changed {
@@ -1233,11 +1255,14 @@ async fn experiment_wait_follows_new_launches_and_excludes_older_active_runs() {
         .unwrap();
     let mut events = f
         .client
-        .events(&Filter {
-            experiment: Some("exp".into()),
-            wait: true,
-            ..Default::default()
-        })
+        .events(
+            &Filter {
+                experiment: Some("exp".into()),
+                wait: true,
+                ..Default::default()
+            },
+            None,
+        )
         .await
         .unwrap();
     for id in ["old", "run", "new"] {
@@ -1362,7 +1387,7 @@ async fn reconnect_child() {
             .unwrap();
         assert_eq!(result, json!({"command":"one launch"}));
         if std::env::var_os("ORX_TEST_STALE_PORT").is_some() {
-            let events = stale.events(&Filter::default()).await.unwrap();
+            let events = stale.events(&Filter::default(), None).await.unwrap();
             futures::pin_mut!(events);
             assert!(events.next().await.is_none());
         }
@@ -1370,12 +1395,15 @@ async fn reconnect_child() {
     }
     if mode == "wait" || mode == "projectwait" {
         client
-            .wait(Filter {
-                run: (mode == "wait").then(|| "run".into()),
-                project: (mode == "projectwait").then(|| "project".into()),
-                wait: true,
-                ..Default::default()
-            })
+            .wait(
+                Filter {
+                    run: (mode == "wait").then(|| "run".into()),
+                    project: (mode == "projectwait").then(|| "project".into()),
+                    wait: true,
+                    ..Default::default()
+                },
+                Instant::now() + RELAUNCH_WAIT,
+            )
             .await
             .unwrap();
     } else {
@@ -2661,13 +2689,51 @@ async fn cli_wait_skips_unknown_sse_event_names_before_decoding_their_data() {
     });
     ApiClient::new(descriptor)
         .unwrap()
-        .wait(Filter {
-            run: Some("run".into()),
-            wait: true,
-            ..Default::default()
-        })
+        .wait(
+            Filter {
+                run: Some("run".into()),
+                wait: true,
+                ..Default::default()
+            },
+            Instant::now() + RELAUNCH_WAIT,
+        )
         .await
         .unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn cli_wait_times_out_when_the_server_never_answers_the_event_stream() {
+    let f = Fixture::new().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut descriptor = f.descriptor.clone();
+    let port = listener.local_addr().unwrap().port();
+    descriptor.port = port;
+    let app = axum::Router::new().route(
+        "/api/v2/events",
+        axum::routing::get(std::future::pending::<&'static str>),
+    );
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        ApiClient::new(descriptor).unwrap().wait(
+            Filter {
+                run: Some("run".into()),
+                wait: true,
+                ..Default::default()
+            },
+            Instant::now() + crate::config::paced(Duration::from_millis(200)),
+        ),
+    )
+    .await
+    .expect("the wait outlived its own deadline");
+    let error = result.unwrap_err().to_string();
+    assert!(
+        error.contains("Timed out") && error.contains(&format!("127.0.0.1:{port}")),
+        "{error}"
+    );
     server.abort();
 }
 
@@ -3056,10 +3122,13 @@ async fn a_waiting_reason_reaches_both_views_and_the_event_stream() {
     f.insert("run", "exp", "project", "starting");
     let mut events = f
         .client
-        .events(&Filter {
-            run: Some("run".into()),
-            ..Default::default()
-        })
+        .events(
+            &Filter {
+                run: Some("run".into()),
+                ..Default::default()
+            },
+            None,
+        )
         .await
         .unwrap();
     async fn next(events: &mut (impl Stream<Item = Result<Value>> + Unpin)) -> Value {
