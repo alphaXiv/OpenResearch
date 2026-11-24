@@ -133,13 +133,12 @@ export function createProjectPersistence(
     writerFor(id).queue(next, metadataOnly ? 250 : 0);
   }
 
-  function snapshot(props: Pick<Props, "state" | "pane" | "getScroll" | "sourceModes">, previous: TaskWorkspace | undefined, projectId: string, taskKey: string): TaskWorkspace {
+  function snapshot(props: Pick<Props, "state" | "pane" | "getScroll" | "sourceModes">, projectId: string, taskKey: string): TaskWorkspace {
     const keys = new Set(props.state.fileTabs.map((tab) => fileScrollKey(projectId, taskKey === "new" ? null : taskKey, tab)));
     const scroll = Object.fromEntries(Object.entries(props.getScroll()).filter(([key]) => keys.has(key)));
     const sourceModes = Object.fromEntries(Object.entries(props.sourceModes).filter(([key]) => keys.has(key)));
     const task = rememberWorkspace(props.state, scroll, sourceModes);
-    const active = props.pane ?? previous?.active;
-    const activeKey = active ? rightTabKey(paneTab(active)) : null;
+    const activeKey = props.pane ? rightTabKey(paneTab(props.pane)) : null;
     task.active = task.tabs.find((tab) => rightTabKey(paneTab(tab)) === activeKey) ?? null;
     return task;
   }
@@ -172,7 +171,7 @@ export function createProjectPersistence(
     const capture = useCallback(() => {
       const previous = committed.current;
       if (!previous) return;
-      const task = snapshot({ ...latest.current, state: previous.state, pane: previous.pane }, getTaskWorkspace(projectCache.get(previous.projectId), previous.taskKey), previous.projectId, previous.taskKey);
+      const task = snapshot({ ...latest.current, state: previous.state, pane: previous.pane }, previous.projectId, previous.taskKey);
       save(previous.projectId, previous.location, previous.taskKey, task);
     }, []);
 
@@ -228,7 +227,7 @@ export function createProjectPersistence(
         }
       }
       if (isTask) {
-        save(projectId, location, taskKey, snapshot({ state: resolvedState, pane, getScroll, sourceModes }, getTaskWorkspace(document, taskKey), projectId, taskKey));
+        save(projectId, location, taskKey, snapshot({ state: resolvedState, pane, getScroll, sourceModes }, projectId, taskKey));
         committed.current = { projectId, taskKey, scope, location, pane, state: resolvedState };
       } else save(projectId, location);
       workspace.current = projectCache.get(projectId) ?? document;
