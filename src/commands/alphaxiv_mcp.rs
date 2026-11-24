@@ -20,6 +20,8 @@ pub const RESEARCH_TOOLS: &[&str] = &[
 ];
 pub const LIBRARY_READ_TOOLS: &[&str] =
     &["list_library", "list_annotated_papers", "get_paper_notes"];
+/// Change the user's library, so agents ask first where they take a per-tool rule. Antigravity and
+/// ACP agents take none and `codex exec` cannot prompt, so there the agent's own policy decides.
 pub const WRITE_TOOLS: &[&str] = &["save_papers_to_folder", "create_folder"];
 const SIGNED_OUT: &str = "alphaXiv is signed out on the computer running this chat, so library tools are unavailable. Research tools still work.";
 const FORWARDED_LAPSED: &str = "The alphaXiv sign-in the user's laptop shared with the computer running this chat has expired, so library tools are unavailable until the user reconnects to this computer from OpenResearch on their laptop. Research tools still work.";

@@ -387,6 +387,8 @@ pub enum RunState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Summary {
+    /// Sent only by a `serve` that keeps signal checkpoints; its presence is how a connection
+    /// advertises `ReadSignals` and `ConfigureSignals`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signals: Option<SignalsSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

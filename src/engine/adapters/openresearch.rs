@@ -192,6 +192,7 @@ pub struct OpenResearch {
     bootstrap: tokio::sync::Mutex<Option<crate::jobs::rental::Heartbeat>>,
 }
 
+/// The lease reserves the wait `orx-host`'s `COLLECTION_GRACE` gives the laptop after the payload.
 const COLLECTION_GRACE: Duration = Duration::from_secs(15 * 60);
 const MAX_ACTIVE_SECONDS: u64 = 7 * 24 * 3600;
 

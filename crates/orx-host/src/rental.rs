@@ -4,6 +4,8 @@ use std::path::Path;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+/// The longest a box keeps billing after its payload exits, waiting for the laptop to collect;
+/// the laptop's lease reserves the same.
 const COLLECTION_GRACE: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Deserialize)]
