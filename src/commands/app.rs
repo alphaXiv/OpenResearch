@@ -49,13 +49,6 @@ pub fn launched_as_app_bundle() -> bool {
     is_bundle_exe_launch(&exe, std::env::args_os().next().as_deref())
 }
 
-/// Whether this process is the server a desktop window started, which says why it stopped
-/// to the window rather than in an alert of its own.
-#[cfg(windows)]
-pub fn serves_window() -> bool {
-    std::env::args_os().skip(1).any(|arg| arg == "--app-window")
-}
-
 /// The argument the Windows launcher and the Linux AppImage's AppRun start `orx`
 /// with, followed by nothing or the `openresearch:` link or `.orx` file that opened the app.
 #[cfg_attr(not(all(desktop_app, not(target_os = "macos"))), allow(dead_code))]
@@ -1011,7 +1004,7 @@ mod imp {
         MenuItemKind, PredefinedMenuItem, Submenu,
     };
     #[cfg(target_os = "macos")]
-    use objc2::runtime::{AnyClass, AnyObject, Bool, NSObjectProtocol, Sel};
+    use objc2::runtime::{AnyClass, AnyObject, NSObjectProtocol, Sel};
     #[cfg(target_os = "macos")]
     use objc2::MainThreadMarker;
     #[cfg(target_os = "macos")]
@@ -1512,8 +1505,6 @@ mod imp {
                 settings.set_javascript_can_open_windows_automatically(true);
             }
         }
-        #[cfg(target_os = "macos")]
-        add_confirm_panel(&webview);
         #[cfg(target_os = "macos")]
         add_window_material(&webview);
 
@@ -3033,57 +3024,6 @@ mod imp {
         // Over an extended frame DWM shows the backdrop through black, not the default white.
         window.set_background_color(Some((0, 0, 0, 0)));
         true
-    }
-
-    /// wry's WKUIDelegate has no confirm panel, and without one WebKit answers
-    /// every `window.confirm` with false, so add it to the delegate's class.
-    #[cfg(target_os = "macos")]
-    fn add_confirm_panel(webview: &WebView) {
-        type ConfirmPanel = unsafe extern "C-unwind" fn(
-            &AnyObject,
-            Sel,
-            *mut AnyObject,
-            &NSString,
-            *mut AnyObject,
-            &block2::Block<dyn Fn(Bool)>,
-        );
-        let wk = webview.webview();
-        unsafe {
-            let delegate: *mut AnyObject = objc2::msg_send![&*wk, UIDelegate];
-            let Some(delegate) = delegate.as_ref() else {
-                return;
-            };
-            let class: *const AnyClass = delegate.class();
-            let imp: ConfirmPanel = run_confirm_panel;
-            objc2::ffi::class_addMethod(
-                class.cast_mut(),
-                objc2::sel!(webView:runJavaScriptConfirmPanelWithMessage:initiatedByFrame:completionHandler:),
-                std::mem::transmute::<ConfirmPanel, objc2::runtime::Imp>(imp),
-                c"v@:@@@@?".as_ptr(),
-            );
-            // WebKit reads which methods a delegate has only when it is set.
-            let _: () = objc2::msg_send![&*wk, setUIDelegate: delegate];
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    unsafe extern "C-unwind" fn run_confirm_panel(
-        _this: &AnyObject,
-        _cmd: Sel,
-        _webview: *mut AnyObject,
-        message: &NSString,
-        _frame: *mut AnyObject,
-        handler: &block2::Block<dyn Fn(Bool)>,
-    ) {
-        // SAFETY: WebKit calls its UI delegate on the main thread.
-        let mtm = unsafe { MainThreadMarker::new_unchecked() };
-        // An NSAlert modal keeps the run loop turning, so the window still paints.
-        let alert = NSAlert::new(mtm);
-        alert.setMessageText(message);
-        alert.addButtonWithTitle(&NSString::from_str("OK"));
-        alert.addButtonWithTitle(&NSString::from_str("Cancel"));
-        let confirmed = alert.runModal() == NSAlertFirstButtonReturn;
-        handler.call((Bool::new(confirmed),));
     }
 
     #[cfg(test)]
