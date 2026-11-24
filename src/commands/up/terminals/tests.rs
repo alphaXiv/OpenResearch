@@ -207,8 +207,13 @@ async fn a_terminal_outlives_its_page_and_ends_with_its_tab() {
     let output = see(&mut page, &printed).await;
     assert!(!output.contains("two-"), "{output}");
     assert_eq!(delete_terminal(address, &project, "tab-1").await, 200);
+    keeper_gone("tab-1").await;
+}
+
+/// A keeper's directory goes after its shell's exit is reported, so it is waited for.
+async fn keeper_gone(id: &str) {
     let gone = async {
-        while !terminal_keepers("tab-1").is_empty() {
+        while !terminal_keepers(id).is_empty() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     };
@@ -525,7 +530,7 @@ async fn deleting_a_chat_or_project_ends_its_terminals_and_refuses_new_ones() {
     }
     // Deleted the way an agent deletes the chat it delegated to, not through the chat's page.
     state.chat.delete_session("deleted").await.unwrap();
-    assert!(terminal_keepers("deleted-tab").is_empty());
+    keeper_gone("deleted-tab").await;
     assert_eq!(terminal_keepers("kept-tab").len(), 1);
 
     let deleting = state.chat.begin_session_delete("kept").unwrap();
