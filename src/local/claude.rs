@@ -264,8 +264,6 @@ pub struct SpawnConfig {
     pub bridge_active: bool,
     /// The executable detection selected, so a newer install respawns the child.
     pub bin: Option<PathBuf>,
-    /// [`crate::local::user_skills::fingerprint`], so a changed skill set respawns the child.
-    pub skills: u64,
 }
 
 /// Everything needed to spawn (or respawn) a session's child, built per turn by
@@ -285,6 +283,8 @@ pub struct SpawnSpec {
     /// session holding `resume`'s history up to it.
     pub fork_at: Option<String>,
     pub config: SpawnConfig,
+    /// [`crate::local::user_skills::fingerprint`], taken before the turn copied skills in.
+    pub skills: Option<u64>,
 }
 
 /// A segment a child started on its own, routed to the turn that records it.
@@ -375,6 +375,7 @@ pub struct ClaudeClient {
     config: std::sync::Mutex<SpawnConfig>,
     /// The inherited model stays fixed even when the catalog resolves its alias differently.
     invocation_model: Option<String>,
+    skills: Option<u64>,
     auth_generation: u64,
     started_at: Instant,
     terminated: AtomicBool,
@@ -1038,6 +1039,7 @@ async fn spawn_client(
         turn: std::sync::Mutex::new(TurnSlot::new(started_at)),
         config: std::sync::Mutex::new(config),
         invocation_model,
+        skills: spec.skills,
         auth_generation,
         started_at,
         terminated: AtomicBool::new(false),
@@ -1492,6 +1494,12 @@ impl ClaudeHost {
             } else if !profile && live.auth_generation() != auth.generation {
                 self.inner.lock().await.remove(&session);
                 stop_client(live, "authentication-changed").await;
+            } else if crate::local::user_skills::changed(live.skills, spec.skills)
+                && live.turn.lock().unwrap().idle(Instant::now())
+            {
+                // Only an idle child: a skills change must not cost running background work.
+                self.inner.lock().await.remove(&session);
+                stop_client(live, "skills-changed").await;
             } else if live.config() == spec.config && live.invocation_model == invocation_model {
                 let latest = self.auth_snapshot();
                 if profile
@@ -1797,6 +1805,7 @@ pub(crate) mod tests {
             turn: std::sync::Mutex::new(TurnSlot::new(idle_since)),
             config: std::sync::Mutex::new(cfg(None, None, None, false)),
             invocation_model: None,
+            skills: None,
             auth_generation: 0,
             started_at,
             terminated: AtomicBool::new(false),
@@ -1973,7 +1982,6 @@ pub(crate) mod tests {
             alphaxiv_signed_in: false,
             bridge_active: bridge,
             bin: None,
-            skills: 0,
         }
     }
 
@@ -2028,6 +2036,7 @@ done
                         resume: None,
                         fork_at: None,
                         config,
+                        skills: None,
                     },
                     tx,
                 )
@@ -2103,6 +2112,7 @@ done
                 resume: None,
                 fork_at: None,
                 config,
+                skills: None,
             };
             let host = host.clone();
             async move { (host.acquire_turn(spec, tx).await, rx) }
@@ -2283,6 +2293,7 @@ done
                     resume: Some("saved-native-id".into()),
                     fork_at: None,
                     config: client.config(),
+                    skills: None,
                 },
                 Duration::from_millis(10),
             )
@@ -2556,6 +2567,43 @@ done
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn changed_skills_respawn_a_worker_only_once_its_background_work_ends() {
+        let host = ready_host();
+        let chat = Arc::new(crate::local::chat::ChatHost::new(
+            Arc::new(crate::local::opencode::AgentHost::new(None)),
+            Arc::new(crate::local::codex::CodexHost::new()),
+            host.clone(),
+        ));
+        let spec = |session: &str| SpawnSpec {
+            chat: chat.clone(),
+            session_id: session.into(),
+            repo: PathBuf::new(),
+            playbook: PathBuf::new(),
+            resume: None,
+            fork_at: None,
+            config: cfg(None, None, None, false),
+            skills: Some(2),
+        };
+
+        let busy = chat_echo_worker(&host, "busy", Weak::new()).await;
+        emit(
+            &busy,
+            &[json!({"type": "system", "subtype": "task_started", "task_id": "shell"})],
+        )
+        .await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        host.acquire_turn(spec("busy"), tx).await.unwrap();
+        assert!(!busy.terminated.load(Ordering::Acquire));
+
+        let idle = chat_echo_worker(&host, "idle", Weak::new()).await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let _ = host.acquire_turn(spec("idle"), tx).await;
+        assert!(idle.terminated.load(Ordering::Acquire));
+        host.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn reaper_keeps_active_stale_worker_then_reaps_it_after_release() {
         let now = Instant::now();
         let host = ClaudeHost::new();
@@ -2735,6 +2783,7 @@ done
                     resume: None,
                     fork_at: None,
                     config: cfg(None, None, None, false),
+                    skills: None,
                 },
                 tx,
             )

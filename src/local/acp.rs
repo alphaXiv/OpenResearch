@@ -348,7 +348,7 @@ pub async fn test_connection(definition: &Definition) -> Result<serde_json::Valu
             definition.name
         )
     })?;
-    let client = host::spawn(definition, &cwd, &definition.id, None, None).await?;
+    let client = host::spawn(definition, &cwd, &definition.id, None, None, None).await?;
     let result = serde_json::json!({
         "status": "connected",
         "agentInfo": client.initialized["agentInfo"],
@@ -414,7 +414,7 @@ pub async fn discover_models(definition: &Definition) -> Result<serde_json::Valu
     let directory = Directory::create(&id)?;
     let models = async {
         let cwd = &directory.0;
-        let client = host::spawn(definition, cwd, &id, None, None).await?;
+        let client = host::spawn(definition, cwd, &id, None, None, None).await?;
         let response = tokio::time::timeout(
             std::time::Duration::from_secs(20),
             client.request(
@@ -520,7 +520,7 @@ fn spawn_one_shot(
         };
         let mut reply = Some(sender);
         let spawned = {
-            let spawn = host::spawn(&definition, &directory.0, &id, None, None);
+            let spawn = host::spawn(&definition, &directory.0, &id, None, None, None);
             tokio::pin!(spawn);
             tokio::select! {
                 spawned = &mut spawn => spawned,

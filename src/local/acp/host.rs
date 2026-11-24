@@ -65,8 +65,7 @@ impl SessionIo {
 
 pub struct Client {
     alphaxiv_signed_in: bool,
-    /// [`crate::local::user_skills::fingerprint`] at spawn; a change respawns the agent.
-    skills: u64,
+    skills: Option<u64>,
     launch: Definition,
     configuration_lock: tokio::sync::Mutex<()>,
     pub connection: ConnectionTo<Agent>,
@@ -551,7 +550,11 @@ impl Host {
         cwd: &Path,
     ) -> Result<Arc<Client>> {
         self.start_reaper();
-        let skills = crate::local::user_skills::fingerprint(&definition.id);
+        let id = definition.id.clone();
+        let skills =
+            tokio::task::spawn_blocking(move || crate::local::user_skills::fingerprint(&id))
+                .await
+                .map_err(|error| anyhow!("skill catalog task failed: {error}"))?;
         let slot = self
             .clients
             .lock()
@@ -563,7 +566,8 @@ impl Host {
         if let Some(client) = saved.as_ref().filter(|client| {
             client.closed.borrow().is_none()
                 && client.alphaxiv_signed_in == crate::alphaxiv::signed_in()
-                && client.skills == skills
+                && (!crate::local::user_skills::changed(client.skills, skills)
+                    || client.running_a_command())
                 && client.launch == *definition
         }) {
             *client.idle_since.lock().unwrap() = None;
@@ -578,6 +582,7 @@ impl Host {
             session_id,
             self.events.clone(),
             self.up_port.get().copied(),
+            skills,
         )
         .await?;
         *client.idle_since.lock().unwrap() = None;
@@ -708,9 +713,9 @@ pub(super) async fn spawn(
     session_id: &str,
     events: Option<tokio::sync::broadcast::Sender<(&'static str, Value)>>,
     up_port: Option<u16>,
+    skills: Option<u64>,
 ) -> Result<Arc<Client>> {
     definition.validate_launch()?;
-    let skills = crate::local::user_skills::fingerprint(&definition.id);
     let executable = super::executable_path(&definition.executable).ok_or_else(|| {
         anyhow!(
             "Executable not found: {}. Install {} or check its launch command.",

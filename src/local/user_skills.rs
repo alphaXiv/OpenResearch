@@ -692,19 +692,38 @@ pub fn list_for_harness(harness: Option<&str>) -> Vec<UserSkill> {
     list_in(&root(), &native_skills(harness))
 }
 
-/// Identifies the skills a harness would load at startup. A resident agent keeps the
-/// catalog it started with, so a change here must respawn it.
-pub fn fingerprint(harness: &str) -> u64 {
-    fingerprint_in(&root(), &native_skills(Some(harness)))
+/// The catalog a harness loads at startup: uploads plus its own native skills dirs, by
+/// name and description. `None` when a dir can't be read, which is not a change.
+pub fn fingerprint(harness: &str) -> Option<u64> {
+    let roots = super::harness::chat_harness(harness)
+        .map(|agent| agent.native_skill_roots())
+        .unwrap_or_default();
+    fingerprint_in(&root(), harness, &roots)
 }
 
-fn fingerprint_in(root: &Path, mirrored: &[Mirrored]) -> u64 {
+fn fingerprint_in(root: &Path, harness: &str, native_roots: &[PathBuf]) -> Option<u64> {
     use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for skill in list_in(root, mirrored) {
-        (skill.name, skill.origin, skill.bytes, skill.updated_at).hash(&mut hasher);
+    let mut native = Vec::new();
+    for dir in native_roots {
+        let report = collect_mirrored(dir, harness, harness, false, 0, &mut native);
+        if report.status == SkillRootStatus::Unreadable {
+            return None;
+        }
     }
-    hasher.finish()
+    native.sort_by(|a, b| (&a.name, &a.dir).cmp(&(&b.name, &b.dir)));
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for skill in list_uploaded_in(root) {
+        (skill.name, skill.description).hash(&mut hasher);
+    }
+    for skill in native {
+        (skill.name, skill.description).hash(&mut hasher);
+    }
+    Some(hasher.finish())
+}
+
+/// Whether an agent started with skill catalog `started` should respawn for `current`.
+pub fn changed(started: Option<u64>, current: Option<u64>) -> bool {
+    current.is_some() && current != started
 }
 
 pub fn list_project_skills(repo: &Path, harness: Option<&str>) -> Vec<UserSkill> {
@@ -1519,33 +1538,41 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_changes_with_the_skills_an_agent_would_load() {
+    fn fingerprint_changes_with_the_catalog_an_agent_loads() {
         let root = temp_root();
         let agent = temp_root();
         let alpha = agent.join("alpha");
-        let mirrored = vec![mirrored_skill("Codex", &alpha, &skill_md("alpha"), &[])];
-        let initial = fingerprint_in(&root, &mirrored);
-        assert_eq!(fingerprint_in(&root, &mirrored), initial);
+        mirrored_skill("Codex", &alpha, &skill_md("alpha"), &[]);
+        let roots = [agent.clone(), agent.join("missing")];
+        let initial = fingerprint_in(&root, "codex", &roots);
+        assert!(initial.is_some());
+        assert_eq!(fingerprint_in(&root, "codex", &roots), initial);
 
         save_skill_md_in(&root, skill_md("beta").as_bytes()).unwrap();
-        assert_ne!(fingerprint_in(&root, &mirrored), initial);
+        assert_ne!(fingerprint_in(&root, "codex", &roots), initial);
         delete_in(&root, "beta").unwrap();
-        assert_eq!(fingerprint_in(&root, &mirrored), initial);
+        assert_eq!(fingerprint_in(&root, "codex", &roots), initial);
 
-        fs::create_dir_all(root.join("excluded")).unwrap();
-        fs::write(root.join("excluded/alpha"), "").unwrap();
-        assert_ne!(fingerprint_in(&root, &mirrored), initial);
-        fs::remove_file(root.join("excluded/alpha")).unwrap();
+        fs::write(alpha.join("cache.pyc"), "written by the skill's script").unwrap();
+        assert_eq!(fingerprint_in(&root, "codex", &roots), initial);
 
         fs::write(
             alpha.join("SKILL.md"),
             skill_md_desc("alpha", "Rewritten. Use when testing."),
         )
         .unwrap();
-        assert_ne!(fingerprint_in(&root, &mirrored), initial);
+        assert_ne!(fingerprint_in(&root, "codex", &roots), initial);
 
-        let _ = fs::remove_dir_all(root);
-        let _ = fs::remove_dir_all(agent);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(agent).unwrap();
+    }
+
+    #[test]
+    fn only_a_known_new_catalog_respawns_an_agent() {
+        assert!(!changed(Some(1), Some(1)));
+        assert!(changed(Some(1), Some(2)));
+        assert!(changed(None, Some(2)));
+        assert!(!changed(Some(1), None));
     }
 
     #[test]

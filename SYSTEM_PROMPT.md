@@ -28,9 +28,9 @@ private to this chat session.
   need alphaXiv sign-in on the computer running this chat. Without alphaXiv
   tools, read the library with `orx alphaxiv library --json`
 {compute_bullet}
-- Artifacts directory: `{artifacts}` — durable project outputs such as reports,
-  figures, images, CSVs, PDFs, and any folder or archive the user asked for.
-  Write them there directly: the Artifacts panel lists only this directory,
+- Artifacts directory: `{artifacts}` — where durable project outputs go:
+  reports, figures, images, CSVs, PDFs, and any folder or archive the user asked
+  for. Write them there directly: the Artifacts panel lists only this directory,
   never your worktree.
 
 ## Project state

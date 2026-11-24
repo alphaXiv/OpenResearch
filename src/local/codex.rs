@@ -224,8 +224,7 @@ pub struct CodexClient {
     native_store: NativeStore,
     pub(crate) profile: Option<String>,
     alphaxiv_signed_in: bool,
-    /// [`crate::local::user_skills::fingerprint`] at spawn; a change respawns the agent.
-    skills: u64,
+    skills: Option<u64>,
     /// The executable this child runs; once detection picks another, the next turn respawns it.
     bin: PathBuf,
     session_id: String,
@@ -759,8 +758,8 @@ fn spawn_client(
     profile: Option<String>,
     bin: PathBuf,
     codex_home: PathBuf,
+    skills: Option<u64>,
 ) -> Result<Arc<CodexClient>> {
-    let skills = crate::local::user_skills::fingerprint("codex");
     let mut cmd = crate::process::tokio_command(&bin);
     cmd.arg("app-server");
     if let Some(override_arg) =
@@ -916,9 +915,15 @@ impl CodexHost {
     ) -> Result<Arc<CodexClient>> {
         let profile = profile.map(str::to_string);
         let preparing_profile = profile.clone();
-        let codex_home = tokio::task::spawn_blocking(move || match preparing_profile {
-            Some(id) => crate::local::agent_profiles::prepare(&id, "codex"),
-            None => native_store::prepare_codex(native_store),
+        let (codex_home, skills) = tokio::task::spawn_blocking(move || {
+            use crate::local::harness::Harness;
+            let skills =
+                crate::local::user_skills::fingerprint(crate::local::harness::codex::Codex.id());
+            match preparing_profile {
+                Some(id) => crate::local::agent_profiles::prepare(&id, "codex"),
+                None => native_store::prepare_codex(native_store),
+            }
+            .map(|home| (home, skills))
         })
         .await
         .map_err(|error| anyhow!("Codex config preparation failed: {error}"))?
@@ -927,20 +932,28 @@ impl CodexHost {
         let session = session_id.to_string();
         let spawn_profile = profile.clone();
         let selected = find_codex();
-        self.ensure_with_spawn(session_id, native_store, profile, selected, async move {
-            let bin =
-                find_codex_required().map_err(|e| SetupFailure::tag("codex_setup_binary", e))?;
-            Ok(move || {
-                spawn_client(
-                    &session,
-                    host.up_port.get().copied(),
-                    native_store,
-                    spawn_profile,
-                    bin,
-                    codex_home,
-                )
-            })
-        })
+        self.ensure_with_spawn(
+            session_id,
+            native_store,
+            profile,
+            selected,
+            skills,
+            async move {
+                let bin = find_codex_required()
+                    .map_err(|e| SetupFailure::tag("codex_setup_binary", e))?;
+                Ok(move || {
+                    spawn_client(
+                        &session,
+                        host.up_port.get().copied(),
+                        native_store,
+                        spawn_profile,
+                        bin,
+                        codex_home,
+                        skills,
+                    )
+                })
+            },
+        )
         .await
     }
 
@@ -950,6 +963,7 @@ impl CodexHost {
         native_store: NativeStore,
         profile: Option<String>,
         bin: Option<PathBuf>,
+        skills: Option<u64>,
         prepare: impl std::future::Future<Output = Result<F>>,
     ) -> Result<Arc<CodexClient>>
     where
@@ -958,7 +972,13 @@ impl CodexHost {
         {
             let _spawning = self.spawn_lock.lock().await;
             if let Some(existing) = self
-                .reusable_client(session_id, native_store, profile.as_deref(), bin.as_deref())
+                .reusable_client(
+                    session_id,
+                    native_store,
+                    profile.as_deref(),
+                    bin.as_deref(),
+                    skills,
+                )
                 .await
             {
                 return Ok(existing);
@@ -976,7 +996,13 @@ impl CodexHost {
             }
             // Another caller may have completed startup during preparation.
             if let Some(existing) = host
-                .reusable_client(&session, native_store, profile.as_deref(), bin.as_deref())
+                .reusable_client(
+                    &session,
+                    native_store,
+                    profile.as_deref(),
+                    bin.as_deref(),
+                    skills,
+                )
                 .await
             {
                 let _ = ready_tx.send(Ok(existing));
@@ -1035,15 +1061,15 @@ impl CodexHost {
         native_store: NativeStore,
         profile: Option<&str>,
         bin: Option<&Path>,
+        skills: Option<u64>,
     ) -> Option<Arc<CodexClient>> {
-        let skills = crate::local::user_skills::fingerprint("codex");
         let guard = self.inner.lock().await;
         let client = guard.get(session_id)?;
         if client.native_store() == native_store
             && client.profile.as_deref() == profile
             && bin.is_none_or(|bin| bin == client.bin)
             && client.alphaxiv_signed_in == crate::alphaxiv::signed_in()
-            && client.skills == skills
+            && !crate::local::user_skills::changed(client.skills, skills)
             && matches!(client.child.lock().await.try_wait(), Ok(None))
         {
             client.touch();
@@ -1443,7 +1469,7 @@ pub(crate) mod tests {
             native_store: NativeStore::Isolated,
             profile: None,
             alphaxiv_signed_in: false,
-            skills: crate::local::user_skills::fingerprint("codex"),
+            skills: None,
             bin: PathBuf::new(),
             session_id: String::new(),
             turn_models: std::sync::Mutex::new(HashMap::new()),
@@ -1513,7 +1539,7 @@ pub(crate) mod tests {
             native_store: NativeStore::Isolated,
             profile: None,
             alphaxiv_signed_in: false,
-            skills: crate::local::user_skills::fingerprint("codex"),
+            skills: None,
             bin: PathBuf::new(),
             session_id: String::new(),
             turn_models: std::sync::Mutex::new(HashMap::new()),
@@ -1598,6 +1624,7 @@ pub(crate) mod tests {
                 "chat",
                 NativeStore::Isolated,
                 Some("codex-012345abcd"),
+                None,
                 None
             )
             .await
@@ -1607,12 +1634,13 @@ pub(crate) mod tests {
                 "chat",
                 NativeStore::Isolated,
                 Some("codex-abcdefghij"),
+                None,
                 None
             )
             .await
             .is_none());
         assert!(host
-            .reusable_client("chat", NativeStore::Isolated, None, None)
+            .reusable_client("chat", NativeStore::Isolated, None, None, None)
             .await
             .is_none());
         host.kill_session("chat").await;
@@ -1620,19 +1648,25 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn client_reuse_requires_the_same_skills() {
+    async fn client_reuse_requires_the_same_known_skills() {
         let host = Arc::new(CodexHost::new());
         let mut client = idle_test_client(Instant::now());
-        Arc::get_mut(&mut client).unwrap().skills =
-            crate::local::user_skills::fingerprint("codex").wrapping_add(1);
+        Arc::get_mut(&mut client).unwrap().skills = Some(1);
         host.inner
             .lock()
             .await
             .insert("chat".into(), client.clone());
-        assert!(host
-            .reusable_client("chat", NativeStore::Isolated, None, None)
-            .await
-            .is_none());
+        let reuse = |skills| {
+            let host = host.clone();
+            async move {
+                host.reusable_client("chat", NativeStore::Isolated, None, None, skills)
+                    .await
+                    .is_some()
+            }
+        };
+        assert!(reuse(Some(1)).await);
+        assert!(reuse(None).await);
+        assert!(!reuse(Some(2)).await);
         host.kill_session("chat").await;
     }
 
@@ -1649,9 +1683,15 @@ pub(crate) mod tests {
         let reusable = |bin: &'static str| {
             let host = host.clone();
             async move {
-                host.reusable_client("chat", NativeStore::Isolated, None, Some(Path::new(bin)))
-                    .await
-                    .is_some()
+                host.reusable_client(
+                    "chat",
+                    NativeStore::Isolated,
+                    None,
+                    Some(Path::new(bin)),
+                    None,
+                )
+                .await
+                .is_some()
             }
         };
         assert!(reusable("/user/codex").await);
@@ -1714,14 +1754,14 @@ pub(crate) mod tests {
         let spawned = client.clone();
         let ensured = tokio::time::timeout(
             Duration::from_secs(2),
-            host.ensure_with_spawn("compact", NativeStore::Isolated, None, None, async {
+            host.ensure_with_spawn("compact", NativeStore::Isolated, None, None, None, async {
                 Ok(move || Ok(spawned))
             }),
         )
         .await;
         let reused = tokio::time::timeout(
             Duration::from_secs(2),
-            host.ensure_with_spawn("compact", NativeStore::Isolated, None, None, async {
+            host.ensure_with_spawn("compact", NativeStore::Isolated, None, None, None, async {
                 Ok(|| panic!("initialized client must be reused"))
             }),
         )
@@ -1744,21 +1784,28 @@ pub(crate) mod tests {
         let operation_host = host.clone();
         let operation = tokio::spawn(async move {
             operation_host
-                .ensure_with_spawn("compact", NativeStore::Isolated, None, None, async move {
-                    let _ = started_tx.send(());
-                    let _ = release_rx.await;
-                    Ok(move || {
-                        spawn_flag.store(true, Ordering::Release);
-                        Ok(idle_test_client(Instant::now()))
-                    })
-                })
+                .ensure_with_spawn(
+                    "compact",
+                    NativeStore::Isolated,
+                    None,
+                    None,
+                    None,
+                    async move {
+                        let _ = started_tx.send(());
+                        let _ = release_rx.await;
+                        Ok(move || {
+                            spawn_flag.store(true, Ordering::Release);
+                            Ok(idle_test_client(Instant::now()))
+                        })
+                    },
+                )
                 .await
         });
         started_rx.await.unwrap();
         // A stalled preparation neither blocks reuse nor another cold startup.
         let reused = tokio::time::timeout(
             Duration::from_secs(2),
-            host.ensure_with_spawn("warm", NativeStore::Isolated, None, None, async {
+            host.ensure_with_spawn("warm", NativeStore::Isolated, None, None, None, async {
                 Ok(|| panic!("a warm client must not be spawned again"))
             }),
         )
@@ -1768,7 +1815,7 @@ pub(crate) mod tests {
         assert!(Arc::ptr_eq(&reused, &warm));
         let cold = tokio::time::timeout(
             Duration::from_secs(2),
-            host.ensure_with_spawn("other", NativeStore::Isolated, None, None, async {
+            host.ensure_with_spawn("other", NativeStore::Isolated, None, None, None, async {
                 Err::<fn() -> Result<Arc<CodexClient>>, _>(anyhow!("preparation reached"))
             }),
         )
@@ -1787,7 +1834,7 @@ pub(crate) mod tests {
         let operation_host = host.clone();
         let operation = tokio::spawn(async move {
             operation_host
-                .ensure_with_spawn("compact", NativeStore::Isolated, None, None, async {
+                .ensure_with_spawn("compact", NativeStore::Isolated, None, None, None, async {
                     Ok(move || Ok(spawned))
                 })
                 .await
@@ -1917,7 +1964,7 @@ pub(crate) mod tests {
             native_store: NativeStore::Isolated,
             profile: None,
             alphaxiv_signed_in: false,
-            skills: crate::local::user_skills::fingerprint("codex"),
+            skills: None,
             bin: PathBuf::new(),
             session_id: String::new(),
             turn_models: std::sync::Mutex::new(HashMap::new()),

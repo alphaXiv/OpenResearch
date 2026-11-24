@@ -441,8 +441,7 @@ struct AgentChild {
     config: Option<std::ffi::OsString>,
     native_store: NativeStore,
     alphaxiv_signed_in: bool,
-    /// [`crate::local::user_skills::fingerprint`] at spawn; a change respawns the agent.
-    skills: u64,
+    skills: Option<u64>,
     binary: ResolvedBinary,
     endpoint: AgentEndpoint,
     database: native_store::opencode_database::DatabaseLease,
@@ -471,14 +470,18 @@ async fn spawn_agent(
     binary: ResolvedBinary,
     database: native_store::opencode_database::DatabaseLease,
 ) -> Result<AgentChild> {
-    let skills = crate::local::user_skills::fingerprint("opencode");
     // The clone/worktree setup inside can hit the network; keep it off the
     // async workers.
-    let (repo, config_override) = {
+    let (skills, (repo, config_override)) = {
         let (project, model) = (project.clone(), model.map(str::to_string));
         let session = session_id.to_string();
         tokio::task::spawn_blocking(move || {
+            use crate::local::harness::Harness;
+            let skills = crate::local::user_skills::fingerprint(
+                crate::local::harness::opencode::OpenCode.id(),
+            );
             write_agent_files(&project, model.as_deref(), &session, up_port)
+                .map(|files| (skills, files))
         })
         .await
         .map_err(|e| anyhow!("agent file task failed: {e}"))??
@@ -952,13 +955,18 @@ impl AgentHost {
         let mut current = crate::process::tokio_command(&binary.path);
         prepare_chat_env(&mut current, model, session_id)?;
         let config = inline_config(&current);
-        let skills = crate::local::user_skills::fingerprint("opencode");
+        let skills = tokio::task::spawn_blocking(|| {
+            use crate::local::harness::Harness;
+            crate::local::user_skills::fingerprint(crate::local::harness::opencode::OpenCode.id())
+        })
+        .await
+        .map_err(|error| anyhow!("skill catalog task failed: {error}"))?;
         {
             let mut guard = self.inner.lock().await;
             if let Some(agent) = guard.get_mut(session_id) {
                 if agent.project_id == project.id
                     && agent.alphaxiv_signed_in == crate::alphaxiv::signed_in()
-                    && agent.skills == skills
+                    && !crate::local::user_skills::changed(agent.skills, skills)
                     && agent.native_store == native_store
                     && agent.binary == binary
                     && agent.database.path() == database_path
