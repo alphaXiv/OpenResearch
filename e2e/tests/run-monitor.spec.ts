@@ -394,7 +394,7 @@ for (let step = 1; step <= total; step++) {
   })
 
   await test.step('the run goes on while orx up is down; the open page catches up with each step once', async () => {
-    await orx.restart('SIGTERM', () => run.open('half'))
+    await orx.restart('SIGTERM', { meanwhile: () => run.open('half') })
     await expect(banner).toContainText(said('Step 30 of 40'), { timeout: 20_000 })
     await expect(banner.getByRole('progressbar')).toHaveCount(1)
     await expect(chart).toHaveAccessibleName(said('loss 0.0667'))

@@ -45,7 +45,7 @@ export function rememberWorkspace(state: RightPaneSessionState, scroll: TaskWork
     history: state.tabHistory.map(rightTabKey),
     expanded: Object.fromEntries([["files", [...state.filesToggled]], ...state.codeTabs.map((tab) => [rightTabKey(tab), [...tab.toggled]])]),
     scroll, sourceModes, filesView: state.filesView, scope: state.scope, panelMax: state.panelMax,
-    treeViewport: state.treeViewport };
+    treeViewport: state.treeViewport, ...(state.terminalTabOpen && state.terminalId ? { terminalId: state.terminalId } : {}) };
 }
 
 export function restoreWorkspace(saved: TaskWorkspace | undefined, pane: Pane | undefined): RightPaneSessionState {
@@ -87,6 +87,7 @@ export function restoreWorkspace(saved: TaskWorkspace | undefined, pane: Pane | 
   state.rightTab = pane ? paneTab(pane) : saved?.active ? paneTab(saved.active) : "experiments";
   state.panelOpen = pane !== undefined;
   state.selectedRunId = pane?.kind === "experiment" ? pane.runId ?? null : null;
+  if (state.terminalTabOpen) state.terminalId = saved?.terminalId ?? crypto.randomUUID();
   return applyPane(state, pane);
 }
 
@@ -236,6 +237,8 @@ export interface RightPaneSessionState {
   filesTabOpen: boolean;
   artifactsTabOpen: boolean;
   terminalTabOpen: boolean;
+  /** The server's id for the terminal tab's shell, while the tab is open. */
+  terminalId: string | null;
   expTabs: ExpViewDef[];
   fileTabs: FileViewDef[];
   planTabs: PlanViewDef[];
@@ -266,6 +269,7 @@ export function initialRightPaneSessionState(
     filesTabOpen: false,
     artifactsTabOpen: false,
     terminalTabOpen: false,
+    terminalId: null,
     expTabs: [],
     fileTabs: [],
     planTabs: [],
@@ -317,7 +321,7 @@ export function applyPane(state: RightPaneSessionState, pane: Pane | undefined):
   if (typeof tab === "string") {
     if (tab === "files") next.filesTabOpen = true;
     else if (tab === "artifacts") next.artifactsTabOpen = true;
-    else if (tab === "terminal") next.terminalTabOpen = true;
+    else if (tab === "terminal") { next.terminalTabOpen = true; next.terminalId = state.terminalId ?? crypto.randomUUID(); }
     else next.experimentsTabOpen = true;
   } else {
     if ("path" in tab) next.fileTabs = update(state.fileTabs, tab);

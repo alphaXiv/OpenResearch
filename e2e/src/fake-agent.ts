@@ -105,6 +105,17 @@ async function prompt(request: Message) {
   }
 }
 
+async function start(request: Message) {
+  const sessionId = `e2e-${crypto.randomUUID()}`
+  if (!request.params?.mcpServers?.length) oneShots.add(sessionId)
+  else if (control) {
+    const { hold } = (await (await fetch(`${control}/session`, { method: 'POST' })).json()) as { hold?: string }
+    if (hold) await fetch(`${control}/hold/${encodeURIComponent(hold)}`, { method: 'POST' })
+  }
+  const models = { currentModelId: 'e2e', availableModels: [{ modelId: 'e2e', name: 'E2E Model' }] }
+  send({ id: request.id, result: { sessionId, models } })
+}
+
 function handle(message: Message) {
   if (message.method === undefined) {
     reverse.get(String(message.id))?.(message)
@@ -117,12 +128,8 @@ function handle(message: Message) {
         id: message.id,
         result: { protocolVersion: 1, agentInfo: { name: 'orx e2e agent', version: '1.0.0' }, agentCapabilities: { loadSession: true } },
       })
-    case 'session/new': {
-      const sessionId = `e2e-${crypto.randomUUID()}`
-      if (!message.params?.mcpServers?.length) oneShots.add(sessionId)
-      const models = { currentModelId: 'e2e', availableModels: [{ modelId: 'e2e', name: 'E2E Model' }] }
-      return send({ id: message.id, result: { sessionId, models } })
-    }
+    case 'session/new':
+      return void start(message)
     case 'session/load':
     case 'session/set_model':
       return send({ id: message.id, result: {} })

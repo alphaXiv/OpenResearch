@@ -7,7 +7,7 @@ import { find, press, renderApp, serveApp, settle } from "./render.mjs";
 
 const dialog = () => document.querySelector('[role="dialog"], [role="alertdialog"]');
 const agent = (title, extra = {}) => ({
-  projectId: "project", project: "Scaling laws", sessionId: title, sideParentId: null, harness: "codex", title, ...extra,
+  projectId: "project", project: "Scaling laws", sessionId: title, sideParentId: null, harness: "codex", title, resumesAfterRestart: false, ...extra,
 });
 const run = (name, afterQuit, backend = "modal_job") => ({
   projectId: "project", project: "Scaling laws", experimentId: `${name}-experiment`, runId: name, sessionId: "chat", name, backend, afterQuit,
@@ -192,6 +192,22 @@ test("restarting for an update first asks to stop the agents at work, and only t
   await settle();
   assert.ok(!dialog());
   assert.deepEqual(restarts, [{ stopAgents: true }]);
+});
+
+test("agents that go on with their turn after a restart are neither listed nor stopped, but a quit lists them", async () => {
+  const restarts = await restartable({ agents: [agent("Tune the schedule", { resumesAfterRestart: true }), agent("Sweep the lr")], runs: [] });
+  await restart();
+  assert.deepEqual([...dialog().querySelectorAll("li button")].map((row) => row.textContent), ["Sweep the lrScaling laws"]);
+  await click(m.common_cancel());
+
+  pending = { agents: [agent("Tune the schedule", { resumesAfterRestart: true })], runs: [] };
+  await restart();
+  assert.ok(!dialog());
+  assert.deepEqual(restarts, [{ stopAgents: false }]);
+
+  window.ipc = { postMessage: () => {} };
+  await ask(pending);
+  assert.deepEqual(listed(m.close_pending_agents()), ["Tune the scheduleScaling laws"]);
 });
 
 test("experiments carry on through a restart, so they alone never ask", async () => {

@@ -39,6 +39,9 @@ pub struct TaskWorkspace {
     panel_max: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tree_viewport: Option<TreeViewport>,
+    /// The page's id for the task's project terminal, so a reload finds the same shell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    terminal_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -193,6 +196,14 @@ impl Pane {
     }
 }
 
+/// A terminal id the page chose: a UUID or anything of its alphabet.
+pub fn valid_terminal_id(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
 impl WorkspaceState {
     pub fn validate(&self) -> Result<()> {
         if self.version != 1
@@ -202,6 +213,7 @@ impl WorkspaceState {
                 id.is_empty()
                     || !task.tabs.iter().all(Pane::valid)
                     || !task.active.as_ref().is_none_or(Pane::valid)
+                    || !task.terminal_id.as_deref().is_none_or(valid_terminal_id)
                     || task.tree_viewport.as_ref().is_some_and(|viewport| {
                         !viewport.x.is_finite()
                             || !viewport.y.is_finite()
@@ -395,6 +407,28 @@ mod tests {
             .unwrap()
             .x = f64::INFINITY;
         assert!(state.validate().is_err());
+    }
+
+    #[test]
+    fn terminal_id_is_optional_and_validated() {
+        let mut value = json!({"version":1,"tasks":{"new":{
+            "tabs":[],"active":null,"previewKey":null,"history":[],"expanded":{},
+            "scroll":{},"sourceModes":{},"filesView":"files","scope":"project","panelMax":false
+        }}});
+        let without = WorkspaceState::from_stored(&value.to_string()).unwrap();
+        assert!(serde_json::to_value(&without).unwrap()["tasks"]["new"]
+            .get("terminalId")
+            .is_none());
+        value["tasks"]["new"]["terminalId"] = json!("0b6c3c5e-7f3d-4a8e-9a39-2f1e6c1d8b47");
+        let state = WorkspaceState::from_stored(&value.to_string()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&state).unwrap()["tasks"]["new"]["terminalId"],
+            value["tasks"]["new"]["terminalId"]
+        );
+        for id in ["", "../other", "a b", &"a".repeat(65)] {
+            value["tasks"]["new"]["terminalId"] = json!(id);
+            assert!(WorkspaceState::from_stored(&value.to_string()).is_none());
+        }
     }
 
     #[test]

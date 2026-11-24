@@ -57,10 +57,16 @@ pub(crate) mod model_feed;
 mod network;
 mod project_settings;
 mod search;
+mod terminals;
 mod usage;
 use compute_settings::*;
 
 pub async fn run(args: UpArgs) -> Result<()> {
+    if args.app_window {
+        if let Err(error) = relay_stderr() {
+            eprintln!("orx up: could not relay stderr to the app window: {error}");
+        }
+    }
     // orx's own clients reach the server on 127.0.0.1, which both of these binds serve.
     let reach = match args.host {
         std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) => up_remote::Reach::Loopback,
@@ -71,7 +77,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
             ))
         }
     };
-    if !args.desktop_app && !args.remote_host && !args.headless {
+    if !args.app_window && !args.remote_host && !args.headless {
         let data_dir = crate::commands::remote_host::canonical_data_dir()?;
         if let Some(server) =
             crate::commands::remote_host::ServerDescriptor::live(&data_dir).await?
@@ -93,10 +99,6 @@ pub async fn run(args: UpArgs) -> Result<()> {
     updates::note_startup_image();
     let port = args.port;
     let persistent_host = args.remote_host;
-    // Agent sessions and the CLI present this bearer to the server's API.
-    let token = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
-    local::chat::set_up_auth_token(token.clone());
-    let remote_auth = persistent_host.then(|| RemoteAuth::new(&token));
     let data_dir = crate::commands::remote_host::canonical_data_dir()?;
     // The engine lock: one engine per data directory.
     let dashboard_lock = DashboardLock::acquire(&data_dir)?;
@@ -115,23 +117,58 @@ pub async fn run(args: UpArgs) -> Result<()> {
     // An install that finished while this process waited replaced the image it was started from.
     if backend_lock.is_some() && updates::updated_exe_on_disk().await {
         drop(backend_lock);
-        let err = updates::relaunch(port);
+        let err = updates::relaunch();
         return Err(anyhow!("orx up: could not restart: {err}"));
     }
-    let listener = tokio::net::TcpListener::bind((args.host, port))
-        .await
-        .map_err(|error| {
-            anyhow!(
-                "Could not bind {}: {}",
-                SocketAddr::new(args.host, port),
-                error
-            )
-        })?;
+    let inherited = Lineage::inherited()?;
+    // The desktop app chose its port already, preferring this one.
+    let recorded = inherited
+        .as_ref()
+        .map(|lineage| lineage.port)
+        .filter(|recorded| *recorded != port && !args.app_window);
+    let taken_back = match recorded {
+        Some(recorded) => {
+            match tokio::net::TcpListener::bind((args.host, recorded)).await {
+                Ok(listener) => Some(listener),
+                Err(error) => {
+                    eprintln!("orx up: could not take back port {recorded}, which kept agents call: {error}");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    let listener = match taken_back {
+        Some(listener) => listener,
+        None => tokio::net::TcpListener::bind((args.host, port))
+            .await
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::AddrInUse => {
+                    anyhow!("Another program is using port {port}. Quit it and try again.")
+                }
+                _ => anyhow!(
+                    "Could not bind {}: {}",
+                    SocketAddr::new(args.host, port),
+                    error
+                ),
+            })?,
+    };
     let actual_port = listener.local_addr()?.port();
+    // Kept agents call the port and bearer in their environment, so only their own lineage reaches them.
+    let inherited = inherited.filter(|lineage| lineage.port == actual_port);
+    let reachable = inherited.is_some();
+    let lineage = inherited.unwrap_or_else(|| Lineage::fresh(actual_port));
+    if let Err(error) = lineage.record() {
+        eprintln!("orx up: agents started now will not survive a restart: {error:#}");
+    }
+    // Agent sessions and the CLI present this bearer to the server's API.
+    let token = lineage.token.clone();
+    local::chat::set_up_auth_token(token.clone());
+    local::chat::delegation::set_agent_key(lineage.agent_key);
+    let remote_auth = persistent_host.then(|| RemoteAuth::new(&token));
     // Open early so the schema exists before any request or agent spawn.
     {
         let store = Store::open()?;
-        local::chat::reconcile_unfinished_turns(&store)?;
         // Under the engine lock, before any notice can be produced.
         store.migrate_run_wakeups()?;
     }
@@ -173,7 +210,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     )?);
     api_v2::install(api.clone())?;
 
-    let remote_instance_id = persistent_host.then(|| uuid::Uuid::new_v4().to_string());
+    let remote_instance_id = persistent_host.then(crate::commands::remote_host::instance_id);
     let state = AppState {
         agent: agent.clone(),
         chat: chat.clone(),
@@ -192,12 +229,19 @@ pub async fn run(args: UpArgs) -> Result<()> {
         stopping: stopping.clone(),
         dashboard_locks: Arc::new(std::sync::Mutex::new(vec![dashboard_lock])),
         restart: Arc::new(tokio::sync::Notify::new()),
+        app_window: args.app_window,
         reopen: Arc::default(),
         trackio: Arc::default(),
         opencode_signins: Arc::default(),
+        terminals: Arc::default(),
     };
+    state.terminals.adopt(crate::keep::entries()?).await;
+    if let Err(error) = state.remote_sessions.restore().await {
+        eprintln!("orx up: {error:#}");
+    }
     // Plan-mode turns hand this port to the `orx mcp` permission bridge.
     state.chat.set_up_port(actual_port);
+    end_terminals_with_their_chats(&state);
     {
         let lifecycle = state.project_lifecycle.clone();
         let moving = state.data_dir_move_in_progress.clone();
@@ -220,6 +264,8 @@ pub async fn run(args: UpArgs) -> Result<()> {
     if let Err(error) = recovered.await {
         eprintln!("orx up: recovering interrupted project moves stopped: {error}");
     }
+    // Before serving: agents' calls must find their chats and turns taken back.
+    local::chat::adopt_kept_work(&state.chat, reachable).await?;
     // Before any queue, notice or lease sweep can take a quit turn's slot.
     state.chat.resume_quit_turns().await;
     {
@@ -238,7 +284,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
                 if moving.load(std::sync::atomic::Ordering::SeqCst) {
                     continue;
                 }
-                if let Err(err) = chat.reconcile_expired_turn_leases() {
+                if let Err(err) = chat.reconcile_expired_turn_leases().await {
                     eprintln!("orx up: could not reconcile expired chat turns: {err}");
                 }
                 // Also picks up moves waiting from before a restart.
@@ -292,7 +338,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         state.harness_fill_in_flight.clone(),
     );
     spawn_background_tasks(remote_auth.is_none());
-    if !persistent_host && !args.desktop_app {
+    if !persistent_host && !args.app_window {
         spawn_restart_when_idle(state.clone());
     }
     let live_events = state.chat.clone();
@@ -337,6 +383,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
             crate::commands::remote_host::start_control_server(
                 HostDescriptor {
                     instance_id: remote_instance_id.clone().expect("persistent instance id"),
+                    restarting_until: None,
                     hostname: crate::commands::remote_host::hostname(),
                     port: actual_port,
                     version: env!("CARGO_PKG_VERSION").into(),
@@ -369,13 +416,13 @@ pub async fn run(args: UpArgs) -> Result<()> {
         if let Some(warning) = crate::local::bash::missing_toolchain() {
             eprintln!("orx up: warning: {warning}");
         }
-        if !args.desktop_app && !persistent_host && std::io::stderr().is_terminal() {
+        if !args.app_window && !persistent_host && std::io::stderr().is_terminal() {
             eprintln!(
                 "orx up: the OpenResearch desktop app opens these same projects: {}",
                 crate::updates::desktop_app_download_url()
             );
         }
-        if !args.no_browser {
+        if !args.no_browser && !args.app_window {
             browser::open_dashboard(&url, crate::telemetry::UpLaunchMode::of(&args));
         }
     }
@@ -387,11 +434,26 @@ pub async fn run(args: UpArgs) -> Result<()> {
     // over SSH by `orx up --remote`, closing that tunnel (the launcher's Ctrl-C)
     // delivers SIGHUP here as the channel tears down — without handling it the
     // remote server would leak, staying bound to its port after the tunnel dies.
+    if persistent_host {
+        let state = state.clone();
+        tokio::spawn(async move {
+            crate::commands::remote_host::RESTART.notified().await;
+            loop {
+                if begin_restart(&state, 0, true).await.is_ok() {
+                    state.restart.notify_one();
+                    return;
+                }
+                tokio::time::sleep(crate::config::paced(Duration::from_millis(100))).await;
+            }
+        });
+    }
     let restart = state.restart.clone();
     let (stop_monitoring, stop) = tokio::sync::watch::channel(());
     let monitor = tokio::spawn(crate::engine::monitor::keep_current(engine, stop.clone()));
     let watcher = tokio::spawn(crate::engine::watch::keep_watching(stop));
     let mut restarting = false;
+    // A development rebuild, or a window gone without quitting, hands off like an update and exits.
+    let mut handing_off = false;
     let mut explicit_stop = false;
     let served = tokio::select! {
         result = axum::serve(listener, app) => result,
@@ -400,6 +462,8 @@ pub async fn run(args: UpArgs) -> Result<()> {
             Ok(())
         }
         _ = restart.notified() => { restarting = true; Ok(()) }
+        _ = hand_off_signal(), if !persistent_host => { handing_off = true; Ok(()) }
+        _ = window_closed(), if args.app_window => { handing_off = true; Ok(()) }
         _ = async {
             if persistent_host {
                 persistent_shutdown_signal().await;
@@ -409,6 +473,8 @@ pub async fn run(args: UpArgs) -> Result<()> {
             }
         } => Ok(()),
     };
+    // Reopening into another data directory leaves no successor to take its children back.
+    let hand_off = handing_off || restarting && !state.reopen.load(Ordering::SeqCst);
     if persistent_host {
         stopping.store(true, std::sync::atomic::Ordering::SeqCst);
     }
@@ -420,28 +486,48 @@ pub async fn run(args: UpArgs) -> Result<()> {
             eprintln!("orx up: shutting down the {name}: {error}");
         }
     }
-    if explicit_stop {
+    if hand_off {
+        local::harness::ONE_SHOTS.finish().await;
+        state.chat.hand_off().await;
+    } else if explicit_stop {
         state.chat.interrupt_all().await;
     } else {
         state.chat.stop_for_shutdown().await;
     }
     state.opencode_signins.shutdown().await;
     state.remote_sessions.shutdown().await;
-    agent.shutdown().await;
-    tokio::join!(codex.shutdown(), claude.shutdown());
-    state.chat.acp.shutdown().await;
+    state.terminals.shutdown().await;
+    if !hand_off {
+        agent.shutdown().await;
+        tokio::join!(codex.shutdown(), claude.shutdown());
+        state.chat.acp.shutdown().await;
+        local::chat::stop_kept(|_| true, "orx up stopped").await;
+    }
+    // At once, so the next server resumes the turns this one let go.
     state.chat.release_turn_leases();
     if let Some(server) = control_server {
         server.shutdown().await;
     }
     state.dashboard_locks.lock().unwrap().clear();
     served.map_err(|error| anyhow!("orx up: server error: {error}"))?;
+    if hand_off {
+        if let Err(error) =
+            crate::commands::remote_host::ServerDescriptor::announce_relaunch(&data_dir, None)
+        {
+            eprintln!("orx up: the CLI will not wait out this restart: {error:#}");
+        }
+    }
     if restarting {
         drop(backend_lock);
         if let Err(error) = crate::commands::remote_host::ServerDescriptor::withdraw(&data_dir) {
             eprintln!(
                 "orx up: could not withdraw the server descriptor before restarting: {error:#}"
             );
+        }
+        #[cfg(unix)]
+        if let Some(instance) = remote_instance_id.as_deref() {
+            let error = crate::commands::remote_host::relaunch(instance, actual_port);
+            return Err(anyhow!("Could not restart the remote host: {error}"));
         }
         if !state.reopen.load(Ordering::SeqCst) && !updates::updated_exe_on_disk().await {
             eprintln!("orx up: installing the update before restarting");
@@ -459,25 +545,127 @@ pub async fn run(args: UpArgs) -> Result<()> {
             }
         }
         eprintln!("orx up: restarting");
-        let err = updates::relaunch(actual_port);
+        let err = updates::relaunch();
         return Err(anyhow!("orx up: could not restart: {err}"));
     }
     Ok(())
 }
 
-/// The desktop app's quit. A stored permit covers a quit that lands before the
-/// server is waiting for one.
-static SHUTDOWN_REQUESTED: tokio::sync::Notify = tokio::sync::Notify::const_new();
-
-#[cfg(desktop_app)]
-pub(crate) fn request_shutdown() {
-    SHUTDOWN_REQUESTED.notify_one();
+/// What a server's agents carry in their environment to call it, kept per data directory
+/// beside its keepers so the successor that takes the agents back is the server they name.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Lineage {
+    token: String,
+    /// What `orx mcp` tokens derive from (`delegation::agent_token`).
+    agent_key: String,
+    port: u16,
 }
+
+impl Lineage {
+    fn path() -> std::path::PathBuf {
+        crate::keep::root().join("lineage.json")
+    }
+
+    fn fresh(port: u16) -> Self {
+        let secret = || format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        Self {
+            token: secret(),
+            agent_key: secret(),
+            port,
+        }
+    }
+
+    /// The lineage the kept agents still running were started under, if any runs. A keeper
+    /// that might be an agent still running counts: drawing a fresh lineage would cut it off.
+    fn inherited() -> Result<Option<Self>> {
+        use crate::keep::{Liveness, Owner, Record};
+        let survives = crate::keep::entries()?.into_iter().any(|entry| {
+            entry.liveness != Liveness::Dead
+                && matches!(
+                    entry.owner,
+                    Record::Known(Owner::Agent { .. } | Owner::AgentCommand { .. })
+                        | Record::Unreadable
+                )
+        });
+        if !survives {
+            return Ok(None);
+        }
+        let path = Self::path();
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!(
+                    "orx up: {} is missing, so the agents kept running cannot call this server",
+                    path.display()
+                );
+                return Ok(None);
+            }
+            // Starting without it would stop agents that may still be working.
+            Err(error) => {
+                return Err(anyhow!(
+                    "Could not read {}, which agents still running need to reach OpenResearch: {error}. Fix its permissions and start again.",
+                    path.display()
+                ))
+            }
+        };
+        serde_json::from_slice(&bytes).map(Some).map_err(|error| {
+            anyhow!(
+                "{} is damaged ({error}), so agents still running cannot reach OpenResearch. Delete it to stop them, then start again.",
+                path.display()
+            )
+        })
+    }
+
+    fn record(&self) -> Result<()> {
+        let path = Self::path();
+        let dir = crate::keep::root();
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| anyhow!("Could not create {}: {error}", dir.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| anyhow!("Could not restrict {}: {error}", dir.display()))?;
+        }
+        crate::local::git::atomic_write_with_mode(&path, &serde_json::to_vec(self)?, Some(0o600))
+            .map_err(|error| anyhow!("Could not write {}: {error:#}", path.display()))
+    }
+}
+
+/// A chat deleted from anywhere (its page, its parent's deletion, an agent) takes its terminals.
+fn end_terminals_with_their_chats(state: &AppState) {
+    let terminals = state.terminals.clone();
+    state.chat.set_session_teardown(Box::new(move |session_id| {
+        let terminals = terminals.clone();
+        let session_id = session_id.to_string();
+        Box::pin(async move {
+            terminals
+                .close_where(|_, session| session == Some(session_id.as_str()))
+                .await;
+        })
+    }));
+}
+
+/// The port kept agents call, for the desktop app to serve on while any survives.
+#[cfg(desktop_app)]
+pub(crate) fn kept_agents_port() -> Option<u16> {
+    Lineage::inherited()
+        .unwrap_or_else(|error| {
+            eprintln!("orx up: {error:#}");
+            None
+        })
+        .map(|lineage| lineage.port)
+}
+
+/// A quit from the desktop window or an idle headless server. A stored permit covers a
+/// quit that lands before the server is waiting for one.
+static SHUTDOWN_REQUESTED: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
 /// Resolves when the process is asked to stop: SIGINT everywhere; on Unix also
 /// SIGTERM and SIGHUP (SIGHUP is what an SSH tunnel delivers on disconnect, so
 /// a `--remote`-launched server exits with its tunnel instead of leaking); and
-/// [`request_shutdown`].
+/// [`SHUTDOWN_REQUESTED`].
 async fn shutdown_signal() {
     tokio::select! {
         _ = SHUTDOWN_REQUESTED.notified() => {}
@@ -511,6 +699,181 @@ async fn os_shutdown_signal() {
     {
         let _ = tokio::signal::ctrl_c().await;
     }
+}
+
+/// Resolves once the desktop window that started this server is gone: it holds the other end of
+/// stdin and never writes, so end of input, or a broken pipe, is its exit.
+async fn window_closed() {
+    let (closed, gone) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut stdin = std::io::stdin();
+        let mut buffer = [0; 256];
+        while matches!(stdin.read(&mut buffer), Ok(read) if read > 0) {}
+        let _ = closed.send(());
+    });
+    let _ = gone.await;
+}
+
+/// A `--app-window` server's stderr, which the window reads.
+struct StderrRelay {
+    /// The window's end, which a successor inherits in place of the relay's pipe.
+    window: std::fs::File,
+    /// The relay's end, which fd 2 is again after a failed exec.
+    #[cfg(unix)]
+    writer: std::io::PipeWriter,
+    /// How many [`FLUSH`] markers the relay has passed.
+    flushed: std::sync::Arc<(std::sync::Mutex<u64>, std::sync::Condvar)>,
+}
+
+static STDERR_RELAY: std::sync::OnceLock<StderrRelay> = std::sync::OnceLock::new();
+
+/// Written by [`flush_stderr`]; the relay drops it once all written before it is passed on.
+const FLUSH: &[u8] = b"\0orx: stderr flushed\n";
+
+/// Points stderr at a pipe of this process's own and relays it to the window's until a write
+/// there fails, then drains it: `eprintln!` panics on a write to a closed pipe.
+fn relay_stderr() -> std::io::Result<()> {
+    use std::io::{BufRead as _, Write as _};
+
+    if STDERR_RELAY.get().is_some() {
+        return Err(std::io::Error::other("stderr is relayed already"));
+    }
+    let (reader, writer) = std::io::pipe()?;
+    #[cfg(unix)]
+    let window = std::os::fd::AsFd::as_fd(&std::io::stderr()).try_clone_to_owned()?;
+    #[cfg(windows)]
+    let window =
+        std::os::windows::io::AsHandle::as_handle(&std::io::stderr()).try_clone_to_owned()?;
+    let window = std::fs::File::from(window);
+    let flushed = std::sync::Arc::<(std::sync::Mutex<u64>, std::sync::Condvar)>::default();
+
+    // Before stderr is the pipe: until then a failure leaves stderr as it was.
+    let mut to = Some(window.try_clone()?);
+    let passed = flushed.clone();
+    std::thread::Builder::new().spawn(move || {
+        let mut reader = std::io::BufReader::new(reader);
+        let mut line = Vec::new();
+        while reader
+            .read_until(b'\n', &mut line)
+            .is_ok_and(|read| read > 0)
+        {
+            let flush = line.ends_with(FLUSH);
+            if flush {
+                line.truncate(line.len() - FLUSH.len());
+            }
+            if to.as_mut().is_some_and(|to| to.write_all(&line).is_err()) {
+                to = None;
+            }
+            if flush {
+                let (count, passed) = &*passed;
+                *count
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+                passed.notify_all();
+            }
+            line.clear();
+        }
+    })?;
+
+    // SAFETY: a plain syscall on descriptors this process owns.
+    #[cfg(unix)]
+    if unsafe {
+        libc::dup2(
+            std::os::fd::AsRawFd::as_raw_fd(&writer),
+            libc::STDERR_FILENO,
+        )
+    } < 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::{AsRawHandle as _, IntoRawHandle as _};
+        use windows_sys::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE};
+        // SAFETY: a plain syscall; on success the handle is released to stay open as stderr.
+        if unsafe { SetStdHandle(STD_ERROR_HANDLE, writer.as_raw_handle()) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let _ = writer.into_raw_handle();
+    }
+
+    let relay = StderrRelay {
+        window,
+        #[cfg(unix)]
+        writer,
+        flushed,
+    };
+    if STDERR_RELAY.set(relay).is_err() {
+        return Err(std::io::Error::other("stderr is relayed already"));
+    }
+    let report = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic| {
+        report(panic);
+        flush_stderr();
+    }));
+    Ok(())
+}
+
+/// Waits, up to a second, for the relay to pass on what stderr has had so far, which an exit or
+/// an exec would lose.
+pub(crate) fn flush_stderr() {
+    use std::io::Write as _;
+
+    let Some(relay) = STDERR_RELAY.get() else {
+        return;
+    };
+    let (count, passed) = &*relay.flushed;
+    let lock = || {
+        count
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    let before = *lock();
+    if std::io::stderr().write_all(FLUSH).is_ok() {
+        let _ = passed.wait_timeout_while(lock(), Duration::from_secs(1), |count| *count == before);
+    }
+}
+
+/// Execs `command` in place with the window's stderr, as the relay ends with this process; a
+/// failed exec leaves stderr the relay's again.
+#[cfg(unix)]
+pub(crate) fn exec(command: &mut std::process::Command) -> std::io::Error {
+    use std::os::unix::process::CommandExt as _;
+
+    flush_stderr();
+    let error = command.stderr(successor_stderr()).exec();
+    if let Some(relay) = STDERR_RELAY.get() {
+        // SAFETY: a plain syscall on descriptors this process owns.
+        unsafe {
+            libc::dup2(
+                std::os::fd::AsRawFd::as_raw_fd(&relay.writer),
+                libc::STDERR_FILENO,
+            )
+        };
+    }
+    error
+}
+
+/// The stderr for a successor this server starts: the window's, which outlives the relay.
+pub(crate) fn successor_stderr() -> std::process::Stdio {
+    STDERR_RELAY
+        .get()
+        .and_then(|relay| relay.window.try_clone().ok())
+        .map_or_else(std::process::Stdio::inherit, std::process::Stdio::from)
+}
+
+/// `node dev.ts restart` asks with SIGUSR2 for its next build to take this server's work back.
+async fn hand_off_signal() {
+    #[cfg(unix)]
+    if let Ok(mut signal) =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined2())
+    {
+        signal.recv().await;
+        eprintln!("orx up: handing off to the next build");
+        return;
+    }
+    std::future::pending::<()>().await
 }
 
 async fn persistent_shutdown_signal() {
@@ -566,11 +929,14 @@ struct AppState {
     dashboard_locks: Arc<std::sync::Mutex<Vec<DashboardLock>>>,
     /// Fired by `POST /api/update/restart`; the serve loop relaunches on it.
     restart: Arc<tokio::sync::Notify>,
+    /// Serving a desktop window, which controls it through `/api/app-window`.
+    app_window: bool,
     /// Set with `restart` when the data directory changed: the engine reopens there, and no
     /// update is installed first.
     reopen: Arc<AtomicBool>,
     trackio: Arc<crate::local::trackio::LocalServer>,
     opencode_signins: Arc<local::opencode_signin::SignIns>,
+    terminals: Arc<terminals::Terminals>,
 }
 
 async fn project_publication_lock(
@@ -838,6 +1204,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             post(reveal_artifact_file),
         )
         .route("/api/projects/{id}/terminal", get(project_terminal))
+        .route(
+            "/api/projects/{id}/terminals/{terminal_id}",
+            axum::routing::delete(close_project_terminal),
+        )
         .route("/api/events", get(events))
         .route(
             "/api/settings/run-engine",
@@ -1147,7 +1517,15 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         // authenticated in the handler by that chat's agent token.
         .route("/api/internal/mcp", post(agent_tools::agent_tools))
         .route("/api/chat/attachments/{name}", get(chat_attachment))
-        .route("/api/agent/status", get(agent_status))
+        .route("/api/agent/status", get(agent_status));
+    // The window's control API, a contract with every window shipped (src/commands/app/FROZEN.md).
+    let app = if state.app_window {
+        app.route("/api/app-window", get(app_window_state))
+            .route("/api/app-window/quit", post(quit_app_window))
+    } else {
+        app
+    };
+    let app = app
         .fallback(spa)
         // Chat attachments (PDFs, images) ride as base64 in the send-message
         // JSON body; the 2 MB axum default rejects any real paper. Cap it well
@@ -1246,6 +1624,8 @@ fn remote_route_forbidden(path: &str) -> bool {
             | "/api/update"
             | "/api/update/apply"
             | "/api/update/restart"
+            | "/api/app-window"
+            | "/api/app-window/quit"
             | "/api/update/auto"
             | "/api/update/channel"
             | "/api/update/install-cli"
@@ -3176,6 +3556,10 @@ async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQ
                 .ok_or_else(|| bad_request("a chat session deletion is already in progress"))?,
         );
     }
+    state
+        .terminals
+        .close_where(|project, _| project == id)
+        .await;
     for session in &sessions {
         state.chat.clear_queue(&session.id)?;
         let _ = state.chat.interrupt(&session.id).await;
@@ -5677,12 +6061,33 @@ pub(crate) async fn track_active(request: axum::extract::Request, next: Next) ->
     if IDLE_EXIT.load(Ordering::SeqCst) {
         return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
+    // A held approval is posted again by its tool call and finds its card, so a restart carries it over.
     if matches!(
         request.uri().path(),
-        "/api/events" | "/api/v2/events" | "/api/v2/hello"
+        "/api/events" | "/api/v2/events" | "/api/v2/hello" | "/api/internal/permissions"
     ) {
         return next.run(request).await;
     }
+    let request = if request.uri().path() == "/api/internal/mcp" {
+        let (parts, body) = request.into_parts();
+        let Ok(bytes) = axum::body::to_bytes(body, 2 * 1024 * 1024).await else {
+            return ApiError(
+                axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                "The agent's tool call is too large or was cut off.".into(),
+            )
+            .into_response();
+        };
+        // `orx mcp` sends a cut `wait` to the next server, so its long poll holds off no restart.
+        let waits = serde_json::from_slice::<Value>(&bytes)
+            .is_ok_and(|call| call["method"] == "tools/call" && call["params"]["name"] == "wait");
+        let request = axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes));
+        if waits {
+            return next.run(request).await;
+        }
+        request
+    } else {
+        request
+    };
     // Count first, then check: paired with the drain's set-then-count, one side always sees the other.
     let active = loop {
         let active = Active::new();
@@ -5873,9 +6278,6 @@ fn spawn_restart_when_idle(state: AppState) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(UPDATE_SAMPLE_INTERVAL).await;
-            if crate::commands::app::windowless() {
-                continue;
-            }
             let status = updates::status();
             // The cache can claim an install the exec target doesn't have; never restart in a loop.
             if !(status.auto_update
@@ -5884,7 +6286,7 @@ fn spawn_restart_when_idle(state: AppState) {
             {
                 continue;
             }
-            if begin_restart(&state, 0, false).await {
+            if begin_restart(&state, 0, false).await.is_ok() {
                 state.restart.notify_one();
                 return;
             }
@@ -5895,32 +6297,46 @@ fn spawn_restart_when_idle(state: AppState) {
 /// Serializes restart attempts; true once one committed, after which nothing reopens admission.
 static RESTART_COMMITTED: tokio::sync::Mutex<bool> = tokio::sync::Mutex::const_new(false);
 
-/// Stop admitting work and commit to a restart if nothing is in flight beyond
-/// `own_requests` (the caller's), save for chat turns when `stop_agents`. Returns false, and admits again, otherwise.
-async fn begin_restart(state: &AppState, own_requests: usize, stop_agents: bool) -> bool {
+/// Stop admitting work and commit to a restart if nothing it would cut off is in flight
+/// beyond `own_requests` (the caller's), save for chat turns when `stop_agents`. Turns the next
+/// server resumes, terminals and remote sessions carry over. Otherwise admits again and says
+/// what holds the restart back.
+async fn begin_restart(
+    state: &AppState,
+    own_requests: usize,
+    stop_agents: bool,
+) -> std::result::Result<(), &'static str> {
     let mut committed = RESTART_COMMITTED.lock().await;
     if *committed {
-        return true;
+        return Ok(());
     }
     DRAINING.store(true, Ordering::SeqCst);
-    if ACTIVE.load(Ordering::SeqCst) <= own_requests
-        && !state.data_dir_move_in_progress.load(Ordering::SeqCst)
-        && state.remote_sessions.list().await.iter().all(|session| {
-            matches!(
-                session.status,
-                RemoteSessionStatus::Disconnected
-                    | RemoteSessionStatus::NeedsInstall
-                    | RemoteSessionStatus::NeedsUpdate
-            )
-        })
-        && (stop_agents || state.chat.stop_admitting_if_idle().await)
+    let blocked = if ACTIVE.load(Ordering::SeqCst) > own_requests {
+        Some("a request, a sign-in, a terminal or an import is still in progress.")
+    } else if state.data_dir_move_in_progress.load(Ordering::SeqCst) {
+        Some("the data directory is moving.")
+    } else if state.opencode_signins.in_progress() {
+        Some("an OpenCode sign-in is still open.")
+    } else if state
+        .remote_sessions
+        .list()
+        .await
+        .iter()
+        .any(|session| session.status == RemoteSessionStatus::Applying)
     {
-        state.chat.stop_admitting();
-        *committed = true;
-        return true;
+        Some("OpenResearch is installing on a remote machine.")
+    } else if !stop_agents && !state.chat.stop_admitting_unless_restart_stops().await {
+        Some("an agent is working that a restart would stop.")
+    } else {
+        None
+    };
+    if let Some(blocked) = blocked {
+        DRAINING.store(false, Ordering::SeqCst);
+        return Err(blocked);
     }
-    DRAINING.store(false, Ordering::SeqCst);
-    false
+    state.chat.stop_admitting();
+    *committed = true;
+    Ok(())
 }
 
 /// Once a day, keep each agent orx can install current: through the user's own
@@ -6488,6 +6904,39 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
         .into_response();
     }
 
+    // A terminal's keeper lives in the data directory; moving it would cut the shell off.
+    let entries = match crate::keep::entries() {
+        Ok(entries) => entries,
+        Err(error) => {
+            release_move_claim(&move_token);
+            release(&state);
+            return ApiError::from(error).into_response();
+        }
+    };
+    let terminals = entries
+        .into_iter()
+        .filter(|entry| {
+            use crate::keep::{Liveness, Owner, Record};
+            entry.liveness != Liveness::Dead
+                && matches!(
+                    entry.owner,
+                    Record::Known(Owner::Terminal { .. }) | Record::Unreadable
+                )
+        })
+        .count();
+    if terminals > 0 {
+        release_move_claim(&move_token);
+        release(&state);
+        return ApiError(
+            StatusCode::CONFLICT,
+            format!(
+                "Can't move while project terminals are open ({terminals} open). \
+                 Close them, then retry."
+            ),
+        )
+        .into_response();
+    }
+
     // Validate before kicking off the background move.
     let vpath = path.clone();
     let validated = tokio::task::spawn_blocking(move || {
@@ -6529,6 +6978,11 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
     // Provider-native SQLite/session stores now live inside this directory.
     // Close every idle harness child before the filesystem begins moving it.
     chat.shutdown_harnesses().await;
+    local::chat::stop_kept(
+        |owner| !matches!(owner, Some(crate::keep::Owner::Terminal { .. })),
+        "the data directory moved",
+    )
+    .await;
 
     // Spawn the move on a blocking task (it does synchronous FS work); forward
     // throttled progress onto the SSE broadcast, clear the flag when done.
@@ -6964,6 +7418,21 @@ async fn apply_update() -> ApiResult {
     Ok(Json(json!(updates::status())))
 }
 
+/// Whether quitting would interrupt work or close a page someone has open.
+async fn app_window_state() -> ApiResult {
+    Ok(Json(json!({ "busy": api_v2::busy().await? })))
+}
+
+/// The window's quit, once nothing pending holds it or the user chose to quit anyway: asks the
+/// runs that need OpenResearch open to stop, then stops everything else and exits. Answers first.
+async fn quit_app_window() -> StatusCode {
+    tokio::spawn(async {
+        api_v2::force_stop_runs().await;
+        SHUTDOWN_REQUESTED.notify_one();
+    });
+    StatusCode::NO_CONTENT
+}
+
 /// Relaunch into the copy the updater already installed. Answers first, then
 /// restarts, so the dashboard learns the request landed before the connection
 /// drops; it reloads once the new server is up.
@@ -6989,20 +7458,18 @@ async fn restart_after_update(
         ));
     };
     // A dashboard poll landing alongside the click is not work worth refusing over.
-    let mut began = false;
+    let mut began = Err("");
     for _ in 0..10 {
         began = begin_restart(&state, 1, stop_agents).await;
-        if began {
+        if began.is_ok() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    if !began {
+    if let Err(blocked) = began {
         return Err(ApiError(
             StatusCode::CONFLICT,
-            "OpenResearch is busy: a chat turn, queued message, approval, open terminal, \
-             remote session, or request is still in progress. Try again once it finishes."
-                .into(),
+            format!("OpenResearch can't restart yet: {blocked} Try again once it finishes."),
         ));
     }
     let restart = state.restart.clone();
@@ -7588,15 +8055,12 @@ fn start_pty_with_env(
         command.env("PATH", path);
     }
     local::shell_env::export_to(|key, value| command.env(key, value));
-    for (key, value) in local::shell_env::host_gui_env() {
+    for (key, value) in terminal_env() {
         match value {
             Some(value) => command.env(key, value),
             None => command.env_remove(key),
         }
     }
-    command.env("TERM", "xterm-256color");
-    command.env_remove("NO_COLOR");
-    command.env_remove("FORCE_COLOR");
     if let Some(cwd) = cwd {
         command.cwd(cwd);
     }
@@ -7687,6 +8151,17 @@ fn start_pty_with_env(
         events: event_rx,
         kill: kill_tx,
     })
+}
+
+/// What a terminal's child sees beyond orx's own environment.
+fn terminal_env() -> Vec<(&'static str, Option<std::ffi::OsString>)> {
+    let mut env = local::shell_env::host_gui_env();
+    env.extend([
+        ("TERM", Some("xterm-256color".into())),
+        ("NO_COLOR", None),
+        ("FORCE_COLOR", None),
+    ]);
+    env
 }
 
 /// The dashboard's Connect: the engine logs in through its own connection, and each
@@ -8003,9 +8478,13 @@ async fn relay_pty(
 #[serde(rename_all = "camelCase")]
 struct ProjectTerminalReq {
     session_id: Option<String>,
+    /// The page's id for a terminal that outlives its socket; without one (an older page), the
+    /// shell ends with the socket.
+    terminal_id: Option<String>,
 }
 
 async fn project_terminal(
+    State(state): State<AppState>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
     Path(id): Path<String>,
@@ -8013,6 +8492,22 @@ async fn project_terminal(
 ) -> Response {
     if let Some(rejected) = reject_cross_origin(&headers) {
         return rejected;
+    }
+    if let Some(terminal_id) = req.terminal_id {
+        if !crate::workspace_state::valid_terminal_id(&terminal_id) {
+            return bad_request(format!("{terminal_id:?} is not a terminal id")).into_response();
+        }
+        let session_id = req
+            .session_id
+            .map(|session| session.trim().to_string())
+            .filter(|session| !session.is_empty());
+        return ws.on_upgrade(move |socket| async move {
+            let shell = interactive_shell();
+            state
+                .terminals
+                .serve(&state, socket, id, session_id, terminal_id, shell)
+                .await
+        });
     }
     let active = Active::new();
     ws.on_upgrade(move |mut socket| async move {
@@ -8045,6 +8540,16 @@ async fn project_terminal(
             Err(error) => send_terminal_error(&mut socket, anyhow!(error)).await,
         }
     })
+}
+
+async fn close_project_terminal(
+    State(state): State<AppState>,
+    Path((project_id, terminal_id)): Path<(String, String)>,
+) -> ApiResult {
+    if !state.terminals.close(&project_id, &terminal_id).await {
+        return Err(not_found("terminal"));
+    }
+    Ok(Json(json!({ "ok": true })))
 }
 
 /// The session worktree or, without a session, the project clone.
@@ -11608,7 +12113,13 @@ async fn bridge_permission(
 ) -> ApiResult {
     let decision = state
         .chat
-        .request_permission(&req.session_id, &req.token, &req.tool_name, req.tool_input)
+        .request_permission(
+            &req.session_id,
+            &req.token,
+            &req.tool_name,
+            req.tool_input,
+            req.tool_use_id.as_deref(),
+        )
         .await
         .map_err(bad_request)?;
     Ok(Json(serde_json::to_value(decision).map_err(bad_request)?))
@@ -11622,6 +12133,8 @@ struct BridgePermissionReq {
     tool_name: String,
     #[serde(default)]
     tool_input: Value,
+    #[serde(default)]
+    tool_use_id: Option<String>,
 }
 
 // --- agent ----------------------------------------------------------------
@@ -12098,6 +12611,72 @@ pub(crate) async fn spa(uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_servers_secrets_and_port_outlive_it_only_while_a_kept_agent_does() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let first = Lineage::fresh(4321);
+            first.record().unwrap();
+            assert!(Lineage::inherited().unwrap().is_none());
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let mode = std::fs::metadata(Lineage::path())
+                    .unwrap()
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o777, 0o600);
+            }
+
+            let command = crate::process::command("cat");
+            let kept = crate::keep::spawn(crate::keep::Keep {
+                command: &command,
+                io: crate::keep::Io::Pipes { stderr: None },
+                retain: crate::keep::LOSSLESS,
+                owner: crate::keep::Owner::Agent {
+                    harness: "codex".into(),
+                    session_id: "chat".into(),
+                    state: Value::Null,
+                }
+                .to_value(),
+            })
+            .await
+            .unwrap();
+            let inherited = Lineage::inherited().unwrap().unwrap();
+            assert_eq!(
+                (inherited.token, inherited.agent_key, inherited.port),
+                (first.token, first.agent_key, 4321)
+            );
+
+            // Unknown is not absent: a damaged record leaves the agent to the user, not stopped.
+            std::fs::write(Lineage::path(), b"{").unwrap();
+            let Err(damaged) = Lineage::inherited() else {
+                panic!("a damaged lineage was read as valid");
+            };
+            let damaged = damaged.to_string();
+            assert!(damaged.contains("lineage.json"), "{damaged}");
+            std::fs::remove_file(Lineage::path()).unwrap();
+            assert!(Lineage::inherited().unwrap().is_none());
+
+            kept.handle().stop(Duration::from_secs(10)).await.unwrap();
+            let id = kept.handle().id().to_string();
+            let stopped =
+                async {
+                    while crate::keep::entries().unwrap().iter().any(|entry| {
+                        entry.id == id && entry.liveness == crate::keep::Liveness::Alive
+                    }) {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                };
+            tokio::time::timeout(Duration::from_secs(10), stopped)
+                .await
+                .unwrap();
+            assert!(Lineage::inherited().unwrap().is_none());
+        });
+    }
 
     #[tokio::test]
     async fn shown_runs_reports_a_busy_database_without_blocking_the_worker() {
@@ -12886,6 +13465,43 @@ mod tests {
         DRAINING.store(false, Ordering::SeqCst);
         result.unwrap();
         assert_eq!(ACTIVE.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_held_approval_or_agent_wait_does_not_hold_off_a_restart() {
+        use tower::ServiceExt;
+
+        let _guard = ACTIVE_TEST_LOCK.lock().await;
+        let app = Router::new()
+            .route(
+                "/api/internal/permissions",
+                post(std::future::pending::<()>),
+            )
+            .route("/api/internal/mcp", post(std::future::pending::<()>))
+            .route("/api/other", post(std::future::pending::<()>))
+            .layer(middleware::from_fn(track_active));
+        let call = |name: &str| {
+            json!({ "sessionId": "chat", "token": "t", "method": "tools/call", "params": { "name": name } })
+                .to_string()
+        };
+        for (path, body, counted) in [
+            ("/api/internal/permissions", String::new(), 0),
+            ("/api/internal/mcp", call("wait"), 0),
+            ("/api/internal/mcp", call("delegate"), 1),
+            ("/api/other", String::new(), 1),
+        ] {
+            let request = axum::http::Request::builder()
+                .method("POST")
+                .uri(path)
+                .body(axum::body::Body::from(body.clone()))
+                .unwrap();
+            let mut held = Box::pin(app.clone().oneshot(request));
+            for _ in 0..10 {
+                assert!(futures::poll!(&mut held).is_pending());
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(ACTIVE.load(Ordering::SeqCst), counted, "{path} {body}");
+        }
     }
 
     #[tokio::test]
@@ -13898,9 +14514,11 @@ mod tests {
             stopping: Default::default(),
             dashboard_locks: Default::default(),
             restart: Default::default(),
+            app_window: false,
             reopen: Default::default(),
             trackio: Default::default(),
             opencode_signins: Arc::default(),
+            terminals: Arc::default(),
         }
     }
 

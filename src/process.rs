@@ -100,7 +100,7 @@ pub(crate) fn write_executable(
 }
 
 /// How long an agent CLI gets, at each step of ending it, to exit on its own.
-const AGENT_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+pub(crate) const AGENT_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Waits for an agent CLI whose input the caller closed to exit on its own, then
 /// [`ask_agent_to_stop`]s it. The caller kills what is left.

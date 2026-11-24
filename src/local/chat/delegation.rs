@@ -27,12 +27,20 @@ const ANSWER_PREVIEW_CHARS: usize = 200;
 pub const WAIT_MAX_SECONDS: u64 = 1800;
 pub const TOOL_TIMEOUT_SECONDS: u64 = WAIT_MAX_SECONDS + 60;
 
+static AGENT_KEY: OnceLock<String> = OnceLock::new();
+
+/// The key [`agent_token`] derives from; a server sets it once, before any agent starts, to
+/// the one its kept agents' tokens came from.
+pub fn set_agent_key(key: String) {
+    let _ = AGENT_KEY.set(key);
+}
+
 /// Proves which chat a call to the orx MCP server speaks for. Derived from a
-/// key that lives only in this process, so a respawned agent keeps its token
-/// and nothing needs revoking: a deleted chat's token names no chat.
+/// key a server lineage keeps while any agent it started runs, so a respawned
+/// or kept agent keeps its token and nothing needs revoking: a deleted chat's
+/// token names no chat.
 pub fn agent_token(session_id: &str) -> String {
-    static KEY: OnceLock<String> = OnceLock::new();
-    let key = KEY.get_or_init(|| format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4()));
+    let key = AGENT_KEY.get_or_init(|| format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4()));
     Sha256::digest(format!("{key}:{session_id}").as_bytes())
         .iter()
         .map(|byte| format!("{byte:02x}"))

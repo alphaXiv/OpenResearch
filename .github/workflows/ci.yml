@@ -515,6 +515,9 @@ jobs:
             cargo nextest run --locked --profile ci @targetArgs
             exit $LASTEXITCODE
           }
+          # Unit tests keep their children with the orx.exe above them, which `--bin` alone doesn't build.
+          cargo build --locked --profile test --bin $binary
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $filters = @{
             demo = 'local::demo::tests::'
             onboarding = 'local::demo::tests::prewarmed_onboarding_seeds_full_demo'

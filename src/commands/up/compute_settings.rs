@@ -1024,7 +1024,7 @@ pub(super) async fn remove_remote_host(
     let removed =
         blocking_api(move || remove_saved_host(crate::jobs::ssh::hosts::List::Remotes, &saved))
             .await?;
-    state.remote_sessions.forget(&host).await;
+    state.remote_sessions.forget(&host).await?;
     Ok(removed)
 }
 

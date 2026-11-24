@@ -6,15 +6,18 @@
 //! worktree (see `git::ensure_session_worktree`) so parallel agents never share
 //! a checkout. Env is inherited (that's where ANTHROPIC_API_KEY /
 //! OPENROUTER_API_KEY live — opencode auto-detects providers from env).
-//! Children die with `orx up` via `kill_on_drop`.
+//! Each server is kept (`crate::keep`): a restart hands it to the next `orx up`, which adopts it;
+//! a quit stops it.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
+
+use crate::keep::KeptHandle;
 
 use crate::error::{anyhow, Context, Result};
 use crate::local::git;
@@ -30,12 +33,17 @@ pub(crate) use runtime::{
     ResolvedBinary, ServerChild,
 };
 
+/// The harness id kept servers are recorded under.
+const HARNESS: &str = "opencode";
+
 /// Playbook path inside the session worktree; opencode re-reads it every turn,
 /// so rewriting the file retargets a running server without a restart.
 pub(crate) const PLAYBOOK_REL: &str = ".openresearch/agent/autoresearch-local.md";
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 const COMPACTION_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long a kept server may take to answer the server adopting it.
+const ADOPT_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) struct ResolvedRuntime {
     pub binary: ResolvedBinary,
@@ -431,30 +439,72 @@ pub struct AgentStatus {
     pub model: Option<String>,
 }
 
-struct AgentChild {
-    child: ServerChild,
-    port: u16,
+/// What a kept server's `owner.json` records: everything [`AgentHost::ensure`] compares to
+/// reuse it, and what reaching it takes. The owner directory is owner-only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Resident {
     project_id: String,
-    session_id: String,
     model: Option<String>,
-    /// The `OPENCODE_CONFIG_CONTENT` it started with, which carries provider keys and endpoints.
-    config: Option<std::ffi::OsString>,
+    /// A digest of the `OPENCODE_CONFIG_CONTENT` it started with, which carries provider keys
+    /// and endpoints.
+    config: Option<String>,
     native_store: NativeStore,
     alphaxiv_signed_in: bool,
     binary: ResolvedBinary,
+    database: PathBuf,
+    base_url: String,
+    legacy_v2_api: bool,
+    password: String,
+}
+
+impl Resident {
+    fn endpoint(&self) -> Result<AgentEndpoint> {
+        Ok(AgentEndpoint {
+            base_url: self.base_url.clone(),
+            client: runtime::server_client(&self.password)?,
+            legacy_v2_api: self.legacy_v2_api,
+        })
+    }
+
+    fn owner(&self, session_id: &str) -> Result<Value> {
+        Ok(crate::keep::Owner::Agent {
+            harness: HARNESS.into(),
+            session_id: session_id.into(),
+            state: serde_json::to_value(self)?,
+        }
+        .to_value())
+    }
+}
+
+struct AgentChild {
+    keeper: KeptHandle,
+    session_id: String,
+    resident: Resident,
     endpoint: AgentEndpoint,
     database: native_store::opencode_database::DatabaseLease,
+    /// Held from adoption until the turn it resumes starts, so no update replaces OpenCode
+    /// under that turn in between.
+    resuming: Option<tokio::sync::RwLockReadGuard<'static, ()>>,
 }
 
 impl AgentChild {
     fn status(&self) -> AgentStatus {
         AgentStatus {
             running: true,
-            port: Some(self.port),
-            project_id: Some(self.project_id.clone()),
+            port: self.endpoint.port().ok(),
+            project_id: Some(self.resident.project_id.clone()),
             session_id: Some(self.session_id.clone()),
-            model: self.model.clone(),
+            model: self.resident.model.clone(),
         }
+    }
+
+    fn alive(&self) -> bool {
+        self.keeper.try_wait().is_none()
+    }
+
+    async fn stop(&self) -> Result<()> {
+        runtime::stop_kept(&self.keeper).await
     }
 }
 
@@ -490,7 +540,7 @@ async fn spawn_agent(
     // This orx first on PATH (the agent shells out to plain `orx`), the imported
     // shell environment, and the dashboard's Environment tab vars.
     prepare_chat_env(&mut cmd, model, session_id)?;
-    let config = inline_config(&cmd);
+    let config = launch_config(&cmd);
     cmd.env("OPENCODE_DB", database.path())
         .env("OPENCODE_DISABLE_AUTOUPDATE", "1");
     // Tag runs the agent launches (`orx exp run`) with this session so they can
@@ -510,26 +560,41 @@ async fn spawn_agent(
             .env("OPENCODE_DISABLE_PROJECT_CONFIG", "1")
             .env("OPENCODE_CONFIG_PROJECT_DISABLE", "1");
     }
-    let (mut child, endpoint) = runtime::start_server(&binary, cmd).await?;
-    if let Some(model) = model {
-        if let Err(error) = verify_generation_models(&endpoint, model).await {
-            let _ = child.kill().await;
-            return Err(error);
-        }
-    }
-    let port = endpoint.port()?;
-    Ok(AgentChild {
-        child,
-        port,
+    let owner = crate::keep::Owner::Agent {
+        harness: HARNESS.into(),
+        session_id: session_id.into(),
+        state: Value::Null,
+    };
+    let (keeper, endpoint, password) = runtime::start_kept_server(&binary, cmd, &owner).await?;
+    let resident = Resident {
         project_id: project.id.clone(),
-        session_id: session_id.to_string(),
         model: model.map(str::to_string),
         config,
         native_store,
         alphaxiv_signed_in: crate::alphaxiv::signed_in(),
+        database: database.path().to_path_buf(),
         binary,
+        base_url: endpoint.base_url.clone(),
+        legacy_v2_api: endpoint.legacy_v2_api,
+        password,
+    };
+    let verified = match model {
+        Some(model) => verify_generation_models(&endpoint, model).await,
+        None => Ok(()),
+    };
+    if let Err(error) = verified.and_then(|()| keeper.set_owner(&resident.owner(session_id)?)) {
+        if let Err(stop_error) = runtime::stop_kept(&keeper).await {
+            eprintln!("orx up: failed to stop OpenCode for {session_id}: {stop_error}");
+        }
+        return Err(error);
+    }
+    Ok(AgentChild {
+        keeper,
+        session_id: session_id.to_string(),
+        resident,
         endpoint,
         database,
+        resuming: None,
     })
 }
 
@@ -570,11 +635,15 @@ fn prepare_chat_env(
     crate::local::local_models::merge_permission_asks(cmd, asks(mode))
 }
 
-fn inline_config(cmd: &tokio::process::Command) -> Option<std::ffi::OsString> {
+/// A digest of the inline config `cmd` passes, so a changed provider key restarts the server
+/// without the key being recorded.
+fn launch_config(cmd: &tokio::process::Command) -> Option<String> {
+    use sha2::{Digest, Sha256};
     cmd.as_std()
         .get_envs()
         .find(|(name, _)| *name == "OPENCODE_CONFIG_CONTENT")
-        .and_then(|(_, value)| value.map(ToOwned::to_owned))
+        .and_then(|(_, value)| value)
+        .map(|value| format!("{:x}", Sha256::digest(value.as_encoded_bytes())))
 }
 
 pub(crate) async fn verify_generation_models(endpoint: &AgentEndpoint, model: &str) -> Result<()> {
@@ -744,28 +813,40 @@ impl AgentHost {
     /// Status of every live child; reaps children that died behind our back.
     pub async fn status(&self) -> Vec<AgentStatus> {
         let mut guard = self.inner.lock().await;
-        guard.retain(|_, agent| matches!(agent.child.try_wait(), Ok(None)));
+        guard.retain(|_, agent| agent.alive());
         guard.values().map(AgentChild::status).collect()
     }
 
     pub(crate) async fn endpoint_for(&self, session_id: &str) -> Option<AgentEndpoint> {
+        self.server_for(session_id)
+            .await
+            .map(|(endpoint, _)| endpoint)
+    }
+
+    /// The session's live server and its keeper, which a turn checkpoints against.
+    pub(crate) async fn server_for(&self, session_id: &str) -> Option<(AgentEndpoint, KeptHandle)> {
         let mut guard = self.inner.lock().await;
-        let agent = guard.get_mut(session_id)?;
-        if matches!(agent.child.try_wait(), Ok(None)) {
-            Some(agent.endpoint.clone())
+        let agent = guard.get(session_id)?;
+        if agent.alive() {
+            Some((agent.endpoint.clone(), agent.keeper.clone()))
         } else {
             guard.remove(session_id);
             None
         }
     }
 
-    pub(crate) async fn resident_model(&self, session_id: &str) -> Option<String> {
-        let mut guard = self.inner.lock().await;
-        let agent = guard.get_mut(session_id)?;
-        if !matches!(agent.child.try_wait(), Ok(None)) {
-            return None;
+    /// Lets go of what adoption held for a resuming turn once a turn holds it itself.
+    pub(crate) async fn release_resume(&self, session_id: &str) {
+        if let Some(agent) = self.inner.lock().await.get_mut(session_id) {
+            agent.resuming = None;
         }
+    }
+
+    pub(crate) async fn resident_model(&self, session_id: &str) -> Option<String> {
+        let guard = self.inner.lock().await;
+        let agent = guard.get(session_id).filter(|agent| agent.alive())?;
         agent
+            .resident
             .model
             .as_ref()
             .filter(|model| !model.trim().is_empty())
@@ -793,8 +874,8 @@ impl AgentHost {
     pub(crate) async fn retire_idle_children(&self) -> Result<()> {
         let mut children = self.inner.lock().await;
         for session in children.keys().cloned().collect::<Vec<_>>() {
-            if let Some(agent) = children.get_mut(&session) {
-                agent.child.kill().await.with_context(|| {
+            if let Some(agent) = children.get(&session) {
+                agent.stop().await.with_context(|| {
                     format!("Could not stop the idle OpenCode server for chat {session}")
                 })?;
                 children.remove(&session);
@@ -947,18 +1028,19 @@ impl AgentHost {
         let database_path = native_store::opencode_database::normalize_path(&database_path)?;
         let mut current = crate::process::tokio_command(&binary.path);
         prepare_chat_env(&mut current, model, session_id)?;
-        let config = inline_config(&current);
+        let config = launch_config(&current);
         {
             let mut guard = self.inner.lock().await;
-            if let Some(agent) = guard.get_mut(session_id) {
-                if agent.project_id == project.id
-                    && agent.alphaxiv_signed_in == crate::alphaxiv::signed_in()
-                    && agent.native_store == native_store
-                    && agent.binary == binary
+            if let Some(agent) = guard.get(session_id) {
+                let resident = &agent.resident;
+                if resident.project_id == project.id
+                    && resident.alphaxiv_signed_in == crate::alphaxiv::signed_in()
+                    && resident.native_store == native_store
+                    && resident.binary == binary
                     && agent.database.path() == database_path
-                    && agent.model.as_deref() == model
-                    && agent.config == config
-                    && matches!(agent.child.try_wait(), Ok(None))
+                    && resident.model.as_deref() == model
+                    && resident.config == config
+                    && agent.alive()
                 {
                     let status = agent.status();
                     let endpoint = agent.endpoint.clone();
@@ -969,8 +1051,8 @@ impl AgentHost {
                     return Ok(status);
                 }
             }
-            if let Some(mut old) = guard.remove(session_id) {
-                if let Err(error) = old.child.kill().await {
+            if let Some(old) = guard.remove(session_id) {
+                if let Err(error) = old.stop().await {
                     eprintln!("orx up: failed to stop stale OpenCode for {session_id}: {error}");
                 }
             }
@@ -981,13 +1063,13 @@ impl AgentHost {
             let stale: Vec<String> = guard
                 .iter()
                 .filter(|(_, child)| {
-                    child.database.path() == database_path && child.binary != binary
+                    child.database.path() == database_path && child.resident.binary != binary
                 })
                 .map(|(id, _)| id.clone())
                 .collect();
             for id in stale {
-                if let Some(mut child) = guard.remove(&id) {
-                    child.child.kill().await?;
+                if let Some(child) = guard.remove(&id) {
+                    child.stop().await?;
                 }
             }
         }
@@ -998,7 +1080,7 @@ impl AgentHost {
             .await?;
         // inner released: status()/port reads keep answering while the spawn
         // (clone/fetch + health poll) is in flight instead of hanging.
-        let mut agent = spawn_agent(
+        let agent = spawn_agent(
             project,
             model,
             session_id,
@@ -1010,7 +1092,7 @@ impl AgentHost {
         .await?;
         let mut inner = self.inner.lock().await;
         if *cancelled.borrow() || self.stopping.load(std::sync::atomic::Ordering::SeqCst) {
-            if let Err(error) = agent.child.kill().await {
+            if let Err(error) = agent.stop().await {
                 eprintln!("orx up: failed to stop cancelled OpenCode for {session_id}: {error}");
             }
             return Err(anyhow!("OpenCode startup was cancelled"));
@@ -1018,6 +1100,72 @@ impl AgentHost {
         let status = agent.status();
         inner.insert(session_id.to_string(), agent);
         Ok(status)
+    }
+
+    /// Takes back a server a previous `orx up` kept for `adoption.session_id`: it answers again,
+    /// holds its database lease, and from here on is reused, restarted and stopped like one this
+    /// host started.
+    pub(crate) async fn adopt(&self, adoption: crate::local::harness::Adoption) -> Result<()> {
+        let session_id = adoption.session_id;
+        let resident: Resident = serde_json::from_value(adoption.state).map_err(|error| {
+            anyhow!("The OpenCode server kept for chat {session_id} has no usable record: {error}")
+        })?;
+        let mut kept = crate::keep::attach(&adoption.keep_id).await?;
+        drop(kept.take_stdout());
+        let keeper = kept.handle();
+        let mut endpoint = resident.endpoint()?;
+        let deadline = tokio::time::Instant::now() + ADOPT_TIMEOUT;
+        let answered = tokio::time::timeout_at(deadline, async {
+            while keeper.try_wait().is_none() {
+                if endpoint.check_health(deadline).await.unwrap_or(false) {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            false
+        })
+        .await
+        .unwrap_or(false);
+        if !answered {
+            return Err(anyhow!(
+                "The OpenCode server kept for chat {session_id} no longer answers at {}",
+                resident.base_url
+            ));
+        }
+        let path = resident.database.clone();
+        let database = tokio::task::spawn_blocking(move || {
+            native_store::opencode_database::DatabaseLease::acquire(&path, 2)
+        })
+        .await??;
+        if database.requires_migration() {
+            return Err(anyhow!(
+                "OpenCode database {} needs an upgrade its kept server cannot run",
+                database.path().display()
+            ));
+        }
+        let resuming = match adoption.resume_at {
+            Some(_) => Some(crate::local::harness::managed::OPENCODE_IN_USE.read().await),
+            None => None,
+        };
+        let mut inner = self.inner.lock().await;
+        if self.stopping.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(anyhow!("OpenCode is shutting down"));
+        }
+        if inner.contains_key(&session_id) {
+            return Err(anyhow!("Chat {session_id} already has an OpenCode server"));
+        }
+        inner.insert(
+            session_id.clone(),
+            AgentChild {
+                keeper,
+                session_id,
+                resident,
+                endpoint,
+                database,
+                resuming,
+            },
+        );
+        Ok(())
     }
 
     /// Kill and reap one session's child (on session delete). No-op when the
@@ -1028,14 +1176,14 @@ impl AgentHost {
                 let _ = cancel.send(true);
             }
         }
-        if let Some(mut agent) = self.inner.lock().await.remove(session_id) {
-            if let Err(error) = agent.child.kill().await {
+        if let Some(agent) = self.inner.lock().await.remove(session_id) {
+            if let Err(error) = agent.stop().await {
                 eprintln!("orx up: failed to stop OpenCode for {session_id}: {error}");
             }
         }
     }
 
-    /// Kill and reap every child (also happens via kill_on_drop on exit).
+    /// Stops every server, except while this server hands them to the next.
     pub async fn shutdown(&self) {
         self.stopping
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1044,8 +1192,8 @@ impl AgentHost {
                 let _ = cancel.send(true);
             }
         }
-        for (session_id, mut agent) in self.inner.lock().await.drain() {
-            if let Err(error) = agent.child.kill().await {
+        for (session_id, agent) in self.inner.lock().await.drain() {
+            if let Err(error) = agent.stop().await {
                 eprintln!("orx up: failed to stop OpenCode for {session_id}: {error}");
             }
         }
@@ -1053,43 +1201,61 @@ impl AgentHost {
 }
 
 #[cfg(all(test, unix))]
-impl AgentHost {
-    /// Routes `session_id` to an OpenCode API on `port`, with `sleep` standing in for the server.
-    pub(crate) async fn serve_for_test(&self, session_id: &str, port: u16, root: &std::path::Path) {
-        let path = root.join("opencode");
-        orx_test_support::write_executable(&path, "#!/bin/sh\necho 2.0.1\n", 0o700).unwrap();
-        let binary = runtime::resolve_binary_at(path).await.unwrap();
-        let database =
-            native_store::opencode_database::DatabaseLease::acquire(&root.join("opencode.db"), 2)
-                .unwrap();
-        let child = ServerChild::new(
-            crate::process::tokio_command("sleep")
-                .arg("60")
-                .kill_on_drop(true)
-                .spawn()
-                .unwrap(),
-        );
-        let endpoint = AgentEndpoint {
+impl Resident {
+    fn for_test(binary: ResolvedBinary, port: u16, database: &Path, model: Option<&str>) -> Self {
+        Self {
+            project_id: crate::local::agent_text::sample_project().id,
+            model: model.map(str::to_string),
+            config: None,
+            native_store: NativeStore::Isolated,
+            alphaxiv_signed_in: false,
+            binary,
+            database: native_store::opencode_database::normalize_path(database).unwrap(),
             base_url: format!("http://127.0.0.1:{port}"),
-            client: crate::net::loopback_client().build().unwrap(),
             legacy_v2_api: false,
-        };
+            password: "test".into(),
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+impl AgentHost {
+    /// Routes `session_id` to an OpenCode API on `port`, with a kept `sleep` standing in for the
+    /// server; the record it keeps is the one a successor adopts.
+    pub(crate) async fn serve_for_test(&self, session_id: &str, port: u16, root: &Path) {
+        let path = root.join("opencode");
+        orx_test_support::write_executable(&path, "#!/bin/sh\necho 2.0.12\n", 0o700).unwrap();
+        let binary = runtime::resolve_binary_at(path).await.unwrap();
+        let resident = Resident::for_test(binary, port, &root.join("opencode.db"), None);
+        self.insert_for_test(session_id, resident).await;
+    }
+
+    async fn insert_for_test(&self, session_id: &str, resident: Resident) -> KeptHandle {
+        let mut sleep = crate::process::command("sleep");
+        sleep.arg("60");
+        let kept = crate::keep::spawn(crate::keep::Keep {
+            command: &sleep,
+            io: crate::keep::Io::Pipes { stderr: None },
+            retain: crate::keep::Retain::Tail { bytes: 1024 },
+            owner: resident.owner(session_id).unwrap(),
+        })
+        .await
+        .unwrap();
+        let database =
+            native_store::opencode_database::DatabaseLease::acquire(&resident.database, 2).unwrap();
+        let keeper = kept.handle();
         self.inner.lock().await.insert(
             session_id.into(),
             AgentChild {
-                child,
-                port,
-                project_id: "p1".into(),
+                keeper: keeper.clone(),
                 session_id: session_id.into(),
-                model: None,
-                config: None,
-                native_store: NativeStore::Isolated,
-                alphaxiv_signed_in: false,
-                binary,
-                endpoint,
+                endpoint: resident.endpoint().unwrap(),
+                resident,
                 database,
+                resuming: None,
             },
         );
+        keeper
     }
 }
 
@@ -1177,8 +1343,6 @@ mod tests {
         orx_test_support::write_executable(&path, "#!/bin/sh\necho 2.0.1\n", 0o700).unwrap();
         let binary = resolve_binary_at(path).await.unwrap();
         let database_path = fixture.path().join("opencode.db");
-        let database =
-            native_store::opencode_database::DatabaseLease::acquire(&database_path, 2).unwrap();
         let requests = Arc::new(AtomicUsize::new(0));
         let count = requests.clone();
         let compacted = Arc::new(AtomicUsize::new(0));
@@ -1210,38 +1374,14 @@ mod tests {
             );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let endpoint = AgentEndpoint {
-            base_url: format!("http://127.0.0.1:{port}"),
-            client: crate::net::loopback_client().build().unwrap(),
-            legacy_v2_api: false,
-        };
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let child = ServerChild::new(
-            crate::process::tokio_command("sleep")
-                .arg("60")
-                .kill_on_drop(true)
-                .spawn()
-                .unwrap(),
-        );
-        let pid = child.id();
         let project = sample_project();
         let mut host = AgentHost::new(Some("host/default".into()));
-        host.inner.lock().await.insert(
-            "chat".into(),
-            AgentChild {
-                child,
-                port,
-                project_id: project.id.clone(),
-                session_id: "chat".into(),
-                model: Some("cloud/selected".into()),
-                config: launch_config(&binary, "cloud/selected"),
-                native_store: NativeStore::Isolated,
-                alphaxiv_signed_in: false,
-                binary: binary.clone(),
-                endpoint,
-                database,
-            },
-        );
+        let resident = Resident {
+            config: config_for(&binary, "cloud/selected"),
+            ..Resident::for_test(binary.clone(), port, &database_path, Some("cloud/selected"))
+        };
+        let kept = host.insert_for_test("chat", resident).await;
         let (progress, _) = tokio::sync::watch::channel(String::new());
         let status = host
             .ensure(
@@ -1258,7 +1398,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status.model.as_deref(), Some("cloud/selected"));
-        assert_eq!(host.inner.lock().await["chat"].child.id(), pid);
+        assert_eq!(host.inner.lock().await["chat"].keeper.id(), kept.id());
         let before = requests.load(Ordering::SeqCst);
         assert!(matches!(
             host.summarize("chat", "native", Some("cloud/switched"))
@@ -1282,10 +1422,10 @@ mod tests {
         server.abort();
     }
 
-    fn launch_config(binary: &ResolvedBinary, model: &str) -> Option<std::ffi::OsString> {
+    fn config_for(binary: &ResolvedBinary, model: &str) -> Option<String> {
         let mut cmd = crate::process::tokio_command(&binary.path);
         crate::local::local_models::prepare_generation_env(&mut cmd, Some(model)).unwrap();
-        inline_config(&cmd)
+        launch_config(&cmd)
     }
 
     #[cfg(unix)]
@@ -1320,40 +1460,13 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            let child = ServerChild::new(
-                crate::process::tokio_command("sleep")
-                    .arg("60")
-                    .kill_on_drop(true)
-                    .spawn()
-                    .unwrap(),
-            );
-            let pid = child.id();
             let project = sample_project();
             let host = AgentHost::new(None);
-            host.inner.lock().await.insert(
-                "chat".into(),
-                AgentChild {
-                    child,
-                    port,
-                    project_id: project.id.clone(),
-                    session_id: "chat".into(),
-                    model: Some("cloud/selected".into()),
-                    config: launch_config(&binary, "cloud/selected"),
-                    native_store: NativeStore::Isolated,
-                    alphaxiv_signed_in: false,
-                    binary: binary.clone(),
-                    endpoint: AgentEndpoint {
-                        base_url: format!("http://127.0.0.1:{port}"),
-                        client: crate::net::loopback_client().build().unwrap(),
-                        legacy_v2_api: false,
-                    },
-                    database: native_store::opencode_database::DatabaseLease::acquire(
-                        &database_path,
-                        2,
-                    )
-                    .unwrap(),
-                },
-            );
+            let resident = Resident {
+                config: config_for(&binary, "cloud/selected"),
+                ..Resident::for_test(binary.clone(), port, &database_path, Some("cloud/selected"))
+            };
+            let kept = host.insert_for_test("chat", resident).await;
             let ensure = || {
                 let (progress, _) = tokio::sync::watch::channel(String::new());
                 host.ensure(
@@ -1369,7 +1482,7 @@ mod tests {
                 )
             };
             ensure().await.unwrap();
-            assert_eq!(host.inner.lock().await["chat"].child.id(), pid);
+            assert_eq!(host.inner.lock().await["chat"].keeper.id(), kept.id());
 
             write_key("sk-new");
             let _ = tokio::time::timeout(Duration::from_secs(30), ensure()).await;
@@ -1378,8 +1491,8 @@ mod tests {
                 .lock()
                 .await
                 .get("chat")
-                .map(|agent| agent.child.id());
-            assert_ne!(resident, Some(pid));
+                .map(|agent| agent.keeper.id().to_string());
+            assert_ne!(resident.as_deref(), Some(kept.id()));
             host.shutdown().await;
             server.abort();
         });
@@ -1645,6 +1758,135 @@ mod tests {
                 "descendant {descendant_pid} survived server cleanup (mode={mode})"
             );
         }
+    }
+
+    #[cfg(unix)]
+    async fn keeper_exits(id: &str) {
+        let running = || {
+            crate::keep::entries()
+                .unwrap()
+                .iter()
+                .any(|entry| entry.id == id && entry.liveness == crate::keep::Liveness::Alive)
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while running() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the server's keeper exits once it is stopped");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_kept_server_is_adopted_reused_and_stopped_by_the_next_host() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        use axum::{routing::get, Router};
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let app = Router::new().route(
+                "/api/info",
+                get(|| async { axum::Json(json!({"version": "2.0.12"})) }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let fixture = git::TemporaryDirectory::new("orx-adopt-opencode").unwrap();
+            let path = fixture.path().join("opencode");
+            orx_test_support::write_executable(&path, "#!/bin/sh\necho 2.0.12\n", 0o700).unwrap();
+            let binary = resolve_binary_at(path).await.unwrap();
+            let database_path = fixture.path().join("opencode.db");
+            rusqlite::Connection::open(&database_path)
+                .unwrap()
+                .execute_batch(
+                    "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, directory TEXT);
+                    CREATE TABLE session_message (id TEXT, session_id TEXT, data TEXT);
+                    CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT);
+                    CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER);
+                    INSERT INTO migration VALUES ('20260910120000_clear_v1_session_permission', 1);",
+                )
+                .unwrap();
+            let mut current = crate::process::tokio_command(&binary.path);
+            crate::local::local_models::prepare_generation_env(&mut current, None).unwrap();
+            let resident = Resident {
+                config: launch_config(&current),
+                ..Resident::for_test(binary.clone(), port, &database_path, None)
+            };
+            let record = |id: &str| {
+                let entry = crate::keep::entries()
+                    .unwrap()
+                    .into_iter()
+                    .find(|entry| entry.id == id)
+                    .unwrap();
+                let crate::keep::Record::Known(crate::keep::Owner::Agent { state, .. }) =
+                    entry.owner
+                else {
+                    panic!("an agent record");
+                };
+                (entry.liveness == crate::keep::Liveness::Alive, state)
+            };
+            let adoption = |keep_id: &str, state: Value| crate::local::harness::Adoption {
+                keep_id: keep_id.into(),
+                session_id: "chat".into(),
+                state,
+                resume_at: None,
+                commands: Vec::new(),
+            };
+
+            // A restart hands the server off; the next host takes it back.
+            let previous = AgentHost::new(None);
+            let kept = previous.insert_for_test("chat", resident).await;
+            kept.detach();
+            drop(previous);
+            let (alive, state) = record(kept.id());
+            assert!(alive);
+            let host = AgentHost::new(None);
+            host.adopt(adoption(kept.id(), state)).await.unwrap();
+            let status = host.status().await;
+            assert_eq!(status.len(), 1);
+            assert_eq!(status[0].port, Some(port));
+            let (progress, _) = tokio::sync::watch::channel(String::new());
+            host.ensure(
+                &sample_project(),
+                "chat",
+                None,
+                ResolvedRuntime {
+                    binary: binary.clone(),
+                    database: database_path.clone(),
+                    store: NativeStore::Isolated,
+                },
+                progress,
+            )
+            .await
+            .unwrap();
+            assert_eq!(host.inner.lock().await["chat"].keeper.id(), kept.id());
+            host.kill_session("chat").await;
+            keeper_exits(kept.id()).await;
+
+            // A server that died during the gap, or whose keeper is gone, is not taken back.
+            let error = host.adopt(adoption(kept.id(), Value::Null)).await;
+            assert!(error.unwrap_err().to_string().contains("no usable record"));
+            let died = Resident::for_test(binary, port, &database_path, None);
+            let exited = crate::process::command("true");
+            let kept = crate::keep::spawn(crate::keep::Keep {
+                command: &exited,
+                io: crate::keep::Io::Pipes { stderr: None },
+                retain: crate::keep::Retain::Tail { bytes: 1024 },
+                owner: died.owner("chat").unwrap(),
+            })
+            .await
+            .unwrap();
+            let id = kept.handle().id().to_string();
+            kept.handle().detach();
+            drop(kept);
+            let (_, state) = record(&id);
+            let error = host.adopt(adoption(&id, state.clone())).await;
+            assert!(error.unwrap_err().to_string().contains("no longer answers"));
+            assert!(host.status().await.is_empty());
+            keeper_exits(&id).await;
+            assert!(host.adopt(adoption(&id, state)).await.is_err());
+        });
     }
 
     #[test]

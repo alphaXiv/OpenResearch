@@ -104,14 +104,14 @@ The bridge grants permissions, so it takes a per-child token that each respawn r
 
 A turn is a row with a state and a **delivery state**: its prompt was never sent, rejected, accepted, or of unknown fate. A running turn holds a per-chat lease with a heartbeat, which keeps one turn per chat and exposes a turn whose process died ([storage](storage.md)).
 
-When a dashboard quits, starts, or finds a lease expired, every turn still marked running has no process behind it. Each becomes a failed turn with a recovery action chosen by its delivery state:
+When a dashboard quits, starts, or finds a lease expired, a turn still marked running whose agent was kept resumes from its checkpoint, without sending its prompt again ([restarts](restarts.md)). Every other has no process behind it and becomes a failed turn with a recovery action chosen by its delivery state:
 
 | Delivery state | Action | Effect |
 | --- | --- | --- |
 | not sent, rejected | retry | replays the prompt; the agent never saw it |
 | accepted, unknown | continue | asks the agent to carry on; replaying could repeat work |
 
-**Only a quit resumes on its own.** A dashboard that quits, for the user or an update, marks the turns it stops, and the next start recovers each before its chat's queue runs. A crash or a lapsed lease may come from the turn itself, so those wait for the user. An adapter retries on its own only before the prompt is accepted. A continued turn resumes the native session, or, if that is gone, gets a bounded snapshot of orx's transcript with instructions not to repeat completed actions.
+**A quit, a kept agent or an unsent prompt resumes on its own.** A dashboard that quits marks the turns it stops, and the next start recovers each before its chat's queue runs. A crash or a lapsed lease may come from the turn itself, so its failed turns wait for the user, unless the agent never saw the prompt, which replays safely once. An adapter retries on its own only before the prompt is accepted. A continued turn resumes the native session, or, if that is gone, gets a bounded snapshot of orx's transcript with instructions not to repeat completed actions.
 
 **A failed turn says why in the user's terms.** The server classifies the agent's error; the chat names the cause, keeps the raw error in the details, and offers the action that fixes it, such as Sign in, which then recovers the turn by its delivery state.
 
@@ -119,7 +119,7 @@ Queued messages are persisted before they are acknowledged and run in order as e
 
 ## Sub-agents and new chats
 
-Every agent whose harness takes an MCP server gets `orx mcp` (`src/commands/mcp.rs`, tools in `src/commands/up/agent_tools.rs`). It speaks stdio, the one transport every harness accepts, and relays to the owning dashboard, which knows the calling chat by a token derived from a key that lives only in that dashboard's process.
+Every agent whose harness takes an MCP server gets `orx mcp` (`src/commands/mcp.rs`, tools in `src/commands/up/agent_tools.rs`). It speaks stdio, the one transport every harness accepts, and relays to the owning dashboard, which knows the calling chat by a token derived from a key the dashboard keeps for as long as an agent it started survives. A call that is safe to repeat waits out a restart and goes to the next server.
 
 Through it an agent delegates (`src/local/chat/delegation.rs`). It names a versioned model, and orx picks a route unless the agent names one: the vendor's own agent first, then flat-rate plans, direct APIs, and resellers last. Every agent and provider spells a model differently, so routes join on a canonical id derived from each spelling (`src/local/model_routes.rs`).
 

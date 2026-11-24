@@ -1,5 +1,5 @@
 import { WindowMenu } from "./WindowMenu";
-import { useSyncExternalStore, type MouseEvent } from "react";
+import { useEffect, useSyncExternalStore, type MouseEvent } from "react";
 import { m } from "../paraglide/messages.js";
 
 // ChromeMinimize, ChromeMaximize, ChromeRestore, ChromeClose: shared by Segoe Fluent
@@ -45,6 +45,9 @@ export function WindowControls() {
   const maximized = useSyncExternalStore(subscribeMaximized, () =>
     document.documentElement.hasAttribute("data-maximized"),
   );
+  const labels = { minimize: m.window_minimize(), maximize: m.window_maximize(), restore: m.window_restore(), close: m.window_close() };
+  // The update overlay covers these and draws its own, which the next page's draws too before it loads.
+  useEffect(() => window.orxUpdateOverlay?.captions(labels), [labels.minimize, labels.maximize, labels.restore, labels.close]);
   return (
     <div className="native-window-controls fixed inset-x-0 top-0 z-300 h-0 pointer-events-none [&_button]:pointer-events-auto [&_.fixed]:pointer-events-auto">
       <WindowMenu />
@@ -57,14 +60,14 @@ export function WindowControls() {
       )}
       {/* Above the z-200 dialogs, so the window can always be minimized or closed. */}
       <div className="fixed end-0 top-0 z-300 flex">
-        <CaptionButton label={m.window_minimize()} glyph={GLYPH.minimize} message="minimize" className="hover:bg-panel" />
+        <CaptionButton label={labels.minimize} glyph={GLYPH.minimize} message="minimize" className="hover:bg-panel" />
         <CaptionButton
-          label={maximized ? m.window_restore() : m.window_maximize()}
+          label={maximized ? labels.restore : labels.maximize}
           glyph={maximized ? GLYPH.restore : GLYPH.maximize}
           message="zoom"
           className="hover:bg-panel"
         />
-        <CaptionButton label={m.window_close()} glyph={GLYPH.close} message="close" className="hover:bg-accent-red hover:text-white" />
+        <CaptionButton label={labels.close} glyph={GLYPH.close} message="close" className="hover:bg-accent-red hover:text-white" />
       </div>
     </div>
   );

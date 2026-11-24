@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The AppImage's entry point: start the bundled orx as the desktop app (see
 # src/commands/app.rs). Only an openresearch: link or a .orx file (the desktop
-# entry's %u) is passed on; the CLI is `orx`, not this.
+# entry's %u) is passed on, or the window's server (below); the CLI is `orx`, not this.
 set -e
 
 export APPDIR="${APPDIR:-"$(dirname "$(realpath "$0")")"}"
@@ -62,6 +62,15 @@ else
   export GIO_MODULE_DIR="$APPDIR/usr/lib/gio/modules"
   unset GIO_EXTRA_MODULES
   export ORX_APPIMAGE_RUNTIME=bundled
+fi
+
+# `server ARGS...` runs this image's orx with ARGS: the desktop window starts its server
+# this way, in a mount of its own that outlives the window's, and the server restarts
+# into an update the same way. Every window ever shipped starts it so (FROZEN.md in
+# src/commands/app).
+if [ "${1-}" = server ]; then
+  shift
+  exec "$APPDIR/usr/bin/orx" "$@"
 fi
 
 # scripts/build-linux-appimage.sh rewrote libwebkit2gtk's /usr paths to ././,
