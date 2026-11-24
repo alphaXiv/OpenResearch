@@ -2789,16 +2789,17 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                         // prompt cards instead of plain tool rows, and the user's
                         // choice resumes the session. With the bridge active,
                         // BOTH cards come from the bridge instead (held,
-                        // mid-turn-answerable) and the tool_use renders NOTHING:
-                        // a tool row would duplicate the card — and the denial
-                        // that carries the user's answer back would paint it as a
-                        // spurious error row once the tool_result lands.
-                        if state.bridge_active && matches!(name, "ExitPlanMode" | "AskUserQuestion")
-                        {
+                        // mid-turn-answerable). ExitPlanMode then renders NOTHING:
+                        // the denial that carries the user's answer back would
+                        // paint a spurious error row once the tool_result lands.
+                        // The AskUserQuestion row marks where in the turn the
+                        // dashboard shows its card, `perm_{id}…`.
+                        if state.bridge_active && name == "ExitPlanMode" {
                             continue;
                         }
-                        if let Some(prompt) =
-                            plan_prompt(name, input).or_else(|| question_prompt(name, input))
+                        if let Some(prompt) = plan_prompt(name, input)
+                            .or_else(|| question_prompt(name, input))
+                            .filter(|_| !state.bridge_active)
                         {
                             state.saw_prompt = true;
                             ctx.upsert_part(WirePart::prompt(id, prompt));
@@ -5516,10 +5517,10 @@ mod tests {
     }
 
     #[test]
-    fn bridge_active_suppresses_exitplanmode_and_question_rows() {
+    fn bridge_active_suppresses_exitplanmode_and_keeps_question_rows() {
         // With the bridge on, the CLI relays ExitPlanMode / AskUserQuestion as
-        // held bridge cards; their tool_use must render NOTHING (a duplicate row,
-        // then a spurious error row when the answer-denial's tool_result lands).
+        // held bridge cards. ExitPlanMode renders nothing; AskUserQuestion stays
+        // a tool row the dashboard replaces with its card.
         let transcript = [
             r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"c1","name":"ExitPlanMode","input":{"plan":"p"}}]}}"#,
             r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"tool_use","id":"c2","name":"AskUserQuestion","input":{"questions":[{"question":"which?","header":"h","options":[]}]}}]}}"#,
@@ -5529,11 +5530,21 @@ mod tests {
         let mut ctx = TurnCtx::test_stub();
         let state = fold(&mut ctx, true, &transcript);
         assert!(state.saw_result);
-        // Only the Bash tool part survives; the two bridge-owned calls render
-        // nothing, and neither sets saw_prompt (the bridge tracks that itself).
+        // Neither bridge-owned call sets saw_prompt (the bridge tracks that itself).
         assert!(!state.saw_prompt);
-        assert_eq!(ctx.assistant.parts.len(), 1, "{:?}", ctx.assistant.parts);
-        assert_eq!(ctx.assistant.parts[0].tool.as_deref(), Some("Bash"));
+        let parts: Vec<_> = ctx
+            .assistant
+            .parts
+            .iter()
+            .map(|part| (part.kind.as_str(), part.id.as_str(), part.tool.as_deref()))
+            .collect();
+        assert_eq!(
+            parts,
+            [
+                ("tool", "c2", Some("AskUserQuestion")),
+                ("tool", "c3", Some("Bash"))
+            ]
+        );
     }
 
     #[test]
