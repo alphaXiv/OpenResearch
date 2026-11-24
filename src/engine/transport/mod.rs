@@ -504,6 +504,7 @@ impl Actor {
             let base = steps[self.state.failures.min(steps.len() - 1)];
             let noise =
                 u16::from_le_bytes(uuid::Uuid::new_v4().as_bytes()[..2].try_into().unwrap()) as i64;
+            // A box's outage must still leave collection attempts within its rental's grace.
             let max_delay = if managed { 60_000 } else { 900_000 };
             let delay = (base * (800 + noise % 401) / 1000).min(max_delay);
             self.state.failures = self.state.failures.saturating_add(1);

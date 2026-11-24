@@ -1,3 +1,6 @@
+//! Whether the webview can play media, checked in a disposable child so a broken GStreamer
+//! install turns media off instead of taking the app down.
+
 use crate::error::{anyhow, Result};
 use std::process::Stdio;
 use std::time::Duration;
