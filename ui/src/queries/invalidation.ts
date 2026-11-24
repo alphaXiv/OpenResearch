@@ -39,6 +39,7 @@ const settingsFamilies: Record<string, readonly string[]> = {
   ray: ["getRaySettings", "getComputeSettings"],
   env: ["getEnvVars", "getHfSettings", "getTinkerSettings", "getModalSettings", "getVercelSettings", "getSlurmSettings", "getRaySettings", "getK8sSettings", "getOpenResearchSettings", "getComputeSettings", "getHarnesses", "getTrackioRuns"],
   "data-dir": ["getDataDir"],
+  "network-proxy": ["getNetworkProxy"],
   ssh: ["getSshSettings", "getSshConfig", "getSshMasterStatus", "getComputeSettings"],
   compute: ["getComputeSettings"],
   openresearch: ["getOpenResearchSettings", "getOpenResearchAccount", "getComputeSettings", "getProjectLink"],

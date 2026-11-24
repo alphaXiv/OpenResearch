@@ -753,6 +753,11 @@ export interface EnvVarChange {
  * `$ORX_DATA_DIR` override forces it — the UI shows the field read-only. */
 export type DataDirSource = "env" | "config" | "xdg" | "default";
 
+export interface NetworkProxySettings {
+  proxyUrl: string | null;
+  restartRequired: boolean;
+}
+
 export interface DataDirSettings {
   current: string;
   defaultPath: string;
@@ -2772,6 +2777,9 @@ export function createApi(
     writeResponse(`/api/settings/env/${encodeURIComponent(key)}${envScope(projectId)}`, { method: "DELETE" })
       .then((r) => json<EnvSettings>(r));
 
+  const getNetworkProxy = (signal?: AbortSignal) => get<NetworkProxySettings>("/api/settings/network-proxy", signal);
+  const setNetworkProxy = (proxyUrl: string | null) => post<NetworkProxySettings>("/api/settings/network-proxy", { proxyUrl });
+
   const getDataDir = (signal?: AbortSignal) => get<DataDirSettings>("/api/settings/data-dir", signal);
 
   const validateDataDir = (path: string) =>
@@ -3549,6 +3557,8 @@ export function createApi(
     getEnvVars,
     setEnvVar,
     deleteEnvVar,
+    getNetworkProxy,
+    setNetworkProxy,
     getDataDir,
     validateDataDir,
     setDataDir,

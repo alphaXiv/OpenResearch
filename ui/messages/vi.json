@@ -2579,5 +2579,12 @@
   "lit_sources_save_project": "Lưu cho dự án này",
   "lit_sources_save_all": "Lưu cho mọi dự án",
   "lit_sources_revert": "Dùng nguồn của dự án",
-  "project_settings_autonomy_title": "Mức tự chủ cho cuộc trò chuyện mới"
+  "project_settings_autonomy_title": "Mức tự chủ cho cuộc trò chuyện mới",
+  "settings_proxy_heading": "Proxy mạng",
+  "settings_proxy_description": "Chuyển yêu cầu HTTP, HTTPS và các tác nhân khởi chạy cục bộ qua proxy. Thay đổi có hiệu lực sau khi khởi động lại OpenResearch.",
+  "settings_proxy_address": "Địa chỉ proxy",
+  "settings_proxy_placeholder": "http://127.0.0.1:18080",
+  "settings_proxy_default": "Để trống để dùng cài đặt proxy của môi trường.",
+  "settings_proxy_saving": "Đang lưu…",
+  "settings_proxy_restart": "Khởi động lại OpenResearch để áp dụng cài đặt proxy đã lưu."
 }

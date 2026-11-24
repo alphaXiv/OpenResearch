@@ -2580,5 +2580,12 @@
   "lit_sources_save_project": "このプロジェクトに保存",
   "lit_sources_save_all": "すべてのプロジェクトに保存",
   "lit_sources_revert": "プロジェクトのソースを使う",
-  "project_settings_autonomy_title": "新しいチャットの自律性"
+  "project_settings_autonomy_title": "新しいチャットの自律性",
+  "settings_proxy_heading": "ネットワークプロキシ",
+  "settings_proxy_description": "HTTP・HTTPS リクエストとローカルで起動するエージェントにプロキシを使用します。OpenResearch の再起動後に適用されます。",
+  "settings_proxy_address": "プロキシアドレス",
+  "settings_proxy_placeholder": "http://127.0.0.1:18080",
+  "settings_proxy_default": "空欄の場合は環境のプロキシ設定を使用します。",
+  "settings_proxy_saving": "保存中…",
+  "settings_proxy_restart": "保存したプロキシ設定を適用するには、OpenResearch を再起動してください。"
 }

@@ -51,6 +51,7 @@ pub fn command(program: impl AsRef<OsStr>) -> std::process::Command {
             }
         }
     }
+    crate::net::apply_proxy(&mut command);
     command
 }
 

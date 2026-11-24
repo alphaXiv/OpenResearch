@@ -2580,5 +2580,12 @@
   "lit_sources_save_project": "इस प्रोजेक्ट के लिए सहेजें",
   "lit_sources_save_all": "सभी प्रोजेक्ट के लिए सहेजें",
   "lit_sources_revert": "प्रोजेक्ट के स्रोत इस्तेमाल करें",
-  "project_settings_autonomy_title": "नई चैट की स्वायत्तता"
+  "project_settings_autonomy_title": "नई चैट की स्वायत्तता",
+  "settings_proxy_heading": "नेटवर्क प्रॉक्सी",
+  "settings_proxy_description": "HTTP और HTTPS अनुरोधों तथा स्थानीय रूप से शुरू किए गए एजेंटों के लिए प्रॉक्सी का उपयोग करें। बदलाव OpenResearch को दोबारा शुरू करने पर लागू होंगे।",
+  "settings_proxy_address": "प्रॉक्सी का पता",
+  "settings_proxy_placeholder": "http://127.0.0.1:18080",
+  "settings_proxy_default": "परिवेश की प्रॉक्सी सेटिंग इस्तेमाल करने के लिए खाली छोड़ें।",
+  "settings_proxy_saving": "सहेजा जा रहा है…",
+  "settings_proxy_restart": "सहेजी गई प्रॉक्सी सेटिंग लागू करने के लिए OpenResearch दोबारा शुरू करें।"
 }

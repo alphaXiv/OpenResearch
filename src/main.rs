@@ -1309,10 +1309,19 @@ async fn run_cli() {
     if commands::app::launched_as_app_bundle() && std::env::args_os().len() == 1 {
         // Shell hydration may change XDG_CONFIG_HOME; settle it before telemetry or the lifecycle lock.
         commands::app::hydrate_shell_env().await;
+        net::initialize_proxy().unwrap_or_else(|error| {
+            eprintln!("Could not configure network proxy: {error}");
+            std::process::exit(1);
+        });
+
         telemetry::set_flag(false);
         commands::app::run().await;
         return;
     }
+    net::initialize_proxy().unwrap_or_else(|error| {
+        eprintln!("Could not configure network proxy: {error}");
+        std::process::exit(1);
+    });
     // Started by the Windows app's launcher, OpenResearch.exe, or the Linux
     // AppImage's AppRun. See commands::app.
     #[cfg(all(desktop_app, not(target_os = "macos")))]

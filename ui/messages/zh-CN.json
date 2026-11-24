@@ -2580,5 +2580,12 @@
   "lit_sources_save_project": "为此项目保存",
   "lit_sources_save_all": "为所有项目保存",
   "lit_sources_revert": "使用项目的来源",
-  "project_settings_autonomy_title": "新对话的自主程度"
+  "project_settings_autonomy_title": "新对话的自主程度",
+  "settings_proxy_heading": "网络代理",
+  "settings_proxy_description": "通过代理发送 HTTP、HTTPS 请求，并为本机启动的智能体设置代理。重启 OpenResearch 后生效。",
+  "settings_proxy_address": "代理地址",
+  "settings_proxy_placeholder": "http://127.0.0.1:18080",
+  "settings_proxy_default": "留空以使用环境中的代理设置。",
+  "settings_proxy_saving": "正在保存…",
+  "settings_proxy_restart": "请重启 OpenResearch，使保存的代理设置生效。"
 }

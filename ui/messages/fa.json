@@ -2580,5 +2580,12 @@
   "lit_sources_save_project": "ذخیره برای این پروژه",
   "lit_sources_save_all": "ذخیره برای همه پروژه‌ها",
   "lit_sources_revert": "استفاده از منابع پروژه",
-  "project_settings_autonomy_title": "خودمختاری گفت‌وگوهای جدید"
+  "project_settings_autonomy_title": "خودمختاری گفت‌وگوهای جدید",
+  "settings_proxy_heading": "پروکسی شبکه",
+  "settings_proxy_description": "درخواست‌های HTTP و HTTPS و عامل‌هایی را که به‌صورت محلی اجرا می‌شوند از پروکسی عبور دهید. تغییرات پس از راه‌اندازی مجدد OpenResearch اعمال می‌شوند.",
+  "settings_proxy_address": "نشانی پروکسی",
+  "settings_proxy_placeholder": "http://127.0.0.1:18080",
+  "settings_proxy_default": "برای استفاده از تنظیمات پروکسی محیط، این قسمت را خالی بگذارید.",
+  "settings_proxy_saving": "در حال ذخیره…",
+  "settings_proxy_restart": "برای اعمال تنظیمات ذخیره‌شدهٔ پروکسی، OpenResearch را دوباره راه‌اندازی کنید."
 }

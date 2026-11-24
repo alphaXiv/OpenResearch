@@ -17,6 +17,7 @@ import { useWorkspace } from "../workspace";
 import { cn } from "./ui/cn";
 import { type DialogContentProps } from "../dialog";
 import { DialogContent, DialogTitle } from "./ui";
+import { NetworkProxySection } from "./NetworkProxySection";
 import { SkillsTab } from "./SkillsTab";
 import { confirmDeleteProject } from "./ProjectInfoCard";
 import { useFileManagerLabel } from "./useFileManagerLabel";
@@ -5539,6 +5540,11 @@ export function SettingsView({
           {!remote && (
             <section ref={tab === "storage" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <StorageTab />
+            </section>
+          )}
+          {!remote && (
+            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <NetworkProxySection />
             </section>
           )}
           <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>

@@ -2580,5 +2580,12 @@
   "lit_sources_save_project": "حفظ لهذا المشروع",
   "lit_sources_save_all": "حفظ لكل المشاريع",
   "lit_sources_revert": "استخدام مصادر المشروع",
-  "project_settings_autonomy_title": "الاستقلالية للمحادثات الجديدة"
+  "project_settings_autonomy_title": "الاستقلالية للمحادثات الجديدة",
+  "settings_proxy_heading": "وكيل الشبكة",
+  "settings_proxy_description": "وجّه طلبات HTTP وHTTPS والوكلاء الذين يتم تشغيلهم محليًا عبر وكيل. تسري التغييرات بعد إعادة تشغيل OpenResearch.",
+  "settings_proxy_address": "عنوان الوكيل",
+  "settings_proxy_placeholder": "http://127.0.0.1:18080",
+  "settings_proxy_default": "اتركه فارغًا لاستخدام إعدادات الوكيل في البيئة.",
+  "settings_proxy_saving": "جارٍ الحفظ…",
+  "settings_proxy_restart": "أعد تشغيل OpenResearch لتطبيق إعداد الوكيل المحفوظ."
 }

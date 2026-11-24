@@ -2580,5 +2580,12 @@
   "lit_sources_save_project": "Сохранить для этого проекта",
   "lit_sources_save_all": "Сохранить для всех проектов",
   "lit_sources_revert": "Использовать источники проекта",
-  "project_settings_autonomy_title": "Автономность новых чатов"
+  "project_settings_autonomy_title": "Автономность новых чатов",
+  "settings_proxy_heading": "Сетевой прокси",
+  "settings_proxy_description": "Использовать прокси для запросов HTTP и HTTPS и локально запущенных агентов. Изменения вступят в силу после перезапуска OpenResearch.",
+  "settings_proxy_address": "Адрес прокси",
+  "settings_proxy_placeholder": "http://127.0.0.1:18080",
+  "settings_proxy_default": "Оставьте пустым, чтобы использовать настройки прокси из окружения.",
+  "settings_proxy_saving": "Сохранение…",
+  "settings_proxy_restart": "Перезапустите OpenResearch, чтобы применить сохранённые настройки прокси."
 }

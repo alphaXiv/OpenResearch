@@ -2580,5 +2580,12 @@
   "lit_sources_save_project": "Zapisz dla tego projektu",
   "lit_sources_save_all": "Zapisz dla wszystkich projektów",
   "lit_sources_revert": "Użyj źródeł projektu",
-  "project_settings_autonomy_title": "Autonomia nowych czatów"
+  "project_settings_autonomy_title": "Autonomia nowych czatów",
+  "settings_proxy_heading": "Serwer proxy",
+  "settings_proxy_description": "Kieruj żądania HTTP i HTTPS oraz lokalnie uruchamianych agentów przez proxy. Zmiany zaczną działać po ponownym uruchomieniu OpenResearch.",
+  "settings_proxy_address": "Adres proxy",
+  "settings_proxy_placeholder": "http://127.0.0.1:18080",
+  "settings_proxy_default": "Pozostaw puste, aby używać ustawień proxy ze środowiska.",
+  "settings_proxy_saving": "Zapisywanie…",
+  "settings_proxy_restart": "Uruchom ponownie OpenResearch, aby zastosować zapisane ustawienia proxy."
 }

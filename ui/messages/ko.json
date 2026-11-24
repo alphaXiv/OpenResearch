@@ -2580,5 +2580,12 @@
   "lit_sources_save_project": "이 프로젝트에 저장",
   "lit_sources_save_all": "모든 프로젝트에 저장",
   "lit_sources_revert": "프로젝트의 소스 사용",
-  "project_settings_autonomy_title": "새 채팅의 자율성"
+  "project_settings_autonomy_title": "새 채팅의 자율성",
+  "settings_proxy_heading": "네트워크 프록시",
+  "settings_proxy_description": "HTTP 및 HTTPS 요청과 로컬에서 시작한 에이전트에 프록시를 사용합니다. OpenResearch를 다시 시작하면 적용됩니다.",
+  "settings_proxy_address": "프록시 주소",
+  "settings_proxy_placeholder": "http://127.0.0.1:18080",
+  "settings_proxy_default": "비워 두면 환경의 프록시 설정을 사용합니다.",
+  "settings_proxy_saving": "저장 중…",
+  "settings_proxy_restart": "저장한 프록시 설정을 적용하려면 OpenResearch를 다시 시작하세요."
 }

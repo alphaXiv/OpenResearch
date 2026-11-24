@@ -11255,6 +11255,7 @@ pub fn prepare_env(cmd: &mut tokio::process::Command) {
     // never runs the CLI's own updater against the user's install location.
     cmd.env("DISABLE_AUTOUPDATER", "1");
     cmd.env_remove("ORX_INVOCATION_CONTEXT");
+    crate::net::apply_proxy(cmd.as_std_mut());
 }
 
 /// Env var carrying the launching chat session's id into a harness child. The

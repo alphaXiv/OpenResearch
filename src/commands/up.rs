@@ -1240,6 +1240,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             "/api/settings/data-dir",
             get(data_dir_settings).post(set_data_dir),
         )
+        .route(
+            "/api/settings/network-proxy",
+            get(network_proxy).post(set_network_proxy),
+        )
         .route("/api/settings/data-dir/validate", post(validate_data_dir))
         .route("/api/settings/data-dir/move", post(move_data_dir))
         .route(
@@ -1629,6 +1633,7 @@ fn remote_route_forbidden(path: &str) -> bool {
             | "/api/update/auto"
             | "/api/update/channel"
             | "/api/update/install-cli"
+            | "/api/settings/network-proxy"
             | "/api/settings/data-dir"
             | "/api/settings/data-dir/move"
             | "/api/settings/openresearch/ssh-key"
@@ -7193,6 +7198,38 @@ async fn set_git_settings(Json(req): Json<SetGitSettingsReq>) -> ApiResult {
 // --- telemetry settings -----------------------------------------------------
 
 /// Effective eligibility plus the saved preference controlled by the switch.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NetworkProxyRequest {
+    proxy_url: Option<String>,
+}
+
+fn network_proxy_json() -> Value {
+    let proxy_url =
+        crate::telemetry::load_settings().and_then(|settings| settings.network_proxy_url);
+    json!({
+        "restartRequired": proxy_url.as_deref() != crate::net::active_proxy_url(),
+        "proxyUrl": proxy_url,
+    })
+}
+
+async fn network_proxy() -> ApiResult {
+    tokio::task::spawn_blocking(|| Ok(Json(network_proxy_json())))
+        .await
+        .map_err(|error| ApiError::from(anyhow!("Network proxy settings task failed: {error}")))?
+}
+
+async fn set_network_proxy(Json(request): Json<NetworkProxyRequest>) -> ApiResult {
+    let proxy_url = crate::net::normalize_proxy_url(request.proxy_url).map_err(bad_request)?;
+    tokio::task::spawn_blocking(move || {
+        crate::telemetry::mutate_settings(|settings| settings.network_proxy_url = proxy_url)
+            .map_err(|error| ApiError::from(anyhow!(error)))?;
+        Ok(Json(network_proxy_json()))
+    })
+    .await
+    .map_err(|error| ApiError::from(anyhow!("Network proxy settings task failed: {error}")))?
+}
+
 fn telemetry_settings_json() -> Value {
     let preference_enabled = crate::telemetry::preference_enabled();
     match crate::telemetry::effective_disabled_reason() {
@@ -13659,6 +13696,37 @@ mod tests {
         assert_eq!(result.err().unwrap().0, StatusCode::BAD_REQUEST);
     }
 
+    #[tokio::test]
+    async fn network_proxy_settings_validate_persist_and_require_restart() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        assert_eq!(network_proxy().await.unwrap().0["restartRequired"], false);
+        let saved = set_network_proxy(Json(NetworkProxyRequest {
+            proxy_url: Some(" http://127.0.0.1:18080 ".into()),
+        }))
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(saved["proxyUrl"], "http://127.0.0.1:18080/");
+        assert_eq!(saved["restartRequired"], true);
+        assert_eq!(network_proxy().await.unwrap().0, saved);
+        let error = set_network_proxy(Json(NetworkProxyRequest {
+            proxy_url: Some("socks5://localhost:1080".into()),
+        }))
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(network_proxy().await.unwrap().0, saved);
+        let cleared = set_network_proxy(Json(NetworkProxyRequest { proxy_url: None }))
+            .await
+            .unwrap()
+            .0;
+        assert!(cleared["proxyUrl"].is_null());
+        assert_eq!(cleared["restartRequired"], false);
+    }
+
     #[test]
     fn ssh_workspace_blocks_local_machine_actions_but_keeps_config_editing() {
         for path in [
@@ -13666,6 +13734,7 @@ mod tests {
             "/api/update",
             "/api/update/apply",
             "/api/update/restart",
+            "/api/settings/network-proxy",
             "/api/settings/data-dir",
             "/api/settings/data-dir/move",
             "/api/settings/openresearch/login",

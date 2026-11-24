@@ -2580,5 +2580,12 @@
   "lit_sources_save_project": "Bu proje için kaydet",
   "lit_sources_save_all": "Tüm projeler için kaydet",
   "lit_sources_revert": "Projenin kaynaklarını kullan",
-  "project_settings_autonomy_title": "Yeni sohbetlerin özerkliği"
+  "project_settings_autonomy_title": "Yeni sohbetlerin özerkliği",
+  "settings_proxy_heading": "Ağ proxy'si",
+  "settings_proxy_description": "HTTP ve HTTPS istekleri ile yerel olarak başlatılan aracıları bir proxy üzerinden yönlendirin. Değişiklikler OpenResearch yeniden başlatılınca uygulanır.",
+  "settings_proxy_address": "Proxy adresi",
+  "settings_proxy_placeholder": "http://127.0.0.1:18080",
+  "settings_proxy_default": "Ortamın proxy ayarlarını kullanmak için boş bırakın.",
+  "settings_proxy_saving": "Kaydediliyor…",
+  "settings_proxy_restart": "Kaydedilen proxy ayarını uygulamak için OpenResearch'ü yeniden başlatın."
 }

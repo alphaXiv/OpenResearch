@@ -107,6 +107,8 @@ fn flush_window() -> Duration {
 pub(crate) struct Settings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desktop_zoom_percent: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_proxy_url: Option<String>,
     #[serde(default)]
     pub acp_harnesses: Vec<crate::local::acp::Definition>,
     #[serde(default)]

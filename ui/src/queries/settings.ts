@@ -147,6 +147,11 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     return query;
   }
 
+  const getNetworkProxyQuery = () => queryOptions({
+    queryKey: workspaceKey("getNetworkProxy"),
+    queryFn: ({ signal }) => api.getNetworkProxy(signal),
+  });
+
   const getDataDirQuery = () => queryOptions({
     queryKey: workspaceKey("getDataDir"),
     queryFn: ({ signal }) => api.getDataDir(signal),
@@ -386,6 +391,7 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     getTrackioRunsQuery,
     useTrackioRuns,
     getTrackioRunMetricsQuery,
+    getNetworkProxyQuery,
     getDataDirQuery,
     getSshSettingsQuery,
     setEngineHost,
