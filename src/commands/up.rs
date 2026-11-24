@@ -1254,6 +1254,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             "/api/settings/telemetry",
             get(telemetry_settings).post(set_telemetry_settings),
         )
+        .route(
+            "/api/settings/bug-reports",
+            get(bug_report_settings).post(set_bug_report_settings),
+        )
         .route("/api/telemetry/event", post(record_ui_event))
         .route("/api/telemetry/locale", post(set_dashboard_locale))
         .route(
@@ -7318,6 +7322,29 @@ async fn set_telemetry_settings(Json(req): Json<SetTelemetryReq>) -> ApiResult {
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("telemetry task failed: {e}")))?
+}
+
+async fn bug_report_settings() -> ApiResult {
+    tokio::task::spawn_blocking(|| {
+        let linear = crate::config::linear_bug_reports().map_err(ApiError::from)?;
+        Ok(Json(json!({ "linear": linear })))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("bug report settings task failed: {e}")))?
+}
+
+#[derive(Deserialize)]
+struct SetBugReportsReq {
+    linear: bool,
+}
+
+async fn set_bug_report_settings(Json(req): Json<SetBugReportsReq>) -> ApiResult {
+    tokio::task::spawn_blocking(move || {
+        crate::config::set_linear_bug_reports(req.linear).map_err(ApiError::from)?;
+        Ok(Json(json!({ "linear": req.linear })))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("bug report settings task failed: {e}")))?
 }
 
 #[derive(Deserialize)]

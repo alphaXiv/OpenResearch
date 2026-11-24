@@ -62,6 +62,7 @@ import {
   mutSetGithubForNewProjects,
   mutSetReleaseChannel,
   mutSetTelemetry,
+  mutSetBugReports,
   mutSignOutOpenResearch,
   mutUpdateUiState,
 } from "../queries/settings";
@@ -139,6 +140,8 @@ import {
 import { selectionHarness } from "../modelSelection";
 
 import { releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
+import { bugReportsOffered } from "../bugReport";
+import { useRuntime } from "../RemoteRuntime";
 import { useColoredMarkdown, useThemePreference, type ThemePreference } from "../theme";
 import { useChatWidth, type ChatWidth } from "../chatWidth";
 import { m } from "../paraglide/messages.js";
@@ -4142,6 +4145,7 @@ function UpdatesTab() {
   const { showConfirmDialog } = workspace.dialogs;
 
   const { status, error: loadError } = useUpdateStatus();
+  const runtime = useRuntime();
   // Per-action only so the right button reads "Working…"; installing locks the
   // switches too, since its answer replaces the whole status.
   const [busy, setBusy] = useState<"apply" | "cli" | null>(null);
@@ -4341,10 +4345,36 @@ function UpdatesTab() {
         {status.channel === "app-bundle" && (
           <InstallCliRow busy={busy} disabled={locked} run={run} />
         )}
+        {bugReportsOffered(runtime, status) && <BugReportsRow />}
         {error && <div className="error">{error}</div>}
       </div>
     </>
   )}</>;
+}
+
+function BugReportsRow() {
+  const workspace = useWorkspace();
+  const settings = useQuery(workspace.queries.getBugReportsQuery());
+  const save = useMutate(mutSetBugReports);
+  const failure = save.error ?? settings.error;
+  const label = m.settings_bug_reports_linear();
+
+  return (
+    <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+      <div>
+        <div className="project-default-title text-base font-medium">{label}</div>
+        <p>{m.settings_bug_reports_linear_description()}</p>
+        {failure && <div className="error">{failure instanceof Error ? failure.message : String(failure)}</div>}
+      </div>
+      <Switch
+        type="button"
+        checked={settings.data?.linear ?? false}
+        aria-label={label}
+        disabled={!settings.data}
+        onClick={() => settings.data && save.run(workspace, !settings.data.linear)}
+      />
+    </div>
+  );
 }
 
 function TelemetryTab() {

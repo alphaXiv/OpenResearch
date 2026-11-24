@@ -64,12 +64,15 @@ the whole menu; a page treats a global it does not find as an older window's.
 |---|---|
 | Globals | Set before the page's own scripts: `__ORX_DESKTOP__` (`true`) and, where they apply, `__ORX_MAC_TITLEBAR__`, `__ORX_WIN_TITLEBAR__`, `__ORX_WINDOW_MATERIAL__`, `__ORX_MEDIA_DISABLED__`. |
 | Injected scripts | `src/commands/desktop_zoom.js` and, on macOS, `macos_escape.js`, from the window's build, run in every page it shows. |
-| Page to window | `window.ipc.postMessage` with `page-zoom:sync`, `page-zoom:in`, `page-zoom:out`, `page-zoom:reset`, `window:focus`, `close:asking`, `close:background`, `close:quit`, `close:cancel`, `server:start`, `server:asking`, `app:quit`; on macOS and Windows `titlebar:drag`, `titlebar:zoom`, `appearance:system`, `appearance:light`, `appearance:dark`; on Windows `titlebar:minimize`, `titlebar:close`, `titlebar:resize:<n, ne or nw>`; on macOS `menu:spec:<JSON>` and `menu:state:<JSON>`. |
-| Window to page | Window events `orx:command` (a menu item's id), `orx:open-path` (a dashboard path), `orx:close-request` (`{work, minimizes}`), `orx:page-zoom` (the percent), `orx:server-stopped`; the `--desktop-page-zoom` property and the `data-maximized` (Windows) and `data-fullscreen` (macOS) attributes on the root element. |
+| Page to window | `window.ipc.postMessage` with `page-zoom:sync`, `page-zoom:in`, `page-zoom:out`, `page-zoom:reset`, `window:focus`, `close:asking`, `close:background`, `close:quit`, `close:cancel`, `server:start`, `server:asking`, `app:quit`; on macOS and Windows `titlebar:drag`, `titlebar:zoom`, `appearance:system`, `appearance:light`, `appearance:dark`; on Windows `titlebar:minimize`, `titlebar:close`, `titlebar:resize:<n, ne or nw>`; on macOS `menu:spec:<JSON>`, `menu:state:<JSON>`, `report:screenshot` and `open:<url>`. |
+| Window to page | Window events `orx:command` (a menu item's id), `orx:open-path` (a dashboard path), `orx:close-request` (`{work, minimizes}`), `orx:page-zoom` (the percent), `orx:server-stopped`, on macOS `orx:screenshot`; the `--desktop-page-zoom` property and the `data-maximized` (Windows) and `data-fullscreen` (macOS) attributes on the root element. |
 
 | Message | Contract |
 |---|---|
 | `orx:server-stopped` | The window's server exited and nothing took over. Its `detail` is `{reason, log}`: `reason` the server's last line on stderr when it exited with status 1, else `null`; `log` the rest of the end of its stderr, then how it exited. The page says why it stopped, offers to start it again or to quit, and says so with `server:asking`; a window that hears nothing within a second asks in a native alert instead. |
+| `report:screenshot` | Put a PNG of the page on the clipboard, then send `orx:screenshot`. |
+| `orx:screenshot` | Its `detail` is `{error}`: `null` once the clipboard holds the screenshot, else why it does not. |
+| `open:<url>` | Open `url` the way a pop-up to it opens: outside the app when its scheme may leave it, else nowhere. |
 | `server:start` | Start the server again on the same port. The page reloads once a server answers. |
 | `app:quit` | Quit, as the app's own Quit command does. |
 | `menu:spec:` | `[{id, label, items}]`, each item `{kind: "command", id, label, hotkey?, checked?}`, `{kind: "native", name}` or `{kind: "separator"}`. |

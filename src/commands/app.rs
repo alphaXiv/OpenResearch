@@ -575,13 +575,19 @@ fn is_dashboard_url(url: &str, origin: &str) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
-/// Schemes a pop-up may hand to the system browser. A browser asks before
+/// Schemes a pop-up may hand to the system opener. A browser asks before
 /// launching the app behind any other scheme (`ssh:`, `vscode:`); `open` would not.
+/// Of Linear's links, only the team's draft issue, for a bug report.
 #[cfg_attr(not(desktop_app), allow(dead_code))]
 fn opens_in_browser(url: &str) -> bool {
-    ["http:", "https:", "mailto:"]
-        .iter()
-        .any(|scheme| url.starts_with(scheme))
+    [
+        "http:",
+        "https:",
+        "mailto:",
+        "linear://alphaxiv/team/ORX/new?",
+    ]
+    .iter()
+    .any(|scheme| url.starts_with(scheme))
 }
 
 /// The dashboard path an `openresearch://reproduce/<paper id>` link opens; the page validates the id.
@@ -1050,6 +1056,12 @@ mod imp {
         /// Tell a newly loaded page whether the window is maximized (Windows) or fullscreen (macOS).
         #[cfg(any(windows, target_os = "macos"))]
         SyncWindowState,
+        /// The page asks for a screenshot of itself on the clipboard, for a bug report.
+        #[cfg(target_os = "macos")]
+        CopyScreenshot,
+        /// The screenshot is on the clipboard, or why it isn't.
+        #[cfg(target_os = "macos")]
+        ScreenshotCopied(Result<(), String>),
     }
 
     #[derive(Clone, Copy)]
@@ -1265,33 +1277,9 @@ mod imp {
             // Pop-ups go to the browser, dashboard pages included: a window wry
             // opens itself has none of this window's handlers.
             .with_new_window_req_handler({
-                #[cfg(target_os = "linux")]
                 let window = window.clone();
                 move |url, _features| {
-                    if super::opens_in_browser(&url) {
-                        #[cfg(target_os = "linux")]
-                        let activation_token = {
-                            use gtk::{gio, prelude::*};
-                            use tao::platform::unix::WindowExtUnix;
-
-                            let context = window.gtk_window().display().app_launch_context();
-                            context.and_then(|context| {
-                                // Wayland needs the click's activation token to focus an existing browser.
-                                context.set_timestamp(gtk::current_event_time());
-                                gio::AppInfo::create_from_commandline(
-                                    "xdg-open",
-                                    None,
-                                    gio::AppInfoCreateFlags::NONE,
-                                )
-                                .ok()
-                                .and_then(|app| context.startup_notify_id(&app, &[]))
-                            })
-                        };
-                        #[cfg(not(target_os = "linux"))]
-                        let activation_token: Option<String> = None;
-
-                        crate::browser::open_browser(&url, activation_token.as_deref());
-                    }
+                    open_outside(&window, &url);
                     NewWindowResponse::Deny
                 }
             })
@@ -1344,9 +1332,14 @@ mod imp {
         let builder = builder.with_ipc_handler({
             #[cfg(not(target_os = "linux"))]
             let window = window.clone();
+            #[cfg(target_os = "macos")]
+            let origin = origin.clone();
             let proxy = event_loop.create_proxy();
             move |request| {
                 let message = request.body().as_str();
+                // Frames of other origins, such as an artifact's preview, reach the handler too.
+                #[cfg(target_os = "macos")]
+                let from_dashboard = super::is_dashboard_url(&request.uri().to_string(), &origin);
                 match message {
                     "page-zoom:sync" => {
                         let _ = proxy.send_event(UserEvent::SyncZoom);
@@ -1375,6 +1368,15 @@ mod imp {
                     }
                     "app:quit" => {
                         let _ = proxy.send_event(UserEvent::Close);
+                    }
+                    #[cfg(target_os = "macos")]
+                    "report:screenshot" if from_dashboard => {
+                        let _ = proxy.send_event(UserEvent::CopyScreenshot);
+                    }
+                    // A pop-up the page opens after an await, when WebKit no longer counts the click.
+                    #[cfg(target_os = "macos")]
+                    message if from_dashboard && message.starts_with("open:") => {
+                        open_outside(&window, &message["open:".len()..]);
                     }
                     "close:background" => {
                         let _ = proxy
@@ -1631,6 +1633,18 @@ mod imp {
                 }
             }
             Event::UserEvent(UserEvent::StoppedAsked) => stopped_asked = None,
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(UserEvent::CopyScreenshot) => copy_screenshot(&webview, proxy.clone()),
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(UserEvent::ScreenshotCopied(copied)) => {
+                if let Err(error) = &copied {
+                    eprintln!("openresearch app: could not copy a screenshot: {error}");
+                }
+                let detail = serde_json::json!({ "error": copied.err() });
+                let _ = webview.evaluate_script(&format!(
+                    "window.dispatchEvent(new CustomEvent('orx:screenshot', {{ detail: {detail} }}));"
+                ));
+            }
             Event::UserEvent(UserEvent::AskAfterStop(stop)) if !server_running && matches!(quit, Quit::No) => {
                 // The alert is a sheet on the window, which comes back for it.
                 #[cfg(target_os = "macos")]
@@ -3026,6 +3040,84 @@ mod imp {
         true
     }
 
+    /// Hands a pop-up's URL to the system opener, when its scheme is one that may leave the app.
+    fn open_outside(
+        #[cfg_attr(not(target_os = "linux"), allow(unused))] window: &Window,
+        url: &str,
+    ) {
+        if !super::opens_in_browser(url) {
+            return;
+        }
+
+        #[cfg(target_os = "linux")]
+        let activation_token = {
+            use gtk::{gio, prelude::*};
+            use tao::platform::unix::WindowExtUnix;
+
+            let context = window.gtk_window().display().app_launch_context();
+            context.and_then(|context| {
+                // Wayland needs the click's activation token to focus an existing browser.
+                context.set_timestamp(gtk::current_event_time());
+                gio::AppInfo::create_from_commandline(
+                    "xdg-open",
+                    None,
+                    gio::AppInfoCreateFlags::NONE,
+                )
+                .ok()
+                .and_then(|app| context.startup_notify_id(&app, &[]))
+            })
+        };
+        #[cfg(not(target_os = "linux"))]
+        let activation_token: Option<String> = None;
+
+        crate::browser::open_browser(url, activation_token.as_deref());
+    }
+
+    /// Puts a PNG of the page on the clipboard, then sends [`UserEvent::ScreenshotCopied`].
+    #[cfg(target_os = "macos")]
+    fn copy_screenshot(webview: &WebView, proxy: tao::event_loop::EventLoopProxy<UserEvent>) {
+        use objc2_app_kit::{
+            NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSPasteboard, NSPasteboardTypePNG,
+        };
+        use objc2_foundation::{NSDictionary, NSError};
+
+        let done = block2::RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
+            let copied = match unsafe { image.as_ref() } {
+                None => Err(unsafe { error.as_ref() }.map_or_else(
+                    || "WebKit returned no image".into(),
+                    |e| e.localizedDescription().to_string(),
+                )),
+                Some(image) => image
+                    .TIFFRepresentation()
+                    .and_then(|tiff| NSBitmapImageRep::imageRepWithData(&tiff))
+                    .and_then(|bitmap| unsafe {
+                        bitmap.representationUsingType_properties(
+                            NSBitmapImageFileType::PNG,
+                            &NSDictionary::new(),
+                        )
+                    })
+                    .ok_or_else(|| "the snapshot could not be encoded as PNG".to_string())
+                    .and_then(|png| {
+                        let pasteboard = NSPasteboard::generalPasteboard();
+                        pasteboard.clearContents();
+                        pasteboard
+                            .setData_forType(Some(&png), unsafe { NSPasteboardTypePNG })
+                            .then_some(())
+                            .ok_or_else(|| "the clipboard refused the image".to_string())
+                    }),
+            };
+            let _ = proxy.send_event(UserEvent::ScreenshotCopied(copied));
+        });
+        let wk = webview.webview();
+        unsafe {
+            let _: () = objc2::msg_send![
+                &*wk,
+                takeSnapshotWithConfiguration: std::ptr::null::<AnyObject>(),
+                completionHandler: &*done
+            ];
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::ZoomAction;
@@ -3326,6 +3418,8 @@ mod tests {
         assert!(opens_in_browser("https://github.com/alphaXiv"));
         assert!(opens_in_browser("http://127.0.0.1:4792/api/artifacts/raw"));
         assert!(opens_in_browser("mailto:team@example.com"));
+        assert!(opens_in_browser("linear://alphaxiv/team/ORX/new?title=Bug"));
+        assert!(!opens_in_browser("linear://alphaxiv/settings/api"));
         assert!(!opens_in_browser("ssh://attacker.example"));
         assert!(!opens_in_browser("vscode://file/etc/passwd"));
         assert!(!opens_in_browser(
