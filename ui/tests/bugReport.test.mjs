@@ -31,5 +31,5 @@ test("a GitHub report keeps the template and says what it couldn't read", () => 
   assert.match(body, /### What happened/);
   assert.match(body, /attach a screenshot/);
   assert.match(body, /canary-1234567, machine unknown \(probe failed\)/);
-  assert.match(body, /`a1ff70b2f920`, which main doesn't contain \(https:\/\/github\.com\/alphaXiv\/OpenResearch\/pull\/1\)/);
+  assert.match(body, /`a1ff70b2f920`, fork point on main unknown \(https:\/\/github\.com\/alphaXiv\/OpenResearch\/pull\/1\)/);
 });

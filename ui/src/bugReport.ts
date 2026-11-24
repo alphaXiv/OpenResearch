@@ -65,7 +65,7 @@ export function bugReportUrl({ linear, version, screenshot, machine, checkout }:
   ].filter(Boolean).join(", ");
   const commit = checkout && (checkout instanceof Error
     ? `Dev Build from a checkout git and jj couldn't read: ${checkout.message}`
-    : `${checkout.base ? `Dev Build based on \`${checkout.base}\` from main` : `Dev Build from \`${checkout.commit}\`, which main doesn't contain`}${checkout.pr ? ` (${checkout.pr})` : ""}.`);
+    : `${checkout.base ? `Dev Build based on \`${checkout.base}\` from main` : `Dev Build from \`${checkout.commit}\`, fork point on main unknown`}${checkout.pr ? ` (${checkout.pr})` : ""}.`);
   const footer = ["---", build, commit].filter(Boolean).join("\n\n");
 
   if (linear) {
