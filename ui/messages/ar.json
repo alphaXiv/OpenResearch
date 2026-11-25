@@ -2625,7 +2625,7 @@
   "instructions_keep_mine": "الاحتفاظ بتعديلاتي",
   "instructions_use_saved": "استخدام النسخة المحفوظة",
   "chat_instructions_title": "هل تريد تغيير تعليمات OpenResearch؟",
-  "chat_instructions_note": "يتبعها Claude Code وCodex وOpenCode من دورهم التالي، وCursor ووكلاء ACP الآخرون من محادثتهم الجديدة التالية.",
+  "chat_instructions_note": "تبدأ المحادثات الجديدة بها، وتحتفظ المحادثات المفتوحة بالتعليمات التي بدأت بها.",
   "chat_instructions_stale": "تغيّرت تعليماتك بعد أن اقترح الوكيل هذا. ارفضه واطلب من الوكيل أن يقترحه من جديد.",
   "chat_instructions_approve": "موافقة",
   "chat_instructions_decline": "رفض",

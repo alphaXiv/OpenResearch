@@ -291,9 +291,6 @@ pub struct SpawnConfig {
     pub bridge_active: bool,
     /// The executable detection selected, so a newer install respawns the child.
     pub bin: Option<PathBuf>,
-    /// The version of the user's OpenResearch instructions, which ride the playbook.
-    #[serde(default)]
-    pub instructions: String,
 }
 
 /// Everything needed to spawn (or respawn) a session's child, built per turn by
@@ -2354,7 +2351,6 @@ pub(crate) mod tests {
             alphaxiv_signed_in: false,
             bridge_active: bridge,
             bin: None,
-            instructions: String::new(),
         }
     }
 
@@ -2437,56 +2433,6 @@ done
                 .is_empty());
             drop(route);
         }
-        host.shutdown().await;
-        std::fs::remove_dir_all(repo).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn only_an_instructions_edit_respawns_an_otherwise_matching_child() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let repo = crate::store::data_dir().join(format!("instructions-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&repo).unwrap();
-        let bin = repo.join("claude");
-        std::fs::write(
-            &bin,
-            "#!/bin/sh\nwhile IFS= read -r input; do printf '{\"type\":\"system\"}\\n'; done\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let host = Arc::new(ClaudeHost::new());
-        host.auth.write().unwrap().state = HarnessAuthState::Ready;
-        let chat = Arc::new(crate::local::chat::ChatHost::new(
-            Arc::new(crate::local::opencode::AgentHost::new(None)),
-            Arc::new(crate::local::codex::CodexHost::new()),
-            host.clone(),
-        ));
-        let mut clients = Vec::new();
-        for instructions in ["v1", "v1", "v2"] {
-            let mut config = cfg(Some(PermissionMode::Auto), None, None, false);
-            config.bin = Some(bin.clone());
-            config.instructions = instructions.into();
-            let (tx, mut rx) = mpsc::unbounded_channel();
-            let spec = SpawnSpec {
-                chat: chat.clone(),
-                session_id: "instructions-test".into(),
-                repo: repo.clone(),
-                playbook: repo.join("playbook"),
-                resume: None,
-                fork_at: None,
-                config,
-            };
-            let route = host.acquire_turn(spec, tx).await.unwrap();
-            route.client().send_user_message("hi").await.unwrap();
-            tokio::time::timeout(Duration::from_secs(5), rx.recv())
-                .await
-                .unwrap()
-                .unwrap();
-            clients.push(route.client().clone());
-        }
-        assert!(Arc::ptr_eq(&clients[0], &clients[1]));
-        assert!(!Arc::ptr_eq(&clients[1], &clients[2]));
         host.shutdown().await;
         std::fs::remove_dir_all(repo).unwrap();
     }

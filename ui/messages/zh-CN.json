@@ -2625,7 +2625,7 @@
   "instructions_keep_mine": "保留我的编辑",
   "instructions_use_saved": "使用已保存的版本",
   "chat_instructions_title": "要修改你的 OpenResearch 指令吗？",
-  "chat_instructions_note": "Claude Code、Codex 和 OpenCode 从下一轮开始遵循；Cursor 和其他 ACP 智能体从下一个新对话开始遵循。",
+  "chat_instructions_note": "新对话会使用这些指令；已打开的对话保留开始时的指令。",
   "chat_instructions_stale": "智能体提出此修改后，你的指令已发生变化。请拒绝，并让智能体重新提出。",
   "chat_instructions_approve": "批准",
   "chat_instructions_decline": "拒绝",

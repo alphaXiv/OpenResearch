@@ -96,11 +96,6 @@ pub fn write(
     }))
 }
 
-/// The version a harness compares to respawn or resume its agent with an edited playbook.
-pub fn current_version() -> Result<String> {
-    Ok(read(&path())?.version)
-}
-
 /// The change as `git diff` shows it, every line in context, for the card.
 fn diff(old: &str, new: &str) -> Result<String> {
     let dir = crate::local::git::TemporaryDirectory::new("orx-instructions-diff")?;
@@ -175,7 +170,7 @@ impl ChatHost {
             if written.is_err() {
                 bail!("Your OpenResearch instructions changed after the agent proposed this, so approving it would undo that change. Decline it and ask the agent to propose again.");
             }
-            "The user approved your proposed OpenResearch instructions, and they are saved. Claude Code, Codex and OpenCode chats follow them from their next turn; Cursor and other ACP agents from their next new chat."
+            "The user approved your proposed OpenResearch instructions, and they are saved. New OpenResearch chats start with them; chats already open, this one included, keep the instructions they started with."
         } else {
             "The user declined your proposed change to their OpenResearch instructions, so they stay as they were."
         };
