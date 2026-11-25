@@ -61,11 +61,22 @@ pub fn write(
     content: &str,
     base_version: &str,
 ) -> Result<std::result::Result<Snapshot, Snapshot>> {
-    // ponytail: guards writers in this process only; an editor saving at the same instant can still race.
-    static WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _write = WRITE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("{} has no parent directory", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("Couldn't create {}", parent.display()))?;
+    // Held across processes: dashboards with different data directories share this file.
+    let lock_path = parent.join("AGENTS.md.lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("Couldn't open {}", lock_path.display()))?;
+    lock.lock()
+        .with_context(|| format!("Couldn't lock {}", lock_path.display()))?;
+    let _lock = crate::file_lock::FileLock::new(lock);
     let current = read(path)?;
     // Already saved, as when an approval is answered again after the agent couldn't be told.
     if current.exists && current.content == content {
@@ -74,11 +85,6 @@ pub fn write(
     if current.version != base_version {
         return Ok(Err(current));
     }
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow!("{} has no parent directory", path.display()))?;
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("Couldn't create {}", parent.display()))?;
     // Writes through a symlink, so instructions kept with the user's dotfiles stay there.
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     crate::local::git::atomic_write_with_mode(&target, content.as_bytes(), None).with_context(
@@ -208,6 +214,24 @@ mod tests {
         crate::config::test_home()
             .join(format!("instructions-{}", uuid::Uuid::new_v4().simple()))
             .join("AGENTS.md")
+    }
+
+    #[test]
+    fn racing_saves_against_one_version_keep_exactly_one() {
+        let path = temp_path();
+        let base = read(&path).unwrap().version;
+        let saves: Vec<_> = (0..8)
+            .map(|n| {
+                let (path, base) = (path.clone(), base.clone());
+                std::thread::spawn(move || write(&path, &format!("writer {n}"), &base).unwrap())
+            })
+            .collect();
+        let saved: Vec<_> = saves
+            .into_iter()
+            .filter_map(|save| save.join().unwrap().ok())
+            .collect();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(read(&path).unwrap(), saved[0]);
     }
 
     #[test]
