@@ -2169,22 +2169,41 @@ const BASH_HINT: &str = " — install Git for Windows to run shell commands.";
 #[cfg(not(windows))]
 const BASH_HINT: &str = "";
 
+/// Refuses `harness` for a chat that already ran another ACP agent.
+pub(crate) fn refuse_acp_switch(store: &Store, session_id: &str, harness: &str) -> Result<()> {
+    if harness.starts_with("acp:")
+        && store
+            .acp_session_state(session_id)?
+            .is_some_and(|state| state.launch.id != harness)
+    {
+        return Err(anyhow!(
+            "This chat already uses another ACP agent. Start a new chat for this agent."
+        ));
+    }
+    Ok(())
+}
+
 impl ChatHost {
     pub async fn set_agent(
         self: &Arc<Self>,
         session_id: &str,
-        mut agent: crate::store::StoredAgentSelection,
-        context_window: Option<u64>,
+        agent: crate::store::StoredAgentSelection,
     ) -> Result<StoredChatSession> {
         let mut guard = TurnGuard::claim_idle(self, session_id, TurnState::Switching)
             .await
             .ok_or_else(|| {
                 anyhow!("Remove queued messages and stop the turn before switching agents.")
             })?;
-        let store = Store::open()?;
-        let session = store
-            .get_chat_session(session_id)?
-            .ok_or_else(|| anyhow!("chat session not found"))?;
+        let (session, queued) = {
+            let store = Store::open()?;
+            let session = store
+                .get_chat_session(session_id)?
+                .ok_or_else(|| anyhow!("chat session not found"))?;
+            let queued = !store
+                .list_queued_chat_messages_for_session(session_id)?
+                .is_empty();
+            (session, queued)
+        };
         if session.harness == agent.harness && session.profile_id == agent.profile {
             if session.model == agent.model {
                 guard.release().await;
@@ -2192,23 +2211,42 @@ impl ChatHost {
             }
             return Err(anyhow!("Change this agent's model in the model picker."));
         }
-        if agent.harness.starts_with("acp:")
-            && store
-                .acp_session_state(session_id)?
-                .is_some_and(|state| state.launch.id != agent.harness)
-        {
-            return Err(anyhow!(
-                "This chat already uses another ACP agent. Start a new chat for this agent."
-            ));
-        }
-        if !store
-            .list_queued_chat_messages_for_session(session_id)?
-            .is_empty()
-        {
+        if queued {
             return Err(anyhow!(
                 "Send or remove queued messages before switching agents."
             ));
         }
+        let session = self.switch_agent(session, agent).await?;
+        guard.release().await;
+        self.emit_session(Some(session.clone())).await;
+        Ok(session)
+    }
+
+    /// Moves `session` to `agent` while the caller holds its turn slot.
+    async fn switch_agent(
+        self: &Arc<Self>,
+        session: StoredChatSession,
+        mut agent: crate::store::StoredAgentSelection,
+    ) -> Result<StoredChatSession> {
+        let session_id = session.id.as_str();
+        let context_window = self
+            .harnesses
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|(_, catalog)| {
+                crate::local::harness::catalog_entry(
+                    catalog,
+                    &agent.harness,
+                    agent.profile.as_deref(),
+                )?["models"]
+                    .as_array()?
+                    .iter()
+                    .find(|model| model["id"].as_str() == agent.model.as_deref())?["contextWindow"]
+                    .as_u64()
+            });
+        let store = Store::open()?;
+        refuse_acp_switch(&store, session_id, &agent.harness)?;
         let target = crate::local::harness::chat_harness(&agent.harness)
             .ok_or_else(|| anyhow!("unknown harness `{}`", agent.harness))?;
         let plan_mode =
@@ -2280,17 +2318,15 @@ impl ChatHost {
             &marker,
             command_plan,
         )?;
+        drop(store);
         self.end_agents(session_id).await;
         self.emit(
             "chat.message",
             message_json(&stored_to_wire(&marker), session_id),
         );
-        let session = store
+        Store::open()?
             .get_chat_session(session_id)?
-            .ok_or_else(|| anyhow!("chat session not found"))?;
-        guard.release().await;
-        self.emit_session(Some(session.clone())).await;
-        Ok(session)
+            .ok_or_else(|| anyhow!("chat session not found"))
     }
 
     /// Compact a session's context: the harness does it natively where it can,
@@ -3407,6 +3443,9 @@ struct QueuedMessage {
     dispatch_error: Option<String>,
     #[serde(default)]
     next_retry_at: Option<i64>,
+    /// The agent a takeover switches the chat to before this message runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent: Option<crate::store::StoredAgentSelection>,
 }
 
 pub(crate) fn legacy_opening_message(
@@ -3446,6 +3485,7 @@ pub(crate) fn legacy_opening_message(
         dispatch_attempts: 0,
         dispatch_error: None,
         next_retry_at: None,
+        agent: None,
     };
     Ok(crate::store::StoredQueuedChatMessage {
         id: id.clone(),
@@ -5404,6 +5444,7 @@ impl ChatHost {
             dispatch_attempts: 0,
             dispatch_error: None,
             next_retry_at: None,
+            agent: None,
         };
         let payload_json = serde_json::to_string(&queued)?;
         store.insert_queued_chat_message(&StoredQueuedChatMessage {
@@ -5741,6 +5782,145 @@ impl ChatHost {
     /// `send_message_showing` → (spawned) `drain_queue` is an async recursion
     /// cycle the auto-`Send` solver can't close on its own, so we assert the
     /// boxed future is `Send` to break it.
+    /// Stops the running turn and runs this message next on `agent`, ahead of
+    /// anything already queued, which follows on `agent` too.
+    #[expect(clippy::too_many_arguments)]
+    pub async fn take_over(
+        self: &Arc<Self>,
+        session_id: &str,
+        agent: crate::store::StoredAgentSelection,
+        text: String,
+        overrides: TurnOverrides,
+        images: Vec<ImageAttachment>,
+        annotations: Vec<TextAnnotation>,
+        client_turn_id: Option<String>,
+    ) -> Result<SendMessageResult> {
+        let lock = self
+            .submission_locks
+            .lock()
+            .await
+            .entry(session_id.to_string())
+            .or_default()
+            .clone();
+        let _submission = lock.lock().await;
+        let client_turn_id = client_turn_id
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or_else(|| format!("ct_{}", uuid::Uuid::new_v4()));
+        let request_hash = message_request_hash(&text, &overrides, &images, &annotations)?;
+        let running = match self.turns.lock().await.get(session_id) {
+            Some(TurnState::Active(active)) => Some(active.turn_id.clone()),
+            Some(TurnState::Reserved { turn_id }) => turn_id.clone(),
+            _ => None,
+        };
+        {
+            let _mutation = self.queue_persistence.lock().unwrap();
+            let store = Store::open()?;
+            if let Some(turn) = store.get_chat_turn_by_client_id(session_id, &client_turn_id)? {
+                return Ok(SendMessageResult {
+                    turn_id: turn.id,
+                    queued: false,
+                    existing: true,
+                });
+            }
+            let queue = store.list_queued_chat_messages_for_session(session_id)?;
+            if let Some(row) = queue
+                .iter()
+                .find(|row| row.client_turn_id == client_turn_id)
+            {
+                if row.request_hash != request_hash {
+                    return Err(client_turn_conflict());
+                }
+                return Ok(SendMessageResult {
+                    turn_id: client_turn_id,
+                    queued: true,
+                    existing: true,
+                });
+            }
+            let transcript_text = message_transcript(&text, &annotations).text;
+            let message = QueuedMessage {
+                id: new_queued_id(),
+                client_turn_id: client_turn_id.clone(),
+                request_hash: request_hash.clone(),
+                text,
+                transcript_text,
+                orx: Vec::new(),
+                overrides,
+                images,
+                annotations,
+                dispatch_attempts: 0,
+                dispatch_error: None,
+                next_retry_at: None,
+                agent: Some(agent),
+            };
+            let ahead_of_queue = queue.first().map_or_else(now_ms, |row| row.created_at - 1);
+            store.insert_queued_chat_message(&StoredQueuedChatMessage {
+                id: message.id.clone(),
+                session_id: session_id.to_string(),
+                client_turn_id: client_turn_id.clone(),
+                request_hash,
+                payload_json: serde_json::to_string(&message)?,
+                created_at: ahead_of_queue,
+            })?;
+            self.refresh_persisted_queue_locked(session_id, &store)?;
+        }
+        // Ending the turn hands the slot to the queue, now led by this message.
+        let stopped = match running {
+            Some(turn_id) => {
+                self.stop_turn(session_id, StopMode::TakeOver(turn_id))
+                    .await?
+            }
+            None => false,
+        };
+        if !stopped {
+            self.resume_persisted_queues();
+        }
+        Ok(SendMessageResult {
+            turn_id: client_turn_id,
+            queued: true,
+            existing: false,
+        })
+    }
+
+    /// Switches agents for the takeover `item_id` in the slot the queue holds.
+    /// Messages queued behind it were written for the old agent, so they drop
+    /// their settings and run on the new agent's.
+    async fn take_over_agent(
+        self: &Arc<Self>,
+        session_id: &str,
+        item_id: &str,
+        agent: crate::store::StoredAgentSelection,
+    ) -> Result<()> {
+        let session = Store::open()?
+            .get_chat_session(session_id)?
+            .ok_or_else(|| anyhow!("chat session not found"))?;
+        // A retry after a restart finds the switch done and still rewrites the queue.
+        let switched = if session.harness == agent.harness && session.profile_id == agent.profile {
+            None
+        } else {
+            Some(self.switch_agent(session, agent).await?)
+        };
+        {
+            let store = Store::open()?;
+            let _mutation = self.queue_persistence.lock().unwrap();
+            for row in store.list_queued_chat_messages_for_session(session_id)? {
+                let Ok(mut message) = serde_json::from_str::<QueuedMessage>(&row.payload_json)
+                else {
+                    continue;
+                };
+                if row.id == item_id || message.agent.is_some() {
+                    continue;
+                }
+                message.overrides = TurnOverrides::default();
+                store.update_queued_chat_message(&row.id, &serde_json::to_string(&message)?)?;
+            }
+            self.refresh_persisted_queue_locked(session_id, &store)?;
+        }
+        if let Some(session) = switched {
+            self.emit_session(Some(session)).await;
+        }
+        Ok(())
+    }
+
     fn drain_queue<'a>(
         self: &'a Arc<Self>,
         session_id: &'a str,
@@ -5824,28 +6004,42 @@ impl ChatHost {
                 text: item.text.clone(),
                 annotations: item.annotations.clone(),
             }];
-            let send_result = self
-                .send_message_showing(
-                    session_id,
-                    SendTurnRequest {
-                        messages,
-                        prepared_input: None,
-                        replace_settings: false,
-                        transcript: TranscriptDisplay {
-                            text: item.transcript_text.clone(),
-                            annotations: None,
-                            orx: item.orx.clone(),
-                            record_user_message: true,
+            let switched = match item.agent.clone() {
+                Some(agent) => self.take_over_agent(session_id, &item.id, agent).await,
+                None => Ok(()),
+            };
+            if let Err(error) = &switched {
+                eprintln!("orx up: chat {session_id} could not switch agents: {error:#}");
+            }
+            let send_result = match switched {
+                Err(error) => {
+                    guard.release().await;
+                    Err(error)
+                }
+                Ok(()) => {
+                    self.send_message_showing(
+                        session_id,
+                        SendTurnRequest {
+                            messages,
+                            prepared_input: None,
+                            replace_settings: false,
+                            transcript: TranscriptDisplay {
+                                text: item.transcript_text.clone(),
+                                annotations: None,
+                                orx: item.orx.clone(),
+                                record_user_message: true,
+                            },
+                            overrides,
+                            images: TurnAttachments::Uploaded(item.images.clone()),
+                            admission: TurnAdmission::Preclaimed(guard),
+                            client_turn_id: Some(item.client_turn_id.clone()),
+                            request_hash: Some(item.request_hash.clone()),
+                            continuation: false,
                         },
-                        overrides,
-                        images: TurnAttachments::Uploaded(item.images.clone()),
-                        admission: TurnAdmission::Preclaimed(guard),
-                        client_turn_id: Some(item.client_turn_id.clone()),
-                        request_hash: Some(item.request_hash.clone()),
-                        continuation: false,
-                    },
-                )
-                .await;
+                    )
+                    .await
+                }
+            };
             match send_result {
                 Ok(TurnSubmission::NotStarted) => {
                     let requeued = {
@@ -7027,6 +7221,7 @@ impl ChatHost {
                         dispatch_attempts: 0,
                         dispatch_error: None,
                         next_retry_at: None,
+                        agent: None,
                     };
                     store.insert_queued_chat_message(&StoredQueuedChatMessage {
                         id: queued_message.id.clone(),
@@ -7927,11 +8122,22 @@ impl ChatHost {
     }
 
     async fn stop_turn(self: &Arc<Self>, session_id: &str, mode: StopMode) -> Result<bool> {
-        let cancel = matches!(mode, StopMode::Cancel | StopMode::Hold | StopMode::User);
+        let user = matches!(mode, StopMode::User | StopMode::TakeOver(_));
+        let cancel = user || matches!(mode, StopMode::Cancel | StopMode::Hold);
         let active = {
             let mut turns = self.turns.lock().await;
+            if let StopMode::TakeOver(turn_id) = &mode {
+                let running = match turns.get(session_id) {
+                    Some(TurnState::Active(active)) => Some(&active.turn_id),
+                    Some(TurnState::Reserved { turn_id }) => turn_id.as_ref(),
+                    _ => None,
+                };
+                if running != Some(turn_id) {
+                    return Ok(false);
+                }
+            }
             // Under `turns`, so a turn starting now cannot clear the hold this Stop sets.
-            if matches!(mode, StopMode::Hold | StopMode::User) {
+            if user || mode == StopMode::Hold {
                 self.stopped.lock().unwrap().insert(session_id.to_string());
             }
             if let StopMode::LeaseLost(token) = &mode {
@@ -8067,7 +8273,6 @@ impl ChatHost {
             }
             // Settle dead native requests after the final flush, before a new turn can start.
             let _ = host.resolve_stale_prompts(&session_id, true);
-            let user = mode == StopMode::User;
             if user {
                 host.record_interruption(&session_id);
                 // Before the queue takes the slot, so cleanup can't cut the next turn's delegations.
@@ -11237,6 +11442,9 @@ enum StopMode {
     /// Cut short by a quit, without waiting on the agent: shutdown kills it next and the
     /// next start resumes the turn.
     Shutdown,
+    /// Stopped like `User`, and only while turn `.0` still holds the slot: a takeover queued
+    /// behind it must never stop the turn it starts itself.
+    TakeOver(String),
 }
 
 /// A turn whose lease another claim reaped stops here and is recorded as cut
@@ -13693,7 +13901,6 @@ mod bridge_tests {
                 permission_mode: None,
                 reasoning_level: None,
             },
-            None,
         )
         .await
         .unwrap();
@@ -13743,6 +13950,13 @@ mod bridge_tests {
                 let host = Arc::new(test_host());
                 let store = Store::open().unwrap();
                 let acp = crate::local::acp::presets().remove(0).launch;
+                let models = json!([{"id": "target-model", "contextWindow": 200_000}]);
+                let entries = ["claude-code", "codex", "opencode"]
+                    .map(|id| json!({"id": id, "models": models}));
+                *host.harnesses.lock().await = Some((
+                    std::time::Instant::now(),
+                    json!({ "harnesses": entries }),
+                ));
                 for source in ["claude-code", "codex", "opencode", acp.id.as_str()] {
                     for target in ["claude-code", "codex", "opencode"] {
                         if source == target {
@@ -13799,7 +14013,7 @@ mod bridge_tests {
                             reasoning_level: None,
                         };
                         let switched = host
-                            .set_agent(&session.id, agent.clone(), Some(200_000))
+                            .set_agent(&session.id, agent.clone())
                             .await
                             .unwrap();
                         assert_eq!(switched.harness, target);
@@ -13854,7 +14068,7 @@ mod bridge_tests {
                                 .contains("Preserve the parser API.")
                         );
                         let same = host
-                            .set_agent(&session.id, agent.clone(), None)
+                            .set_agent(&session.id, agent.clone())
                             .await
                             .unwrap();
                         assert_eq!(
@@ -13890,7 +14104,7 @@ mod bridge_tests {
                             reasoning_level: None,
                         };
                         let back = host
-                            .set_agent(&session.id, source_agent.clone(), Some(200_000))
+                            .set_agent(&session.id, source_agent.clone())
                             .await
                             .unwrap();
                         assert_eq!(back.native_session_id, session.native_session_id);
@@ -14005,12 +14219,12 @@ mod bridge_tests {
 
                         if source == "codex" && target == "claude-code" {
                             host.set_plan_mode(&session.id, true).await.unwrap();
-                            let claude = host.set_agent(&session.id, agent.clone(), None).await.unwrap();
+                            let claude = host.set_agent(&session.id, agent.clone()).await.unwrap();
                             assert_eq!(claude.permission_mode.as_deref(), Some("plan"));
                             assert!(!claude.plan_mode);
                             host.set_permission_mode(&session.id, "auto").await.unwrap();
                             let codex = host
-                                .set_agent(&session.id, source_agent, None)
+                                .set_agent(&session.id, source_agent)
                                 .await
                                 .unwrap();
                             assert!(!codex.plan_mode);
@@ -14020,7 +14234,7 @@ mod bridge_tests {
 
                         store.set_chat_session_active_leaf(&session.id, None).unwrap();
                         store.set_chat_session_native_id(&session.id, None).unwrap();
-                        let empty = host.set_agent(&session.id, agent, None).await.unwrap();
+                        let empty = host.set_agent(&session.id, agent).await.unwrap();
                         assert!(empty.native_session_id.is_none());
                         assert!(!handoff::context(&store, &empty, None, None, None).unwrap().contains("Original plan."));
                     }
@@ -14164,9 +14378,7 @@ mod bridge_tests {
                             permission_mode: None,
                             reasoning_level: None,
                         };
-                        host.set_agent(&session.id, agent.clone(), None)
-                            .await
-                            .unwrap();
+                        host.set_agent(&session.id, agent.clone()).await.unwrap();
                         if action.starts_with("recover") {
                             host.set_agent(
                                 &session.id,
@@ -14174,7 +14386,6 @@ mod bridge_tests {
                                     harness: session.harness.clone(),
                                     ..agent
                                 },
-                                None,
                             )
                             .await
                             .unwrap();
@@ -15966,6 +16177,7 @@ for line in sys.stdin:
                 dispatch_attempts: 0,
                 dispatch_error: None,
                 next_retry_at: None,
+                agent: None,
             }]),
         );
 
@@ -16652,8 +16864,8 @@ done
                 permission_mode: None,
                 reasoning_level: None,
             };
-            chat.set_agent("chat", agent("codex"), None).await.unwrap();
-            let back = chat.set_agent("chat", agent("claude-code"), None).await.unwrap();
+            chat.set_agent("chat", agent("codex")).await.unwrap();
+            let back = chat.set_agent("chat", agent("claude-code")).await.unwrap();
             assert_eq!(back.native_session_id.as_deref(), Some("s10"));
             assert_eq!(back.native_fork_at.as_deref(), Some("s10-a1"));
 
@@ -16688,8 +16900,8 @@ done
                     forget_message(&id);
                 }
             }
-            chat.set_agent("chat", agent("codex"), None).await.unwrap();
-            let back = chat.set_agent("chat", agent("claude-code"), None).await.unwrap();
+            chat.set_agent("chat", agent("codex")).await.unwrap();
+            let back = chat.set_agent("chat", agent("claude-code")).await.unwrap();
             assert_eq!(back.native_session_id, None);
             assert_eq!(back.native_fork_at, None);
             send("turn eleven").await;
@@ -17061,6 +17273,7 @@ done
                 dispatch_attempts: 0,
                 dispatch_error: None,
                 next_retry_at: None,
+                agent: None,
                 orx: Vec::new(),
             };
             store
@@ -17116,6 +17329,7 @@ done
             dispatch_attempts: crate::local::harness::ORX_MAX_RETRIES + 1,
             dispatch_error: Some("connection refused".into()),
             next_retry_at: None,
+            agent: None,
         };
 
         let reset = reset_exhausted_queued_message(&message).unwrap();
@@ -18400,6 +18614,178 @@ pub(crate) mod steering_tests {
         let queued = host.queued_items("owner");
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0]["dispatchState"], "queued");
+    }
+
+    /// Parks `text` in `owner`'s queue as `id`, written with `overrides` and, for a takeover, `agent`.
+    fn park(
+        store: &Store,
+        id: &str,
+        text: &str,
+        overrides: TurnOverrides,
+        agent: Option<crate::store::StoredAgentSelection>,
+    ) {
+        let message = QueuedMessage {
+            id: id.into(),
+            client_turn_id: format!("ct_{id}"),
+            request_hash: "hash".into(),
+            text: text.into(),
+            transcript_text: None,
+            orx: Vec::new(),
+            overrides,
+            images: Vec::new(),
+            annotations: Vec::new(),
+            dispatch_attempts: 0,
+            dispatch_error: None,
+            next_retry_at: None,
+            agent,
+        };
+        store
+            .insert_queued_chat_message(&StoredQueuedChatMessage {
+                id: id.into(),
+                session_id: "owner".into(),
+                client_turn_id: message.client_turn_id.clone(),
+                request_hash: "hash".into(),
+                payload_json: serde_json::to_string(&message).unwrap(),
+                created_at: now_ms(),
+            })
+            .unwrap();
+    }
+
+    fn claude_opus() -> crate::store::StoredAgentSelection {
+        crate::store::StoredAgentSelection {
+            profile: None,
+            harness: "claude-code".into(),
+            model: Some("opus".into()),
+            service_tier: None,
+            permission_mode: None,
+            reasoning_level: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_takeover_stops_the_turn_and_runs_ahead_of_the_queue() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let host = test_host();
+        let store = Store::open().unwrap();
+        add_test_session(&store);
+        park(
+            &store,
+            "earlier",
+            "then summarize",
+            TurnOverrides::default(),
+            None,
+        );
+        host.refresh_persisted_queue("owner").unwrap();
+        // Holds the queue still, so the order can be read before anything dispatches.
+        host.exiting
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        host.turns.lock().await.insert(
+            "owner".into(),
+            TurnState::Active(ActiveTurn {
+                handle: tokio::spawn(std::future::pending()),
+                message_id: "answer".into(),
+                turn_id: "turn".into(),
+            }),
+        );
+
+        let result = host
+            .take_over(
+                "owner",
+                claude_opus(),
+                "take it from here".into(),
+                TurnOverrides::default(),
+                Vec::new(),
+                Vec::new(),
+                Some("ct_takeover".into()),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.queued);
+        assert!(!host.is_busy("owner").await);
+        let order = host
+            .queued_items("owner")
+            .iter()
+            .map(|item| item["text"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(order, ["take it from here", "then summarize"]);
+        let stopped = store
+            .list_chat_messages("owner")
+            .unwrap()
+            .iter()
+            .any(|message| {
+                stored_to_wire(message)
+                    .parts
+                    .iter()
+                    .any(|part| part.tool.as_deref() == Some("interrupted"))
+            });
+        assert!(stopped, "the stopped turn leaves its marker");
+    }
+
+    #[tokio::test]
+    async fn a_takeover_switches_agents_and_the_queue_follows_on_the_new_agent() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let host = test_host();
+        let store = Store::open().unwrap();
+        add_test_session(&store);
+        let codex_settings = TurnOverrides {
+            model: Some("gpt-6.2-sol".into()),
+            reasoning_level: Some("high".into()),
+            ..Default::default()
+        };
+        let opus_settings = TurnOverrides {
+            model: Some("opus".into()),
+            ..Default::default()
+        };
+        park(
+            &store,
+            "takeover",
+            "take it from here",
+            opus_settings,
+            Some(claude_opus()),
+        );
+        park(&store, "earlier", "then summarize", codex_settings, None);
+
+        host.take_over_agent("owner", "takeover", claude_opus())
+            .await
+            .unwrap();
+
+        let session = store.get_chat_session("owner").unwrap().unwrap();
+        assert_eq!(
+            (session.harness.as_str(), session.model.as_deref()),
+            ("claude-code", Some("opus"))
+        );
+        let switched = store
+            .list_chat_messages("owner")
+            .unwrap()
+            .iter()
+            .any(|message| {
+                stored_to_wire(message)
+                    .parts
+                    .iter()
+                    .any(|part| part.tool.as_deref() == Some(handoff::SWITCH_TOOL))
+            });
+        assert!(switched, "the switch leaves its marker");
+        let models = store
+            .list_queued_chat_messages_for_session("owner")
+            .unwrap()
+            .into_iter()
+            .map(|row| {
+                let message = serde_json::from_str::<QueuedMessage>(&row.payload_json).unwrap();
+                (row.id, message.overrides.model)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            models,
+            [
+                ("takeover".to_string(), Some("opus".to_string())),
+                ("earlier".to_string(), None)
+            ]
+        );
     }
 
     #[tokio::test]

@@ -1508,6 +1508,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         )
         .route("/api/chat/sessions/{id}/worktree", get(session_worktree))
         .route("/api/chat/sessions/{id}/message", post(send_chat_message))
+        .route("/api/chat/sessions/{id}/takeover", post(take_over_chat))
         .route("/api/chat/sessions/{id}/shell", post(run_shell_command))
         .route(
             "/api/chat/sessions/{id}/project",
@@ -11655,24 +11656,9 @@ async fn update_chat_session(
             selection.model.as_deref(),
         )
         .map_err(bad_request)?;
-        let window = catalog["harnesses"]
-            .as_array()
-            .and_then(|entries| {
-                entries.iter().find(|entry| {
-                    entry["id"].as_str() == Some(&selection.harness)
-                        && entry["profile"]["id"].as_str() == selection.profile.as_deref()
-                })
-            })
-            .and_then(|entry| entry["models"].as_array())
-            .and_then(|models| {
-                models
-                    .iter()
-                    .find(|model| model["id"].as_str() == selection.model.as_deref())
-            })
-            .and_then(|model| model["contextWindow"].as_u64());
         state
             .chat
-            .set_agent(&id, selection, window)
+            .set_agent(&id, selection)
             .await
             .map_err(bad_request)?
     } else if let Some(title) = req.title {
@@ -11860,6 +11846,13 @@ struct SendChatReq {
 }
 
 #[derive(Deserialize)]
+struct TakeOverChatReq {
+    agent: crate::store::StoredAgentSelection,
+    #[serde(flatten)]
+    message: SendChatReq,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum SendMode {
     Steer,
@@ -11936,6 +11929,25 @@ async fn send_chat_message(
     Path(id): Path<String>,
     Json(req): Json<SendChatReq>,
 ) -> ApiResult {
+    submit_chat_message(state, id, req, None).await
+}
+
+/// Another agent takes the chat over: the running turn stops and this message
+/// runs next on that agent, whatever `mode` says.
+async fn take_over_chat(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<TakeOverChatReq>,
+) -> ApiResult {
+    submit_chat_message(state, id, req.message, Some(req.agent)).await
+}
+
+async fn submit_chat_message(
+    state: AppState,
+    id: String,
+    req: SendChatReq,
+    agent: Option<crate::store::StoredAgentSelection>,
+) -> ApiResult {
     reject_if_stopping(&state)?;
     reject_if_moving(&state)?;
     let store = Store::open()?;
@@ -11945,7 +11957,11 @@ async fn send_chat_message(
     let project = store
         .get_local_project(&session.project_id)?
         .ok_or_else(|| not_found("project"))?;
-    let harness = session.harness;
+    let takeover = agent
+        .filter(|agent| agent.harness != session.harness || agent.profile != session.profile_id);
+    let harness = takeover
+        .as_ref()
+        .map_or(session.harness, |agent| agent.harness.clone());
     let autonomy = local::autonomy::Autonomy::from_stored(session.autonomy.as_deref());
     let slash_skills = local::chat::builtin_slash_skill_names(&project, &req.text);
     let text = req.text.trim().to_string();
@@ -11967,8 +11983,41 @@ async fn send_chat_message(
         plan_revision: None,
         reasoning_level: req.reasoning_level,
     };
+    let conflict_or = |error: anyhow::Error| {
+        if local::chat::is_client_turn_conflict(&error) {
+            ApiError(StatusCode::CONFLICT, error.to_string())
+        } else {
+            ApiError::from(error)
+        }
+    };
     // The turn runs in the background; progress streams over /api/events.
-    let (response, capture_message) = if matches!(req.mode, Some(SendMode::Steer)) {
+    let (response, capture_message) = if let Some(mut agent) = takeover {
+        check_agent(&agent)?;
+        local::chat::refuse_acp_switch(&store, &id, &agent.harness).map_err(bad_request)?;
+        let catalog = harnesses_payload(&state, &HarnessQuery::default()).await;
+        agent.model = local::harness::selected_model(
+            &catalog,
+            &agent.harness,
+            agent.profile.as_deref(),
+            agent.model.as_deref(),
+        )
+        .map_err(bad_request)?;
+        let result = state
+            .chat
+            .take_over(
+                &id,
+                agent,
+                text,
+                overrides,
+                req.images,
+                annotations,
+                req.client_turn_id,
+            )
+            .await
+            .map_err(conflict_or)?;
+        let capture = !result.existing;
+        (json!({ "ok": true, "turn": result }), capture)
+    } else if matches!(req.mode, Some(SendMode::Steer)) {
         let result = state
             .chat
             .steer_message(
@@ -11981,14 +12030,8 @@ async fn send_chat_message(
                 None,
             )
             .await
-            .map_err(|error| {
-                if local::chat::is_client_turn_conflict(&error) {
-                    ApiError(StatusCode::CONFLICT, error.to_string())
-                } else {
-                    // A failure can occur after the message was admitted.
-                    ApiError::from(error)
-                }
-            })?;
+            // A failure can occur after the message was admitted.
+            .map_err(conflict_or)?;
         match result {
             Some(turn) => {
                 let capture = !turn.existing;
@@ -12009,13 +12052,7 @@ async fn send_chat_message(
                 None,
             )
             .await
-            .map_err(|error| {
-                if local::chat::is_client_turn_conflict(&error) {
-                    ApiError(StatusCode::CONFLICT, error.to_string())
-                } else {
-                    ApiError::from(error)
-                }
-            })?;
+            .map_err(conflict_or)?;
         let capture = !result.existing;
         (json!({ "ok": true, "turn": result }), capture)
     };
@@ -15059,6 +15096,28 @@ mod tests {
         assert_ne!(
             refused["content"], delegated["content"],
             "the user's chat refuses before delivery"
+        );
+    }
+
+    #[test]
+    fn a_takeover_reads_the_message_the_dashboard_sends_beside_its_agent() {
+        let req: TakeOverChatReq = serde_json::from_value(json!({
+            "agent": {"harness": "claude-code", "profile": null, "model": "opus",
+                "serviceTier": null, "permissionMode": "auto", "reasoningLevel": "default"},
+            "text": "take it from here",
+            "clientTurnId": "ct_1",
+            "model": null,
+            "reasoningLevel": "default",
+            "annotations": [],
+        }))
+        .unwrap();
+        assert_eq!(req.agent.harness, "claude-code");
+        assert_eq!(req.message.text, "take it from here");
+        assert_eq!(req.message.client_turn_id.as_deref(), Some("ct_1"));
+        assert_eq!(
+            req.message.model,
+            Some(None),
+            "a null model still clears it"
         );
     }
 

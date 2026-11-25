@@ -44,7 +44,7 @@ const INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// The level of the remote API this build serves, which only grows from
 /// [`MIN_DASHBOARD_PROTOCOL`] on. Bump it when the UI must know a route exists before calling it.
-pub(crate) const DASHBOARD_PROTOCOL: u32 = 8;
+pub(crate) const DASHBOARD_PROTOCOL: u32 = 9;
 /// The oldest remote API this laptop drives; every server from it on keeps each route and field it shipped.
 const MIN_DASHBOARD_PROTOCOL: u32 = 8;
 

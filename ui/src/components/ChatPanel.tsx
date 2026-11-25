@@ -152,8 +152,6 @@ import {
   fmtNumber,
   harnessModelLabel,
   reasoningFor,
-  reconcileReasoning,
-  reconcileServiceTier,
   fmtDuration,
   timeAgo,
   RejectedResponseError,
@@ -6209,7 +6207,6 @@ export function ChatPanel({
   find,
   activeSessionId,
   onActiveSessionChange,
-  onStartHarnessDraft,
   preferredAgent,
   onPreferredAgentChange,
   preferredAutonomy,
@@ -6299,7 +6296,6 @@ export function ChatPanel({
   /** Database-backed selection used to seed new chat sessions. */
   preferredAgent: ModelSelection | null;
   /** Opens the main draft to start `agent`, which it starts with over the project's. */
-  onStartHarnessDraft?: (agent: ModelSelection) => void;
   onPreferredAgentChange: (selection: ModelSelection) => Promise<void>;
   preferredAutonomy: Autonomy;
   onPreferredAutonomyChange: (autonomy: Autonomy) => void;
@@ -6940,7 +6936,12 @@ export function ChatPanel({
   const retryOptions = (pendingScope.current === stashKey
     ? pendingClientTurn.current
     : composerStashes.get(stashKey)?.pendingClientTurn)?.options;
-  const rawSelection: ModelSelection | null = openSession
+  // Another agent picked during a turn waits here for the message that takes the chat over.
+  const pendingAgent = openSession && sessionOverride.harness !== undefined
+    && (sessionOverride.harness !== openSession.harness || (sessionOverride.profile ?? null) !== (openSession.profile ?? null))
+    ? sessionOverride as ModelSelection
+    : null;
+  const rawSelection: ModelSelection | null = pendingAgent ?? (openSession
     ? {
       harness: openSession.harness,
       profile: openSession.profile ?? null,
@@ -6955,12 +6956,14 @@ export function ChatPanel({
     }
     : savedSelection
       ? { ...savedSelection, ...sessionOverride }
-      : null;
+      : null);
   const { data: skills = EMPTY_SKILLS } = useQuery(getSkillsQuery(rawSelection?.harness, projectId));
   const { data: uiState } = useQuery(getUiStateQuery());
   const catalogHarness = selectionHarness(harnesses, rawSelection);
-  const activeHarness = sessionAcpHarness(openSession, catalogHarness);
-  const acpOptions = nativeOptions(openSession?.nativeConfiguration, { model: m.model_picker_model(), mode: m.model_picker_mode() });
+  // A pending pick is a whole selection of its own; the running session's native options aren't its.
+  const nativeSession = pendingAgent ? null : openSession;
+  const activeHarness = sessionAcpHarness(nativeSession, catalogHarness);
+  const acpOptions = nativeOptions(nativeSession?.nativeConfiguration, { model: m.model_picker_model(), mode: m.model_picker_mode() });
   const acpModel = acpOptions.find((option) => option.category === "model");
   const acpMode = acpOptions.find((option) => option.category === "mode" && option.choices.some((choice) => choice.id === "plan"));
   const opts = activeHarness?.options;
@@ -7084,12 +7087,21 @@ export function ChatPanel({
   const selectModel = (next: Partial<ModelSelection>) => {
     const otherAgent = next.harness !== undefined && (next.harness !== openSession?.harness || (next.profile ?? null) !== (openSession.profile ?? null));
     if (openSession && composerSelection && otherAgent) {
+      // A remote below dashboard protocol 9 has no takeover route.
+      if (busy && runtime.kind === "ssh" && (runtime.session.dashboardProtocol ?? 0) < 9) {
+        setSettingsError(m.chat_takeover_needs_update());
+        return;
+      }
       const agent = { ...composerSelection, ...next };
       const scope = stashKey;
       invalidatePendingRetry();
       setSettingsError(null);
       setSelection(agent);
       void onPreferredAgentChange(agent).catch(() => {});
+      if (busy) {
+        setSessionOverride(agent);
+        return;
+      }
       agentSwitch.runWithOptions(workspace, openSession, { agent }, {
         onSuccessData: () => {
           if (pendingScope.current !== scope) return;
@@ -7136,22 +7148,13 @@ export function ChatPanel({
       setSessionOverride({});
     }
   };
-  function startHarness(harness: Harness, model: string) {
-    const next: ModelSelection = {
-      harness: harness.id,
-      profile: harness.profile?.id ?? null,
-      model,
-      serviceTier: reconcileServiceTier(harness.catalogPending ? undefined : harness, model, null),
-      permissionMode: harness.options?.defaultPermissionMode ?? null,
-      reasoningLevel: reconcileReasoning(harness.catalogPending ? undefined : harness, model, null),
-    };
-    setSelection(next);
-    void onPreferredAgentChange(next).catch(() => {});
-    if (onStartHarnessDraft) onStartHarnessDraft(next);
-    else onActiveSessionChangeRef.current(null, { projectId });
-  }
   const setPermissionMode = (id: string) => withFullAccess(id === "bypassPermissions", () => applyPermissionMode(id));
   const applyPermissionMode = (id: string) => {
+    // The running session keeps its own mode until the pick takes over.
+    if (pendingAgent) {
+      setSessionOverride((current) => ({ ...current, permissionMode: id }));
+      return;
+    }
     // Plan is session-scoped. Claude exposes it in the permission dropdown,
     // but it must not become the saved default for future sessions.
     if (id === "plan" && activeHarness?.id === "claude-code") {
@@ -7899,7 +7902,7 @@ export function ChatPanel({
   }, [pinTranscriptToBottom]);
 
   /** `queue` (the ⌘/Ctrl+Enter chord) parks the message even on a harness that steers. */
-  async function send({ queue = false, starter }: { queue?: boolean; starter?: string } = {}) {
+  async function send({ queue = false, starter, takeoverConfirmed = false }: { queue?: boolean; starter?: string; takeoverConfirmed?: boolean } = {}) {
     if (switchingAgent) return;
     // Slash tokens stay in the wire form: the server resolves every selected
     // skill and supplies this exact message as their shared request context.
@@ -7936,6 +7939,21 @@ export function ChatPanel({
       });
     }
     if (preparingSend.current) return;
+    if (busy && openSession && pendingAgent && !takeoverConfirmed
+      && (pendingAgent.harness !== openSession.harness || (pendingAgent.profile ?? null) !== (openSession.profile ?? null))) {
+      const running = selectionHarness(harnesses, openSession);
+      const runningName = running ? harnessDisplayName(running) : openSession.harnessName ?? openSession.harness;
+      const nextName = activeHarness ? harnessDisplayName(activeHarness) : pendingAgent.harness;
+      showConfirmDialog({
+        title: m.chat_takeover_title({ agent: autoDir(runningName) }),
+        description: m.chat_takeover_description({ agent: autoDir(nextName) }),
+        confirmLabel: m.chat_takeover_confirm(),
+        destructive: true,
+        onCancel: "close",
+        onConfirm: () => void send({ queue, starter, takeoverConfirmed: true }),
+      });
+      return;
+    }
     const planRequested = composerCommand?.name === "plan";
     const goalRequested = (goalCommand || goalArmed);
     const toggledPlanMode = !planActive;
@@ -8053,8 +8071,11 @@ export function ChatPanel({
       setSessions((current) => current.map((candidate) => candidate.id === session.id ? session : candidate));
     };
     const clientTurnId = retry?.id ?? `ct_${crypto.randomUUID()}`;
-    const mode = retry ? retry.mode : busy && steering && !queue && !planRequested && !goalRequested ? "steer" : null;
+    const takeover = openSession && effective && (effective.harness !== openSession.harness
+      || (effective.profile ?? null) !== (openSession.profile ?? null)) ? effective : undefined;
+    const mode = retry ? retry.mode : busy && steering && !queue && !takeover && !planRequested && !goalRequested ? "steer" : null;
     const turnOpts = retry?.options ?? (effective ? {
+      agent: takeover,
       model: effective.model,
       serviceTier: effective.serviceTier,
       permissionMode: effective.permissionMode,
@@ -8066,6 +8087,7 @@ export function ChatPanel({
     failedTurn = pendingClientTurn.current;
     const finishSentMessage = () => {
       if (inSourceScope()) {
+        if (turnOpts.agent) setSessionOverride({});
         setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
         if (retry) {
           setUnconfirmedSend(null);
@@ -8094,12 +8116,13 @@ export function ChatPanel({
       setAttachError(null);
       setImageRefusedFor(null);
     };
-    if (busy) {
+    if (busy || turnOpts.agent) {
       // A turn is already running. Steering hands the message to it now, and
       // the delivered text comes back inline on the assistant message. Parking
       // (no steering support, or the queue chord) instead runs it when the turn
       // ends: the server enqueues it and echoes chat.queued to render the chip
-      // — no optimistic transcript bubble, since it hasn't run yet.
+      // — no optimistic transcript bubble, since it hasn't run yet. A takeover
+      // parks at the head of the queue and stops the turn.
       if (!activeId || !activeHarness?.agentReady) {
         clearFailedPlanCommand();
         return;
@@ -8117,7 +8140,8 @@ export function ChatPanel({
         }, 3000);
       }
       clearComposer();
-      if (inSourceScope()) setSessionOverride({});
+      // A takeover keeps its pick until the server takes it, so a retry goes to the same agent.
+      if (inSourceScope() && !turnOpts.agent) setSessionOverride({});
       const images: ChatImageAttachment[] = pending.map((a) => ({
         mediaType: a.mediaType,
         dataBase64: a.dataUrl.slice(a.dataUrl.indexOf(",") + 1),
@@ -8232,9 +8256,9 @@ export function ChatPanel({
       // start active; existing ones are unarchived server-side by activity) —
       // leave the Archived-only view so its row stays visible.
       if (inSourceScope() && sessionFilter === "archived") setSessionFilter("active");
-      // `effective.harness` is always the target session's harness (locked once
-      // it exists), so these overrides are always valid — the backend persists
-      // them as the session's sticky settings. Clear the unsent tweak now.
+      // A takeover parked above, so `effective.harness` is the target session's
+      // and these overrides are valid — the backend persists them as the
+      // session's sticky settings. Clear the unsent tweak now.
       if (inSourceScope()) setSessionOverride({});
       const images: ChatImageAttachment[] = pending.map((a) => ({
         mediaType: a.mediaType,
@@ -10340,10 +10364,9 @@ export function ChatPanel({
               <div className="min-w-0 flex-1" />
               <div className="flex min-w-0 items-center gap-0.5">
                 <ModelPicker
-                  sessionHarness={openSession?.harness.startsWith("acp:") ? activeHarness : undefined}
+                  sessionHarness={nativeSession?.harness.startsWith("acp:") ? activeHarness : undefined}
                   value={composerSelection}
                   onSelect={selectModel}
-                  onStartHarness={startHarness}
                   onOpenSettings={() => onSelectMainView("agents")}
                   permissionChoices={activeHarness?.agentReady ? withAutoReviewer(opts?.permissionModes ?? [], activeHarness, uiState?.opencodeReviewModel, composerSelection?.model) : []}
                   defaultPermissionId={opts?.defaultPermissionMode ?? null}
@@ -10354,7 +10377,6 @@ export function ChatPanel({
                   autonomy={openSession?.autonomy ?? draftAutonomy ?? preferredAutonomy}
                   onSelectAutonomy={setAutonomy}
                   disabled={switchingAgent}
-                  lockHarness={busy || switchingAgent}
                   openRequest={modelPickerRequest}
                   canNudge={!embedded && !contentInert}
                   nativeOptions={openSession?.harness.startsWith("acp:") ? acpOptions.filter((option) => option.category !== "model") : []}
