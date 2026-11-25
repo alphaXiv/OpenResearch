@@ -224,23 +224,106 @@ async fn check(res: reqwest::Response, what: &str) -> Result<reqwest::Response> 
     ))
 }
 
-#[derive(Deserialize)]
-pub(crate) struct WhoAmI {
-    name: String,
+/// whoami-v2 as orx reads it: the one parser, shared by launch, preflight, Settings and the
+/// watcher, so the membership rule and the job permission are read the same way everywhere.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WhoAmI {
+    pub name: String,
     #[serde(default)]
-    orgs: Vec<Org>,
+    pub orgs: Vec<OrgSummary>,
+    /// Kept as JSON: its shape varies by token kind, and an unexpected one must not make the
+    /// account unreadable, only the job permission unknown.
+    #[serde(default)]
+    auth: serde_json::Value,
 }
 
-#[derive(Deserialize)]
-struct Org {
-    name: String,
+/// An organization the token's account belongs to, as whoami-v2 describes it.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrgSummary {
+    pub name: String,
+    #[serde(default)]
+    pub plan: Option<String>,
+    #[serde(default)]
+    pub can_pay: Option<bool>,
+    #[serde(default, alias = "roleInOrg")]
+    pub role: Option<String>,
+}
+
+/// A namespace the token's account is neither nor a member of. One wording for every surface;
+/// each surface adds only how to change the choice there.
+#[derive(Debug, Clone)]
+pub struct NotMember {
+    pub account: String,
+    pub namespace: String,
+    pub choices: Vec<String>,
+}
+
+impl std::fmt::Display for NotMember {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "The token's account {} isn't {} or a member of it, so Hugging Face Jobs can't \
+             launch there. Choose one of: {}.",
+            self.account,
+            self.namespace,
+            self.choices.join(", ")
+        )
+    }
+}
+
+impl WhoAmI {
+    /// Jobs can launch in `namespace` only when it is the account or one of its organizations.
+    pub fn check_member(&self, namespace: &str) -> std::result::Result<(), NotMember> {
+        if self.name == namespace || self.orgs.iter().any(|org| org.name == namespace) {
+            return Ok(());
+        }
+        Err(NotMember {
+            account: self.name.clone(),
+            namespace: namespace.to_string(),
+            choices: std::iter::once(&self.name)
+                .chain(self.orgs.iter().map(|org| &org.name))
+                .cloned()
+                .collect(),
+        })
+    }
+
+    /// Can this token submit jobs in `namespace`? `None` when the token doesn't say.
+    /// A fine-grained token counts only a global grant or the grant scoped to `namespace`:
+    /// `job.write` on the personal account doesn't let it launch in an organization.
+    pub fn jobs_write(&self, namespace: &str) -> Option<bool> {
+        let token = &self.auth["accessToken"];
+        match token["role"].as_str() {
+            Some("write") => Some(true),
+            Some("read") => Some(false),
+            Some("fineGrained") => {
+                let grants = &token["fineGrained"];
+                let scoped = grants["scoped"].as_array();
+                if grants["global"].as_array().is_none() && scoped.is_none() {
+                    return None;
+                }
+                let has = |perms: &serde_json::Value| {
+                    perms
+                        .as_array()
+                        .is_some_and(|perms| perms.iter().any(|p| p == "job.write"))
+                };
+                let global_hit = has(&grants["global"]);
+                let scoped_hit = scoped.into_iter().flatten().any(|grant| {
+                    grant["entity"]["name"] == namespace && has(&grant["permissions"])
+                });
+                Some(global_hit || scoped_hit)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// whoami-v2 is heavily rate-limited upstream, so call once per command, not per poll.
-pub(crate) async fn who(token: &str) -> Result<WhoAmI> {
+pub async fn who(token: &str) -> Result<WhoAmI> {
     let res = http()
         .get(format!("{}/api/whoami-v2", endpoint()))
         .bearer_auth(token)
+        .timeout(Duration::from_secs(15))
         .send()
         .await
         .map_err(|e| anyhow!("Could not reach Hugging Face: {}", e))?;
@@ -270,125 +353,50 @@ pub fn saved_namespace() -> Option<(String, &'static str)> {
 }
 
 /// The chosen namespace when the token's account is it or a member of it; the account otherwise.
-pub fn pick_namespace(
-    account: &str,
-    orgs: &[String],
-    saved: Option<(String, &'static str)>,
-) -> Result<String> {
+pub fn pick_namespace(who: &WhoAmI, saved: Option<&str>) -> std::result::Result<String, NotMember> {
     match saved {
-        None => Ok(account.to_string()),
-        Some((namespace, _)) if namespace == account || orgs.contains(&namespace) => Ok(namespace),
-        Some((namespace, source)) => Err(anyhow!(
-            "orx is set to launch Hugging Face Jobs in {namespace} ({NAMESPACE}, from {}), but the \
-             token's account {account} isn't {namespace} or a member of it. Choose another \
-             namespace with `orx compute configure hf --namespace <name>` or `--clear namespace`, \
-             or use a token of a member of {namespace}.",
-            if source == "env" {
-                "the environment"
-            } else {
-                "Settings → Environment"
-            }
-        )),
+        None => Ok(who.name.clone()),
+        Some(namespace) => who.check_member(namespace).map(|()| namespace.to_string()),
     }
 }
 
 /// Where this token's jobs launch: one whoami call, checked against the chosen namespace.
+/// Launch and preflight errors are what agents read, so they name the command that changes it.
 pub async fn jobs_namespace(token: &str) -> Result<String> {
     let who = who(token).await?;
-    let orgs: Vec<String> = who.orgs.into_iter().map(|org| org.name).collect();
-    pick_namespace(&who.name, &orgs, saved_namespace())
+    let saved = saved_namespace();
+    let namespace =
+        pick_namespace(&who, saved.as_ref().map(|(n, _)| n.as_str())).map_err(|refused| {
+            let change = match saved.as_ref().map(|(_, source)| *source) {
+                Some("env") => format!("Remove {NAMESPACE} from orx's process environment"),
+                _ => "Run `orx compute configure hf --namespace <name>` or `--clear namespace`"
+                    .to_string(),
+            };
+            anyhow!(
+                "{refused} {change}, or use a token of a member of {}.",
+                refused.namespace
+            )
+        })?;
+    if who.jobs_write(&namespace) == Some(false) {
+        return Err(anyhow!(
+            "Your Hugging Face token can't run jobs in {namespace}. Give it the job.write \
+             permission for {namespace} at https://huggingface.co/settings/tokens, then run \
+             `orx compute test hf`."
+        ));
+    }
+    Ok(namespace)
 }
 
 /// After a 404 for job `job_id` in `namespace`: `None` when the token's account is `namespace`
 /// or a member of it, so the job is gone; otherwise why the 404 proves nothing.
 pub(crate) fn unseen(who: &WhoAmI, namespace: &str, job_id: &str) -> Option<String> {
-    if who.name == namespace || who.orgs.iter().any(|org| org.name == namespace) {
-        return None;
-    }
-    Some(format!(
-        "Hugging Face can't show job {job_id} to the token's account {}, which isn't \
-         {namespace} or a member of it, so orx can't tell whether the job still runs. Set \
-         HF_TOKEN to a token of {namespace} or one of its members, then run `orx compute test hf`.",
-        who.name
-    ))
-}
-
-/// whoami-v2 details for the settings UI.
-#[derive(Debug, Clone)]
-pub struct WhoamiDetails {
-    pub name: String,
-    /// Can this token submit jobs? `None` = shape didn't say.
-    pub jobs_write: Option<bool>,
-    pub orgs: Vec<OrgSummary>,
-}
-
-/// An organization the token's account belongs to, as whoami-v2 describes it.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OrgSummary {
-    pub name: String,
-    pub plan: Option<String>,
-    pub can_pay: Option<bool>,
-    pub role: Option<String>,
-}
-
-pub async fn whoami_details(token: &str) -> Result<WhoamiDetails> {
-    let res = http()
-        .get(format!("{}/api/whoami-v2", endpoint()))
-        .bearer_auth(token)
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await
-        .map_err(|e| anyhow!("Could not reach Hugging Face: {}", e))?;
-    let body: serde_json::Value = check(res, "whoami").await?.json().await?;
-    let name = body
-        .get("name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("whoami response had no name"))?
-        .to_string();
-    let jobs_write = match body["auth"]["accessToken"]["role"].as_str() {
-        Some("write") => Some(true),
-        Some("read") => Some(false),
-        // fineGrained: job.write must appear in the global or a scoped grant.
-        Some("fineGrained") => {
-            let fg = &body["auth"]["accessToken"]["fineGrained"];
-            let global = fg.get("global").and_then(|v| v.as_array());
-            let scoped = fg.get("scoped").and_then(|v| v.as_array());
-            if global.is_none() && scoped.is_none() {
-                None
-            } else {
-                let has = |perms: &[serde_json::Value]| {
-                    perms.iter().any(|p| p.as_str() == Some("job.write"))
-                };
-                let hit = global.map(|g| has(g)).unwrap_or(false)
-                    || scoped.into_iter().flatten().any(|s| {
-                        s.get("permissions")
-                            .and_then(|p| p.as_array())
-                            .map(|p| has(p))
-                            .unwrap_or(false)
-                    });
-                Some(hit)
-            }
-        }
-        _ => None,
-    };
-    let orgs = body["orgs"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|org| {
-            Some(OrgSummary {
-                name: org["name"].as_str()?.to_string(),
-                plan: org["plan"].as_str().map(str::to_string),
-                can_pay: org["canPay"].as_bool(),
-                role: org["roleInOrg"].as_str().map(str::to_string),
-            })
-        })
-        .collect();
-    Ok(WhoamiDetails {
-        name,
-        jobs_write,
-        orgs,
+    who.check_member(namespace).err().map(|_| {
+        format!(
+            "Hugging Face can't show job {job_id} to the token's account {}, which isn't \
+             {namespace} or a member of it, so orx can't tell whether the job still runs. Set \
+             HF_TOKEN to a token of {namespace} or one of its members, then run `orx compute test hf`.",
+            who.name
+        )
     })
 }
 
@@ -877,30 +885,60 @@ pub async fn find_run(token: &str, namespace: &str, run: &str) -> Result<Vec<Job
 mod settings_tests {
     use super::*;
 
+    fn who(body: serde_json::Value) -> WhoAmI {
+        serde_json::from_value(body).unwrap()
+    }
+
     #[test]
     fn jobs_launch_in_the_account_unless_a_member_namespace_is_chosen() {
-        let orgs = vec!["pbai".to_string(), "ibm".to_string()];
-        assert_eq!(pick_namespace("ada", &orgs, None).unwrap(), "ada");
+        let ada = who(json!({"name": "ada", "orgs": [{"name": "pbai"}, {"name": "ibm"}]}));
+        assert_eq!(pick_namespace(&ada, None).unwrap(), "ada");
+        assert_eq!(pick_namespace(&ada, Some("pbai")).unwrap(), "pbai");
+        assert_eq!(pick_namespace(&ada, Some("ada")).unwrap(), "ada");
+        let refused = pick_namespace(&ada, Some("acme")).unwrap_err().to_string();
         assert_eq!(
-            pick_namespace("ada", &orgs, Some(("pbai".into(), "syncedEnv"))).unwrap(),
-            "pbai"
+            refused,
+            "The token's account ada isn't acme or a member of it, so Hugging Face Jobs can't \
+             launch there. Choose one of: ada, pbai, ibm."
         );
+        // The watcher's 404 rule is the same membership rule.
+        assert!(unseen(&ada, "pbai", "job").is_none());
+        assert!(unseen(&ada, "acme", "job").is_some());
+    }
+
+    #[test]
+    fn job_write_counts_only_the_grant_for_the_namespace() {
+        let fine = |global: serde_json::Value, scoped: serde_json::Value| {
+            who(json!({
+                "name": "ada",
+                "orgs": [{"name": "pbai", "plan": "team", "canPay": true, "roleInOrg": "write"}],
+                "auth": {"accessToken": {"role": "fineGrained",
+                    "fineGrained": {"global": global, "scoped": scoped}}}
+            }))
+        };
+        let personal_only = fine(
+            json!([]),
+            json!([{"entity": {"type": "user", "name": "ada"}, "permissions": ["job.write"]}]),
+        );
+        assert_eq!(personal_only.jobs_write("ada"), Some(true));
+        assert_eq!(personal_only.jobs_write("pbai"), Some(false));
+        let org = fine(
+            json!([]),
+            json!([{"entity": {"type": "org", "name": "pbai"}, "permissions": ["job.write"]}]),
+        );
+        assert_eq!(org.jobs_write("pbai"), Some(true));
         assert_eq!(
-            pick_namespace("ada", &orgs, Some(("ada".into(), "env"))).unwrap(),
-            "ada"
+            fine(json!(["job.write"]), json!([])).jobs_write("pbai"),
+            Some(true)
         );
-        let refused = pick_namespace("ada", &orgs, Some(("acme".into(), "syncedEnv")))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            refused.contains("acme") && refused.contains("ada"),
-            "{refused}"
-        );
-        assert!(refused.contains("Settings → Environment"), "{refused}");
-        let from_env = pick_namespace("ada", &orgs, Some(("acme".into(), "env")))
-            .unwrap_err()
-            .to_string();
-        assert!(from_env.contains("the environment"), "{from_env}");
+        assert_eq!(fine(json!(null), json!(null)).jobs_write("pbai"), None);
+        let role =
+            |role: &str| who(json!({"name": "ada", "auth": {"accessToken": {"role": role}}}));
+        assert_eq!(role("write").jobs_write("pbai"), Some(true));
+        assert_eq!(role("read").jobs_write("pbai"), Some(false));
+        assert_eq!(who(json!({"name": "ada"})).jobs_write("ada"), None);
+        assert_eq!(personal_only.orgs[0].role.as_deref(), Some("write"));
+        assert_eq!(personal_only.orgs[0].can_pay, Some(true));
     }
 
     #[tokio::test]
