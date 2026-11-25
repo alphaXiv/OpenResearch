@@ -2465,6 +2465,24 @@ enum TurnEnd {
     Failed(String),
 }
 
+/// When every used-up window of a rate-limit snapshot resets, in epoch ms; Codex gives seconds.
+/// None for a model's own limit, which leaves the account's other models working.
+fn used_up_until(limits: &Value) -> Option<i64> {
+    if limits["limitId"].as_str().is_some_and(|id| id != "codex") {
+        return None;
+    }
+    ["primary", "secondary"]
+        .into_iter()
+        .filter_map(|window| limits.get(window))
+        .filter(|window| {
+            window["usedPercent"]
+                .as_f64()
+                .is_some_and(|used| used >= 100.0)
+        })
+        .filter_map(|window| window["resetsAt"].as_i64()?.checked_mul(1000))
+        .max()
+}
+
 /// One app-server notification → transcript state. Pure (fixture-tested):
 /// touches only `ctx.assistant.parts` via the TurnCtx helpers. Returns the
 /// turn's terminal state when this event ends it.
@@ -2474,6 +2492,9 @@ fn apply_notification(ctx: &mut TurnCtx, method: &str, params: &Value) -> Option
     }
     match method {
         "account/rateLimits/updated" => {
+            if let Some(reset_at) = used_up_until(&params["rateLimits"]) {
+                ctx.mark_usage_reset_at(reset_at);
+            }
             crate::local::usage::observed(&ctx.host, &ctx.harness, ctx.profile.as_deref());
         }
         "thread/tokenUsage/updated" => {
@@ -6892,6 +6913,36 @@ requires_openai_auth = false
             &serde_json::json!({"item":{"type":"commandExecution","id":"c1","command":"x","status":"failed"}}),
         );
         assert!(!has_error_part(&ctx, "x"));
+    }
+
+    #[test]
+    fn a_used_up_window_says_when_the_account_resets() {
+        let mut ctx = TurnCtx::test_stub();
+        let update = |primary: Value, secondary: Value| json!({"rateLimits": {"limitId": "codex", "primary": primary, "secondary": secondary}});
+        apply_notification(
+            &mut ctx,
+            "account/rateLimits/updated",
+            &update(
+                json!({"usedPercent": 40, "resetsAt": 1_795_000_000}),
+                Value::Null,
+            ),
+        );
+        assert_eq!(ctx.usage_reset_at, None);
+        apply_notification(
+            &mut ctx,
+            "account/rateLimits/updated",
+            &update(
+                json!({"usedPercent": 100, "resetsAt": 1_795_000_000}),
+                json!({"usedPercent": 100, "resetsAt": 1_795_200_000}),
+            ),
+        );
+        assert_eq!(ctx.usage_reset_at, Some(1_795_200_000_000));
+
+        let mut ctx = TurnCtx::test_stub();
+        let spark = json!({"rateLimits": {"limitId": "codex_spark",
+            "primary": {"usedPercent": 100, "resetsAt": 1_795_000_000}}});
+        apply_notification(&mut ctx, "account/rateLimits/updated", &spark);
+        assert_eq!(ctx.usage_reset_at, None, "one model's limit holds no chats");
     }
 
     #[test]

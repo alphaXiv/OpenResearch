@@ -89,7 +89,7 @@ import { matchesKeyboardEvent, useHotkey } from "@tanstack/react-hotkeys";
 import { appHotkeys } from "../hotkeys";
 import { copyToClipboard } from "../clipboard";
 import { readClipboardImage } from "../clipboardImage";
-import { autoDir, fmtBytes, ltr } from "../i18n";
+import { autoDir, fmtBytes, fmtClock, ltr } from "../i18n";
 import { useLocale } from "../locale";
 import {
   ArrowDown,
@@ -210,7 +210,6 @@ import {
   queuedRetryLabel,
   recoveryAction as parseRecoveryAction,
   recoveryTurnOptions,
-  usageResetCountdown,
   retryStatusLabel,
 } from "../chatRecovery";
 import {
@@ -253,6 +252,7 @@ import { useComposerFocus } from "./useComposerFocus";
 import { RunBanner } from "./run/RunBanner";
 import { BackgroundTaskBanner } from "./BackgroundTaskBanner";
 import { StatusReport } from "./StatusReport";
+import { LimitBanner } from "./LimitBanner";
 import { cardSentence, runModel, sessionLeadRun, sessionRunMark } from "../runMonitor/model";
 import { Mark } from "./run/Mark";
 import { Sentence } from "./run/Sentence";
@@ -2807,7 +2807,6 @@ function TurnStatusRow({
 }) {
   const input = part.state?.input;
   const nextRetryAt = input?.nextRetryAt ?? null;
-  const resetAt = input?.resetAt ?? null;
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     if (typeof nextRetryAt !== "number") return;
@@ -2820,17 +2819,6 @@ function TurnStatusRow({
     }, 1000);
     return () => window.clearInterval(timer);
   }, [nextRetryAt]);
-  useEffect(() => {
-    if (typeof resetAt !== "number") return;
-    setNow(Date.now());
-    if (resetAt <= Date.now()) return;
-    const timer = window.setInterval(() => {
-      const current = Date.now();
-      setNow(current);
-      if (current >= resetAt) window.clearInterval(timer);
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [resetAt]);
   if (part.id === "turn-retry") {
     const label = retryStatusLabel(input ?? {}, now);
     return (
@@ -2855,10 +2843,6 @@ function TurnStatusRow({
   const quiet = cause === "network" || cause === "overloaded";
   const fixLabel = cause && FIX_LABEL[cause];
   const fix = fixLabel && input && failure?.fix(cause, input);
-  // A usage-limited turn waits out nothing the button enforces: the provider,
-  // not a stored timestamp, decides whether the quota is back, so the wait is
-  // shown beside the button as information and every press re-checks for real.
-  const resetCountdown = cause === "usage_limit" ? usageResetCountdown(resetAt, now) : null;
   // While the agent is signed out, only signing in, here or in the composer, sends the turn again.
   const waitsForSignIn = cause === "sign_in" && agent?.authState === "needsLogin";
   const recover = onRecover && turnId && (action === "retry" || action === "continue") && !waitsForSignIn
@@ -2888,9 +2872,6 @@ function TurnStatusRow({
             <Button type="button" size="small" disabled={busy || recovering} onClick={() => onRecover?.(turnId, recover)}>
               {recovering ? m.chat_starting() : cause === "usage_limit" ? m.chat_try_again() : recover === "retry" ? m.app_retry() : m.chat_continue()}
             </Button>
-          )}
-          {recover && resetCountdown && (
-            <span className="text-sm text-subtext">{m.chat_usage_resets_in({ time: resetCountdown })}</span>
           )}
         </div>
       )}
@@ -6327,6 +6308,7 @@ export function ChatPanel({
     getChatMessagesQuery,
     getProjectStarterPromptsQuery,
     citedMessageQuery,
+    getUsageQuery,
   } = useWorkspace().queries;
   // The alphaXiv account and library belong to the machine the app runs on.
   const owner = useMachines().owner;
@@ -8438,6 +8420,11 @@ export function ChatPanel({
   );
   const signIn = useAgentSignIn();
   const agentName = activeHarness?.profile?.name ?? (activeHarness && harnessDisplayName(activeHarness));
+  const usage = useQuery(getUsageQuery()).data;
+  const accountOf = (entry: { harness: string; profile?: string | null }) =>
+    activeHarness && entry.harness === activeHarness.id && (entry.profile ?? null) === (activeHarness.profile?.id ?? null);
+  const usageLimit = usage?.limits?.find(accountOf);
+  const limitTimerStopped = openSession?.limitTimerStopped ?? false;
   const composerSignedOut = activeHarness?.authState === "needsLogin" && (activeHarness.id !== "claude-code" || Boolean(activeHarness.profile) || activeHarness.loginEligible);
   const signedOutTurn = composerSignedOut && messages.at(-1)?.parts.find((part) => part.id === "turn-recovery" && isSignInFailure(part));
   const signInTurn = signedOutTurn ? signedOutTurn.state?.input : undefined;
@@ -9844,7 +9831,7 @@ export function ChatPanel({
             />
           )}
           {queued.length > 0 && (
-            <div className="composer-queued flex flex-col gap-1 mb-1.5">
+            <div className="composer-queued flex flex-col gap-1 mb-2.5">
               {queued.map((q, index) => (
                 <div
                   key={q.id}
@@ -9859,8 +9846,9 @@ export function ChatPanel({
                   </span>
                   {q.dispatchState !== "blocked" && (
                     <span className="shrink-0 text-sm text-muted">
-                      {q.dispatchState === "retrying"
-                        ? queuedRetryLabel(q.nextRetryAt, queueClock)
+                      {q.dispatchState === "retrying" ? queuedRetryLabel(q.nextRetryAt, queueClock)
+                        : limitTimerStopped ? m.chat_queued_waiting()
+                        : usageLimit ? m.chat_queued_sends_at({ time: fmtClock(usageLimit.resetAt) })
                         : m.chat_queued()}
                     </span>
                   )}
@@ -9941,6 +9929,16 @@ export function ChatPanel({
             />
           )}
           <RemoteConnectionStrip />
+          {agentName && (
+            <LimitBanner
+              agent={autoDir(agentName)}
+              resetAt={usageLimit?.resetAt ?? null}
+              sessionId={activeId ?? undefined}
+              stopped={limitTimerStopped}
+              queued={queued.length}
+              plan={usage?.plans?.find(accountOf)}
+            />
+          )}
           <div inert={connection !== null} className={`composer-frame flex flex-col min-h-0 rounded-xl bg-surface${connection ? " opacity-60" : ""}`} data-onboarding="composer">
             <div className={`composer-box relative flex flex-col min-h-0 rounded-xl border ${bashMode && !asking ? "border-accent-amber" : "border-border"} bg-background shadow-control-subtle`}>
               {draggingFiles && !asking && (

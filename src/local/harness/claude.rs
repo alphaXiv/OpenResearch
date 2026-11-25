@@ -2708,6 +2708,12 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                     })
                     .filter(|text| !text.is_empty())
                     .unwrap_or_else(|| "Claude Code usage limit reached".into());
+                if let Some(reset_at) = event
+                    .pointer("/api_error_params/rate_limit_info")
+                    .and_then(rate_limit_reset_at)
+                {
+                    ctx.mark_usage_reset_at(reset_at);
+                }
                 state.usage_limited = true;
                 state.turn_errored = true;
                 ctx.mark_terminal_failure("claude_usage_limit", detail);
@@ -2912,6 +2918,12 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
             }
         }
         Some("rate_limit_event") => {
+            let info = &event["rate_limit_info"];
+            if info["status"] == "rejected" {
+                if let Some(reset_at) = rate_limit_reset_at(info) {
+                    ctx.mark_usage_reset_at(reset_at);
+                }
+            }
             crate::local::usage::observed(&ctx.host, &ctx.harness, ctx.profile.as_deref());
         }
         Some("result") => {
@@ -2990,6 +3002,18 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
         _ => {}
     }
     false
+}
+
+/// When the limit a `rate_limit_info` names resets, in epoch ms; Claude Code gives seconds. None
+/// for a limit on one model, which leaves the account's other models working.
+fn rate_limit_reset_at(info: &Value) -> Option<i64> {
+    if matches!(
+        info["rateLimitType"].as_str(),
+        Some("seven_day_opus" | "seven_day_sonnet")
+    ) {
+        return None;
+    }
+    info.get("resetsAt")?.as_i64()?.checked_mul(1000)
 }
 
 fn is_transient_api_error(event: &Value, detail: &str) -> bool {
@@ -5438,6 +5462,48 @@ mod tests {
         assert!(!state.had_activity);
         assert_eq!(ctx.assistant.parts.len(), 1);
         assert_eq!(ctx.assistant.parts[0].id, "real-answer");
+    }
+
+    #[test]
+    fn a_usage_limit_says_when_the_account_resets() {
+        let mut ctx = TurnCtx::test_stub();
+        let mut state = TurnState::default();
+        apply_event(
+            &mut ctx,
+            &mut state,
+            &serde_json::json!({"type": "rate_limit_event",
+                "rate_limit_info": {"status": "allowed_warning", "resetsAt": 1_795_000_000}}),
+        );
+        assert_eq!(ctx.usage_reset_at, None);
+        apply_event(
+            &mut ctx,
+            &mut state,
+            &serde_json::json!({"type": "rate_limit_event",
+                "rate_limit_info": {"status": "rejected", "resetsAt": 1_795_000_000}}),
+        );
+        assert_eq!(ctx.usage_reset_at, Some(1_795_000_000_000));
+        apply_event(
+            &mut ctx,
+            &mut state,
+            &serde_json::json!({
+                "type": "assistant", "error": "rate_limit", "api_error": "usage_limit_reached",
+                "api_error_params": {"rate_limit_info": {"status": "rejected",
+                    "rateLimitType": "five_hour", "resetsAt": 1_795_100_000}},
+                "message": {"id": "quota", "model": "<synthetic>",
+                    "content": [{"type": "text", "text": "You've hit your session limit · resets 3pm"}]}
+            }),
+        );
+        assert_eq!(ctx.usage_reset_at, Some(1_795_100_000_000));
+        assert!(state.usage_limited);
+
+        let mut ctx = TurnCtx::test_stub();
+        apply_event(
+            &mut ctx,
+            &mut TurnState::default(),
+            &serde_json::json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected",
+                "rateLimitType": "seven_day_opus", "resetsAt": 1_795_000_000}}),
+        );
+        assert_eq!(ctx.usage_reset_at, None, "one model's limit holds no chats");
     }
 
     #[test]

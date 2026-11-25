@@ -16,6 +16,7 @@ pub mod instructions;
 pub mod news;
 pub mod project_move;
 pub(crate) mod subagent;
+mod usage_hold;
 
 pub use adoption::{adopt_kept_work, stop_kept};
 
@@ -1493,6 +1494,13 @@ pub fn session_json_with(store: Option<&Store>, s: &StoredChatSession, busy: boo
                 "requestedAt": waiting.requested_at,
             })
         });
+    // Null when unknown.
+    let limit_timer_stopped = store.and_then(|store| {
+        store
+            .chat_limit_timer_stopped(&s.id)
+            .map_err(|error| eprintln!("orx up: limit timer of {}: {error}", s.id))
+            .ok()
+    });
     json!({
         "id": s.id,
         "projectId": s.project_id,
@@ -1524,6 +1532,7 @@ pub fn session_json_with(store: Option<&Store>, s: &StoredChatSession, busy: boo
         "sideParentSessionId": s.side_parent_session_id,
         "delegate": delegate,
         "goal": s.goal,
+        "limitTimerStopped": limit_timer_stopped,
     })
 }
 
@@ -4934,6 +4943,7 @@ impl ChatHost {
         self.resuming_quit_turns
             .store(false, std::sync::atomic::Ordering::SeqCst);
         self.resume_persisted_queues();
+        self.arm_usage_limits();
     }
 
     async fn resume_turns_on_their_own(self: &Arc<Self>, turns: Vec<StoredChatTurn>) {
@@ -5116,7 +5126,7 @@ impl ChatHost {
             .unwrap()
             .get(session_id)
             .is_some_and(|queue| !queue.is_empty());
-        !cancelled && !suppressed && queued
+        !cancelled && !suppressed && queued && !self.holds_queue(session_id)
     }
 
     fn claim_durable_turn(&self, session_id: &str) -> bool {
@@ -5312,28 +5322,33 @@ impl ChatHost {
             })
             .collect::<Vec<_>>();
         for (session_id, delay) in pending {
-            let host = self.clone();
-            tokio::spawn(async move {
-                if !delay.is_zero() {
-                    tokio::time::sleep(delay).await;
-                }
-                let should_drain = {
-                    let mut turns = host.turns.lock().await;
-                    if host.deleting_sessions.lock().unwrap().contains(&session_id)
-                        || turns.contains_key(&session_id)
-                        || !host.claim_durable_turn(&session_id)
-                    {
-                        false
-                    } else {
-                        turns.insert(session_id.clone(), TurnState::Draining);
-                        true
-                    }
-                };
-                if should_drain {
-                    host.drain_queue(&session_id).await;
-                }
-            });
+            self.kick_queue(session_id, delay);
         }
+    }
+
+    /// Dispatches the session's queue after `delay` if the chat is idle then.
+    fn kick_queue(self: &Arc<Self>, session_id: String, delay: Duration) {
+        let host = self.clone();
+        tokio::spawn(async move {
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            let should_drain = {
+                let mut turns = host.turns.lock().await;
+                if host.deleting_sessions.lock().unwrap().contains(&session_id)
+                    || turns.contains_key(&session_id)
+                    || !host.claim_durable_turn(&session_id)
+                {
+                    false
+                } else {
+                    turns.insert(session_id.clone(), TurnState::Draining);
+                    true
+                }
+            };
+            if should_drain {
+                host.drain_queue(&session_id).await;
+            }
+        });
     }
 
     /// Claim tokens of this process's running turns, whose leases its own expiry must spare.
@@ -5956,7 +5971,10 @@ impl ChatHost {
                     .lock()
                     .unwrap()
                     .contains(session_id);
-                if cancelled || suppressed || self.exiting.load(std::sync::atomic::Ordering::SeqCst)
+                if cancelled
+                    || suppressed
+                    || self.exiting.load(std::sync::atomic::Ordering::SeqCst)
+                    || self.holds_queue(session_id)
                 {
                     (None, None)
                 } else {
@@ -6364,23 +6382,43 @@ impl ChatHost {
             orx: orx.into_iter().collect(),
             ..message_transcript(&text, &annotations)
         };
-        self.send_message_showing(
-            session_id,
-            SendTurnRequest {
-                messages: vec![AnnotatedText { text, annotations }],
-                prepared_input: None,
-                replace_settings: false,
-                transcript,
-                overrides,
-                images: TurnAttachments::Uploaded(images),
-                admission: TurnAdmission::QueueIfBusy,
-                client_turn_id,
-                request_hash: None,
-                continuation: false,
-            },
-        )
-        .await
-        .and_then(|submission| match submission {
+        // Sending once the account is back starts the chat's stopped timer again.
+        let restarts_timer = {
+            let store = Store::open()?;
+            match store.get_chat_session(session_id)? {
+                Some(session) => {
+                    store.chat_limit_timer_stopped(session_id)?
+                        && store
+                            .usage_limit(&session.harness, session.profile_id.as_deref())?
+                            .is_none()
+                }
+                None => false,
+            }
+        };
+        if restarts_timer {
+            Store::open()?.set_chat_limit_timer_stopped(session_id, false)?;
+        }
+        let submission = self
+            .send_message_showing(
+                session_id,
+                SendTurnRequest {
+                    messages: vec![AnnotatedText { text, annotations }],
+                    prepared_input: None,
+                    replace_settings: false,
+                    transcript,
+                    overrides,
+                    images: TurnAttachments::Uploaded(images),
+                    admission: TurnAdmission::QueueIfBusy,
+                    client_turn_id,
+                    request_hash: None,
+                    continuation: false,
+                },
+            )
+            .await;
+        if restarts_timer {
+            self.kick_queue(session_id.to_string(), Duration::ZERO);
+        }
+        submission.and_then(|submission| match submission {
             TurnSubmission::Started(turn_id) => Ok(SendMessageResult {
                 turn_id,
                 queued: false,
@@ -7154,7 +7192,12 @@ impl ChatHost {
                     .unwrap()
                     .get(session_id)
                     .is_some_and(|queue| !queue.is_empty());
-                if turns.contains_key(session_id) || has_queued {
+                // A re-sampled turn can't wait in the queue, so it tries the account anyway.
+                let limited = matches!(images, TurnAttachments::Uploaded(_))
+                    && store
+                        .usage_limit(&session.harness, session.profile_id.as_deref())?
+                        .is_some();
+                if turns.contains_key(session_id) || has_queued || limited {
                     if matches!(turns.get(session_id), Some(TurnState::Switching)) {
                         return Err(anyhow!("This chat is switching its agent or moving to a new project. Send again once it finishes."));
                     }
@@ -7240,12 +7283,13 @@ impl ChatHost {
                     drop(queued);
                     drop(permission_changes);
                     drop(plan_changes);
+                    let busy = turns.contains_key(session_id);
                     drop(turns);
                     self.emit_queued(session_id);
                     if let Some(session) = store.get_chat_session(session_id)? {
                         self.emit(
                             "chat.session",
-                            json!({ "session": session_json(&session, true) }),
+                            json!({ "session": session_json(&session, busy) }),
                         );
                     }
                     return Ok(TurnSubmission::Queued(client_turn_id));
@@ -7866,6 +7910,7 @@ impl ChatHost {
                 Ok(crate::local::harness::TurnOutcome::Completed) => ctx.terminal_error.take(),
             };
             let usage_outcome = if failure.is_some() { "failed" } else { "done" };
+            let mut limited_until = None;
             let _terminal_won = if let Some((kind, message)) = failure {
                 let action = ctx.delivery_state.recovery_action();
                 let retry_owner = ctx
@@ -7879,6 +7924,7 @@ impl ChatHost {
                         }
                     })
                     .to_string();
+                let failed_at = now_ms();
                 let changed = Store::open()
                     .and_then(|store| {
                         store.fail_chat_turn(
@@ -7892,6 +7938,21 @@ impl ChatHost {
                     .unwrap_or(false);
                 if changed {
                     ctx.push_turn_failure(&kind, message.clone(), action);
+                    if crate::local::harness::failure_cause(&kind, &message)
+                        == Some(crate::local::harness::FailureCause::UsageLimit)
+                    {
+                        // A reset already past is unknown: holding until it would retry at once.
+                        limited_until = ctx
+                            .usage_reset_at
+                            .or_else(|| {
+                                crate::local::usage::exhausted_until(
+                                    &ctx.harness,
+                                    ctx.profile.as_deref(),
+                                )
+                            })
+                            .filter(|reset_at| *reset_at > now_ms())
+                            .map(|reset_at| (reset_at, failed_at));
+                    }
                     if let Some(properties) = ctx.exhausted_retry_properties(&retry_owner, &kind) {
                         crate::telemetry::capture("chat_retry_exhausted", properties);
                     }
@@ -7918,6 +7979,14 @@ impl ChatHost {
                 if let (Ok(store), Ok(json)) = (Store::open(), serde_json::to_string(usage)) {
                     let _ = store.set_chat_session_context_usage(&ctx.session_id, &json);
                 }
+            }
+            let account = (ctx.harness.as_str(), ctx.profile.as_deref());
+            match limited_until {
+                Some((reset_at, since)) => ctx.host.hold_for_usage_limit(account, reset_at, since),
+                None if _terminal_won && usage_outcome == "done" => {
+                    ctx.host.lift_usage_limit(account)
+                }
+                None => {}
             }
             ctx.host
                 .finish_turn(&ctx.session_id, Some(&ctx.assistant.id), true)
@@ -9582,9 +9651,8 @@ pub struct TurnCtx {
     pub(crate) orx_retry_started: Option<Instant>,
     orx_retry_count: u32,
     pub(crate) terminal_error: Option<(String, String)>,
-    /// Epoch ms when a usage limit that failed this turn resets, if the
-    /// harness could read one from the provider.
-    usage_reset_at: Option<i64>,
+    /// Epoch ms when the account's usage limit resets, when the agent said.
+    pub(crate) usage_reset_at: Option<i64>,
     pub session_id: String,
     pub harness: String,
     pub native_session_id: Option<String>,
@@ -9957,13 +10025,10 @@ impl TurnCtx {
         })
     }
 
-    /// Records when a usage limit that failed the turn resets, so the
-    /// transcript can show the remaining wait next to its recovery button.
-    /// Informational only — the button stays clickable, and a press that the
-    /// provider accepts renews or resumes the turn. Takes how long the
-    /// provider asked to wait.
-    pub fn mark_usage_reset(&mut self, retry_after_ms: Option<i64>) {
-        self.usage_reset_at = retry_after_ms.map(|ms| crate::store::now_ms() + ms);
+    /// When the account's usage limit resets (epoch ms), so a turn that fails on it holds the
+    /// account's chats until then.
+    pub fn mark_usage_reset_at(&mut self, reset_at: i64) {
+        self.usage_reset_at = Some(reset_at);
     }
 
     pub fn schedule_orx_retry(&mut self, explicit: Option<Duration>) -> Option<(u32, Duration)> {
@@ -10099,7 +10164,6 @@ impl TurnCtx {
 
     fn push_turn_failure(&mut self, kind: &str, message: String, recovery_action: &str) {
         self.clear_retry_status();
-        let usage_reset_at = self.usage_reset_at.take();
         let mut part = WirePart::tool("turn-recovery", "error", "error", Some(message));
         if let Some(state) = part.state.as_mut() {
             let mut input = json!({
@@ -10109,7 +10173,8 @@ impl TurnCtx {
                 "harness": self.harness,
                 "profile": self.profile,
             });
-            if let Some(reset_at) = usage_reset_at {
+            // Shipped apps count down to it beside Try again.
+            if let Some(reset_at) = self.usage_reset_at {
                 input["resetAt"] = json!(reset_at);
             }
             state.input = Some(input);
@@ -16136,57 +16201,6 @@ for line in sys.stdin:
         assert_eq!(ctx.schedule_orx_retry(None).unwrap().0, 2);
         assert_eq!(ctx.schedule_orx_retry(None).unwrap().0, 3);
         assert!(ctx.schedule_orx_retry(None).is_none());
-    }
-
-    #[test]
-    fn usage_reset_reaches_the_turn_recovery_part_when_known() {
-        let now = crate::store::now_ms();
-        let mut ctx = TurnCtx::test_stub();
-        ctx.mark_usage_reset(Some(60_000));
-        ctx.push_turn_failure(
-            "opencode_terminal",
-            "Free usage limit reached.".into(),
-            "continue",
-        );
-        let part = ctx
-            .assistant
-            .parts
-            .iter()
-            .find(|part| part.id == "turn-recovery")
-            .expect("recovery part recorded");
-        let input = part
-            .state
-            .as_ref()
-            .and_then(|state| state.input.as_ref())
-            .expect("input recorded");
-        let reset_at = input
-            .get("resetAt")
-            .and_then(serde_json::Value::as_i64)
-            .expect("reset recorded");
-        assert!(reset_at >= now + 60_000);
-        assert_eq!(input["recoveryAction"], "continue");
-
-        // Without a readable wait there is no reset key: the button still works,
-        // there is just nothing to count down to.
-        let mut ctx = TurnCtx::test_stub();
-        ctx.mark_usage_reset(None);
-        ctx.push_turn_failure(
-            "opencode_terminal",
-            "Free usage limit reached.".into(),
-            "continue",
-        );
-        let part = ctx
-            .assistant
-            .parts
-            .iter()
-            .find(|part| part.id == "turn-recovery")
-            .expect("recovery part recorded");
-        let input = part
-            .state
-            .as_ref()
-            .and_then(|state| state.input.as_ref())
-            .expect("input recorded");
-        assert!(input.get("resetAt").is_none());
     }
 
     #[test]

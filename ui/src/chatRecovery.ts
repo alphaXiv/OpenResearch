@@ -1,5 +1,4 @@
 import type { TurnOptions } from "./api";
-import { fmtDuration } from "./api";
 import { m } from "./paraglide/messages.js";
 import { getLocale } from "./paraglide/runtime.js";
 
@@ -53,14 +52,4 @@ export function recoveryTurnOptions(overrides: TurnOptions): TurnOptions {
   if (overrides.planMode !== undefined) options.planMode = overrides.planMode;
   if (overrides.reasoningLevel !== undefined) options.reasoningLevel = overrides.reasoningLevel;
   return options;
-}
-
-/** A usage-limit failure can carry the moment its quota resets (epoch ms, from
- * the harness). The row shows the remaining wait as information only, never as
- * a lock: the provider, not this timestamp, is the source of truth — the wait
- * can end early, so the button stays clickable and every press re-checks the
- * quota for real. Returns null when the reset is unknown or already due. */
-export function usageResetCountdown(resetAt: unknown, now: number): string | null {
-  if (typeof resetAt !== "number" || !Number.isFinite(resetAt) || resetAt <= now) return null;
-  return fmtDuration(resetAt - now);
 }

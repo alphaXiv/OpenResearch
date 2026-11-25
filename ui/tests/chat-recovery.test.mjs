@@ -6,9 +6,7 @@ import {
   recoveryAction,
   recoveryTurnOptions,
   retryStatusLabel,
-  usageResetCountdown,
 } from "../src/chatRecovery.ts";
-import { m } from "../src/paraglide/messages.js";
 
 test("formats ORX retry attempts and countdowns", () => {
   assert.equal(
@@ -48,29 +46,4 @@ test("recovery sends only composer axes changed after the failed turn", () => {
   );
   assert.deepEqual(recoveryTurnOptions({ model: null }), { model: null });
   assert.deepEqual(recoveryTurnOptions({}), {});
-});
-
-test("usage-limit countdown formats the wait through the translated durations", () => {
-  const now = 1_000_000_000_000;
-  const minute = 60_000;
-  // The countdown is the provider's wait rendered by the same translated
-  // durations the rest of the UI uses, so rewording them never breaks this.
-  assert.equal(usageResetCountdown(now + minute, now), m.duration_minutes({ value: "1" }));
-  assert.equal(
-    usageResetCountdown(now + 61 * minute, now),
-    m.duration_hours_minutes({ hours: "1", minutes: "1" }),
-  );
-  assert.equal(
-    usageResetCountdown(now + 2_777 * minute, now),
-    m.duration_days_hours({ days: "1", hours: "22" }),
-  );
-});
-
-test("usage-limit countdown disappears once the limit is back or unknown", () => {
-  const now = 1_000_000_000_000;
-  assert.equal(usageResetCountdown(now, now), null);
-  assert.equal(usageResetCountdown(now - 1, now), null);
-  assert.equal(usageResetCountdown(undefined, now), null);
-  assert.equal(usageResetCountdown("soon", now), null);
-  assert.equal(usageResetCountdown(Number.NaN, now), null);
 });

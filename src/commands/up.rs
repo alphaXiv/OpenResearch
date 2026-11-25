@@ -1556,6 +1556,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         .route("/api/chat/sessions/{id}/branch", post(select_chat_branch))
         .route("/api/chat/sessions/{id}/interrupt", post(interrupt_chat))
         .route(
+            "/api/chat/sessions/{id}/limit-timer",
+            post(set_chat_limit_timer),
+        )
+        .route(
             "/api/chat/sessions/{id}/stop-and-archive",
             post(stop_and_archive_chat),
         )
@@ -12272,6 +12276,25 @@ async fn chat_attachment(
 
 async fn interrupt_chat(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     state.chat.interrupt_by_user(&id).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct LimitTimerReq {
+    stopped: bool,
+}
+
+/// Stops the chat's wait for its account's usage reset, or starts it again.
+async fn set_chat_limit_timer(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<LimitTimerReq>,
+) -> ApiResult {
+    reject_if_stopping(&state)?;
+    Store::open()?
+        .get_chat_session(&id)?
+        .ok_or_else(|| not_found("chat session"))?;
+    state.chat.set_limit_timer(&id, req.stopped).await?;
     Ok(Json(json!({ "ok": true })))
 }
 

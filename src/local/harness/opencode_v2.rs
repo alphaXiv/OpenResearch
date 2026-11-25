@@ -537,7 +537,9 @@ impl Turn<'_> {
             if let (true, Some(message)) = (delivered, &failure) {
                 // Failures before a step (e.g. an unavailable model) leave no assistant message.
                 ctx.mark_native_retry_exhausted();
-                ctx.mark_usage_reset(failure_retry_after);
+                if let Some(wait) = failure_retry_after {
+                    ctx.mark_usage_reset_at(crate::store::now_ms() + wait);
+                }
                 ctx.mark_terminal_failure("opencode_terminal", message);
                 return Err(anyhow!("OpenCode V2: {message}"));
             }
@@ -719,7 +721,9 @@ async fn merge_projection(
             {
                 let message = error_text(error);
                 ctx.mark_native_retry_exhausted();
-                ctx.mark_usage_reset(error_retry_after_ms(error));
+                if let Some(wait) = error_retry_after_ms(error) {
+                    ctx.mark_usage_reset_at(crate::store::now_ms() + wait);
+                }
                 ctx.mark_terminal_failure("opencode_terminal", &message);
                 return Err(anyhow!("OpenCode V2: {message}"));
             }
@@ -820,9 +824,8 @@ fn messages(projection: &Value) -> Result<&Vec<Value>> {
         .ok_or_else(|| anyhow!("OpenCode V2 history response is invalid"))
 }
 
-/// Usage and rate limits carry how long the provider asked to wait before
-/// trying again, so the dashboard can show the remaining wait next to its
-/// recovery button. Read from the same structured error `error_text` reports.
+/// How long the provider asked to wait before trying again, read from the same structured error
+/// `error_text` reports.
 fn error_retry_after_ms(error: &Value) -> Option<i64> {
     ["/data/retryAfterMs", "/retryAfterMs"]
         .into_iter()

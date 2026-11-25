@@ -14,6 +14,7 @@ mod flags;
 mod report;
 pub(crate) mod search;
 mod telemetry;
+mod usage_limits;
 mod watch;
 pub(crate) use costs::{BilledRun, Per, Quote};
 pub(crate) use env::ProjectEnvVar;
@@ -25,6 +26,7 @@ pub(crate) use flags::{
 pub(crate) use report::NOTES_KEPT;
 pub(crate) use report::{ChatReport, ReportOutcome, ReportTaken};
 pub(crate) use telemetry::{Cost, InvocationIdentity, SampleCost, TokenUsage};
+pub(crate) use usage_limits::UsageLimit;
 pub(crate) use watch::{LookResult, WatchCount, WatchLook, WatchLookRun};
 
 use std::path::{Path, PathBuf};
@@ -1509,6 +1511,17 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_chat_queued_messages_session
                 ON chat_queued_messages(session_id, created_at);
+            CREATE TABLE IF NOT EXISTS usage_limits (
+                harness     TEXT NOT NULL,
+                profile     TEXT NOT NULL DEFAULT '',
+                reset_at    INTEGER NOT NULL,
+                since       INTEGER NOT NULL,
+                PRIMARY KEY(harness, profile)
+            );
+            CREATE TABLE IF NOT EXISTS chat_limit_timer_stops (
+                session_id TEXT PRIMARY KEY,
+                stopped_at INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS chat_run_wakeups (
                 run_id          TEXT NOT NULL,
                 chat_session_id TEXT NOT NULL,
@@ -5150,6 +5163,10 @@ impl Store {
             .unwrap_or_default();
         tx.execute(
             "DELETE FROM chat_queued_messages WHERE session_id = ?1",
+            params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM chat_limit_timer_stops WHERE session_id = ?1",
             params![id],
         )?;
         tx.execute("DELETE FROM chat_turns WHERE session_id = ?1", params![id])?;
