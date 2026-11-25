@@ -252,6 +252,8 @@ struct ClientState {
     answered: std::collections::HashSet<String>,
     outbox: HashMap<String, Value>,
     thread: Option<String>,
+    /// The instructions version `thread` was started or resumed with.
+    instructions: Option<String>,
     model: Option<String>,
     active_turn: Option<String>,
 }
@@ -559,6 +561,21 @@ impl CodexClient {
         *self.resumed_thread.lock().unwrap() = Some(thread_id.to_string());
         let mut state = self.durable.lock().unwrap();
         state.thread = Some(thread_id.to_string());
+        if let Err(error) = self.save_owner(&state) {
+            eprintln!("codex owner state: {error:#}");
+        }
+    }
+
+    /// Whether `thread` is loaded here with developer instructions from another instructions version.
+    pub fn holds_stale_instructions(&self, thread: Option<&str>, instructions: &str) -> bool {
+        thread.is_some()
+            && self.resumed_thread().as_deref() == thread
+            && self.durable.lock().unwrap().instructions.as_deref() != Some(instructions)
+    }
+
+    pub fn set_thread_instructions(&self, version: &str) {
+        let mut state = self.durable.lock().unwrap();
+        state.instructions = Some(version.to_string());
         if let Err(error) = self.save_owner(&state) {
             eprintln!("codex owner state: {error:#}");
         }
@@ -1595,6 +1612,19 @@ pub(crate) mod tests {
     #[cfg(unix)]
     pub(crate) async fn stop_test_client(client: &Arc<CodexClient>) {
         client.terminate().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn only_an_instructions_edit_makes_the_loaded_thread_stale() {
+        let client = test_client("cat >/dev/null", Instant::now(), false).await;
+        client.set_resumed_thread("thread");
+        client.set_thread_instructions("v1");
+        assert!(!client.holds_stale_instructions(Some("thread"), "v1"));
+        assert!(client.holds_stale_instructions(Some("thread"), "v2"));
+        assert!(!client.holds_stale_instructions(Some("other"), "v2"));
+        assert!(!client.holds_stale_instructions(None, "v2"));
+        stop_test_client(&client).await;
     }
 
     #[test]

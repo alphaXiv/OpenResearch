@@ -165,6 +165,7 @@ pub(super) struct ProjectState {
     runs: usize,
     active_runs: usize,
     compute: Option<super::ComputeTarget>,
+    pub(super) instructions: String,
 }
 
 impl ProjectState {
@@ -181,6 +182,8 @@ impl ProjectState {
             runs: runs.len(),
             active_runs,
             compute: super::compute_default(&store, project_id)?,
+            instructions: super::chat::instructions::read(&super::chat::instructions::path())?
+                .content,
         })
     }
 }
@@ -290,7 +293,7 @@ pub(super) fn playbook_md(project: &LocalProject, state: &ProjectState) -> Strin
         .split_once("-->\n\n")
         .map(|(_, rest)| rest)
         .unwrap_or(SYSTEM_PROMPT);
-    template
+    let playbook = template
         .replace("{name}", name)
         .replace("{id}", id)
         .replace("{folder_line}", &folder_line)
@@ -299,7 +302,18 @@ pub(super) fn playbook_md(project: &LocalProject, state: &ProjectState) -> Strin
         .replace("{compute_bullet}", &compute_bullet)
         .replace("{artifacts}", &artifacts)
         .replace("{project_state}", &project_state)
-        .replace("{chat_format}", CHAT_FORMAT_REL)
+        .replace("{chat_format}", CHAT_FORMAT_REL);
+    let instructions = state.instructions.trim();
+    if instructions.is_empty() {
+        return playbook;
+    }
+    format!(
+        "{}\n\n## Your user's OpenResearch instructions\n\n\
+         They apply to every OpenResearch project. To change them, write the whole new file and run \
+         `orx instructions propose <file>` so the user can approve it; never edit the file yourself.\n\n\
+         {instructions}\n",
+        playbook.trim_end()
+    )
 }
 
 /// Keep the files we drop into the checkout out of `git status` / accidental
@@ -459,6 +473,8 @@ struct Resident {
     config: Option<String>,
     native_store: NativeStore,
     alphaxiv_signed_in: bool,
+    /// The instructions version in the playbook it started with.
+    instructions: Option<String>,
     binary: ResolvedBinary,
     database: PathBuf,
     base_url: String,
@@ -527,6 +543,7 @@ async fn spawn_agent(
     binary: ResolvedBinary,
     database: native_store::opencode_database::DatabaseLease,
 ) -> Result<AgentChild> {
+    let instructions = crate::local::chat::instructions::current_version()?;
     // The clone/worktree setup inside can hit the network; keep it off the
     // async workers.
     let (repo, config_override) = {
@@ -580,6 +597,7 @@ async fn spawn_agent(
         config,
         native_store,
         alphaxiv_signed_in: crate::alphaxiv::signed_in(),
+        instructions: Some(instructions),
         database: database.path().to_path_buf(),
         binary,
         base_url: endpoint.base_url.clone(),
@@ -1037,6 +1055,7 @@ impl AgentHost {
         let mut current = crate::process::tokio_command(&binary.path);
         prepare_chat_env(&mut current, model, session_id)?;
         let config = launch_config(&current);
+        let instructions = crate::local::chat::instructions::current_version()?;
         {
             let mut guard = self.inner.lock().await;
             if let Some(agent) = guard.get(session_id) {
@@ -1048,6 +1067,7 @@ impl AgentHost {
                     && agent.database.path() == database_path
                     && resident.model.as_deref() == model
                     && resident.config == config
+                    && resident.instructions.as_ref() == Some(&instructions)
                     && agent.alive()
                 {
                     let status = agent.status();
@@ -1217,6 +1237,7 @@ impl Resident {
             config: None,
             native_store: NativeStore::Isolated,
             alphaxiv_signed_in: false,
+            instructions: crate::local::chat::instructions::current_version().ok(),
             binary,
             database: native_store::opencode_database::normalize_path(database).unwrap(),
             base_url: format!("http://127.0.0.1:{port}"),
@@ -1504,6 +1525,67 @@ mod tests {
             host.shutdown().await;
             server.abort();
         });
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_instructions_edit_restarts_the_resident_child() {
+        use axum::{routing::get, Json, Router};
+        let fixture = git::TemporaryDirectory::new("orx-resident-instructions").unwrap();
+        let path = fixture.path().join("opencode");
+        orx_test_support::write_executable(&path, "#!/bin/sh\necho 2.0.1\n", 0o700).unwrap();
+        let binary = resolve_binary_at(path).await.unwrap();
+        let database_path = fixture.path().join("opencode.db");
+        let app = Router::new().route(
+            "/api/agent",
+            get(|| async {
+                Json(json!({"data":[
+                    {"id":"title","model":{"providerID":"cloud","id":"selected"}},
+                    {"id":"compaction","model":{"providerID":"cloud","id":"selected"}}
+                ]}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let project = sample_project();
+        let host = AgentHost::new(None);
+        let resident = Resident {
+            config: config_for(&binary, "cloud/selected"),
+            ..Resident::for_test(binary.clone(), port, &database_path, Some("cloud/selected"))
+        };
+        let kept = host.insert_for_test("chat", resident).await;
+        let ensure = || {
+            let (progress, _) = tokio::sync::watch::channel(String::new());
+            host.ensure(
+                &project,
+                "chat",
+                Some("cloud/selected"),
+                ResolvedRuntime {
+                    binary: binary.clone(),
+                    database: database_path.clone(),
+                    store: NativeStore::Isolated,
+                },
+                progress,
+            )
+        };
+        ensure().await.unwrap();
+        assert_eq!(host.inner.lock().await["chat"].keeper.id(), kept.id());
+
+        let instructions = crate::local::chat::instructions::path();
+        std::fs::create_dir_all(instructions.parent().unwrap()).unwrap();
+        std::fs::write(&instructions, "Name runs after the idea.").unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(30), ensure()).await;
+        std::fs::remove_file(&instructions).unwrap();
+        let resident = host
+            .inner
+            .lock()
+            .await
+            .get("chat")
+            .map(|agent| agent.keeper.id().to_string());
+        assert_ne!(resident.as_deref(), Some(kept.id()));
+        host.shutdown().await;
+        server.abort();
     }
 
     #[tokio::test]
@@ -1897,6 +1979,19 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_instructions_file_fails_the_playbook_rather_than_dropping_it() {
+        let path = crate::local::chat::instructions::path();
+        std::fs::create_dir_all(&path).unwrap();
+        let error = ProjectState::load("proj_unreadable_instructions")
+            .err()
+            .unwrap()
+            .to_string();
+        std::fs::remove_dir_all(&path).unwrap();
+        assert!(error.contains(&path.display().to_string()), "{error}");
+    }
+
     #[test]
     fn project_state_summarizes_counts_and_the_run_command() {
         let mut project = sample_project();
@@ -1909,7 +2004,7 @@ mod tests {
             experiments: 12,
             runs: 18,
             active_runs: 1,
-            compute: None,
+            ..ProjectState::default()
         };
         let existing = project_state_md(&project, &state);
         assert!(existing.contains("**12 experiments**"));

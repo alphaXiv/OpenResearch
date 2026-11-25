@@ -2601,7 +2601,7 @@
   "instructions_keep_mine": "Düzenlemelerimi koru",
   "instructions_use_saved": "Kayıtlı sürümü kullan",
   "chat_instructions_title": "OpenResearch talimatların değiştirilsin mi?",
-  "chat_instructions_note": "Her OpenResearch ajanı bir sonraki turundan itibaren bunlara uyar.",
+  "chat_instructions_note": "Claude Code, Codex ve OpenCode bunlara bir sonraki turdan itibaren uyar; Cursor ve diğer ACP ajanları bir sonraki yeni sohbetten itibaren.",
   "chat_instructions_stale": "Ajan bunu önerdikten sonra talimatların değişti. Reddet ve ajandan yeniden önermesini iste.",
   "chat_instructions_approve": "Onayla",
   "chat_instructions_decline": "Reddet",

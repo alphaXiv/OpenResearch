@@ -2600,7 +2600,7 @@
   "instructions_keep_mine": "నా మార్పులు ఉంచు",
   "instructions_use_saved": "సేవ్ చేసిన వెర్షన్ వాడు",
   "chat_instructions_title": "మీ OpenResearch సూచనలను మార్చాలా?",
-  "chat_instructions_note": "ప్రతి OpenResearch ఏజెంట్ తన తదుపరి వంతు నుండి వీటిని పాటిస్తుంది.",
+  "chat_instructions_note": "Claude Code, Codex, OpenCode తమ తదుపరి టర్న్ నుండి వీటిని పాటిస్తాయి; Cursor మరియు ఇతర ACP ఏజెంట్లు తమ తదుపరి కొత్త చాట్ నుండి.",
   "chat_instructions_stale": "ఏజెంట్ దీన్ని ప్రతిపాదించిన తర్వాత మీ సూచనలు మారాయి. దీన్ని తిరస్కరించి, మళ్లీ ప్రతిపాదించమని ఏజెంట్‌ను అడగండి.",
   "chat_instructions_approve": "ఆమోదించు",
   "chat_instructions_decline": "తిరస్కరించు",

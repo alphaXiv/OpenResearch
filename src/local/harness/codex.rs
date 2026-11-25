@@ -1795,7 +1795,8 @@ impl Harness for Codex {
                         "Codex's saved thread is missing — cannot compact this chat"
                     ));
                 };
-                let (repo, playbook_md) = codex_playbook(&ctx.project, &ctx.session_id).await?;
+                let (repo, playbook_md, instructions) =
+                    codex_playbook(&ctx.project, &ctx.session_id).await?;
                 let client = ctx
                     .host
                     .codex
@@ -1818,6 +1819,7 @@ impl Harness for Codex {
                 )?;
                 add_orx_server(&mut setup["config"], &ctx.session_id, ctx.host.up_port());
                 resume_for_compaction(&client, thread_id, &session.path, setup).await?;
+                client.set_thread_instructions(&instructions);
                 client
             }
         };
@@ -3698,10 +3700,13 @@ async fn ensure_codex_pre_accept(
     }
 }
 
+/// The worktree, the playbook and the instructions version it carries.
 async fn codex_playbook(
     project: &crate::local::model::LocalProject,
     session_id: &str,
-) -> Result<(PathBuf, String)> {
+) -> Result<(PathBuf, String, String)> {
+    // Read before the playbook is written, so a concurrent edit costs a resume rather than going unseen.
+    let instructions = crate::local::chat::instructions::current_version()?;
     let project = project.clone();
     let session_id = session_id.to_string();
     let (repo, playbook) = tokio::task::spawn_blocking(move || {
@@ -3710,7 +3715,7 @@ async fn codex_playbook(
     .await
     .map_err(|e| anyhow!("playbook task failed: {e}"))??;
     let playbook_md = std::fs::read_to_string(&playbook).unwrap_or_default();
-    Ok((repo, playbook_md))
+    Ok((repo, playbook_md, instructions))
 }
 
 /// Add orx's MCP server to a thread's config. Native sub-agents are off while
@@ -3808,7 +3813,8 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
             // Claude's precedent. Behavior-preserving for the pre-plan-mode cards (all
             // of which were native).
             ctx.host.resolve_stale_prompts(&ctx.session_id, true)?;
-            let (repo, playbook_md) = codex_playbook(&ctx.project, &ctx.session_id).await?;
+            let (repo, playbook_md, instructions) =
+                codex_playbook(&ctx.project, &ctx.session_id).await?;
 
             let native_session = match ctx.native_session_id.as_deref() {
                 Some(id) => codex_native_session(id, ctx.profile.is_some()).await?,
@@ -3819,6 +3825,11 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                 .map(|session| session.store)
                 .unwrap_or(NativeStore::Isolated);
             let mut client = ensure_codex_pre_accept(ctx, preferred_store).await?;
+            // A loaded thread keeps its developer instructions, so an edit resumes it on a fresh child.
+            if client.holds_stale_instructions(ctx.native_session_id.as_deref(), &instructions) {
+                ctx.host.codex.kill_session(&ctx.session_id).await;
+                client = ensure_codex_pre_accept(ctx, preferred_store).await?;
+            }
             let config_client = client.clone();
             // Bypass needs the configuration only to avoid MCP server name collisions.
             let mut config = match codex_turn_config(&client, &repo).await {
@@ -3900,6 +3911,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                 }
                 (None, _) => start_thread(ctx, &client, thread_setup).await?,
             };
+            client.set_thread_instructions(&instructions);
 
             if ctx.permission_mode != Some(PermissionMode::Bypass)
                 && !Arc::ptr_eq(&client, &config_client)

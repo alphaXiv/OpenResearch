@@ -2600,7 +2600,7 @@
   "instructions_keep_mine": "Giữ chỉnh sửa của tôi",
   "instructions_use_saved": "Dùng phiên bản đã lưu",
   "chat_instructions_title": "Thay đổi hướng dẫn OpenResearch của bạn?",
-  "chat_instructions_note": "Mọi agent OpenResearch tuân theo từ lượt tiếp theo của nó.",
+  "chat_instructions_note": "Claude Code, Codex và OpenCode làm theo từ lượt tiếp theo; Cursor và các tác tử ACP khác từ cuộc trò chuyện mới tiếp theo.",
   "chat_instructions_stale": "Hướng dẫn của bạn đã thay đổi sau khi agent đề xuất điều này. Hãy từ chối và yêu cầu agent đề xuất lại.",
   "chat_instructions_approve": "Phê duyệt",
   "chat_instructions_decline": "Từ chối",

@@ -2601,7 +2601,7 @@
   "instructions_keep_mine": "मेरे बदलाव रखें",
   "instructions_use_saved": "सेव किया वर्ज़न इस्तेमाल करें",
   "chat_instructions_title": "अपने OpenResearch निर्देश बदलें?",
-  "chat_instructions_note": "हर OpenResearch एजेंट अपनी अगली बारी से इनका पालन करता है।",
+  "chat_instructions_note": "Claude Code, Codex और OpenCode अपनी अगली बारी से इनका पालन करते हैं; Cursor और अन्य ACP एजेंट अपनी अगली नई चैट से।",
   "chat_instructions_stale": "एजेंट के यह प्रस्ताव देने के बाद आपके निर्देश बदल गए। इसे अस्वीकार करें और एजेंट से फिर से प्रस्ताव देने को कहें।",
   "chat_instructions_approve": "मंज़ूर करें",
   "chat_instructions_decline": "अस्वीकार करें",

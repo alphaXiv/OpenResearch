@@ -2601,7 +2601,7 @@
   "instructions_keep_mine": "نگه‌داشتن ویرایش‌هایم",
   "instructions_use_saved": "استفاده از نسخهٔ ذخیره‌شده",
   "chat_instructions_title": "دستورالعمل‌های OpenResearch را تغییر می‌دهید؟",
-  "chat_instructions_note": "همهٔ عامل‌های OpenResearch از نوبت بعدی خود آن‌ها را دنبال می‌کنند.",
+  "chat_instructions_note": "Claude Code، Codex و OpenCode از نوبت بعدی خود از آن‌ها پیروی می‌کنند؛ Cursor و دیگر عامل‌های ACP از گفت‌وگوی جدید بعدی.",
   "chat_instructions_stale": "دستورالعمل‌های شما پس از پیشنهاد عامل تغییر کردند. آن را رد کنید و از عامل بخواهید دوباره پیشنهاد دهد.",
   "chat_instructions_approve": "تأیید",
   "chat_instructions_decline": "رد",

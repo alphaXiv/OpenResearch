@@ -1559,6 +1559,7 @@ impl Harness for ClaudeCode {
         let project = ctx.project.clone();
         let session_id = ctx.session_id.clone();
         let skills_dir = self.session_skills_dir();
+        let instructions = crate::local::chat::instructions::current_version()?;
         let (repo, playbook) =
             tokio::task::spawn_blocking(move || ensure_playbook(&project, &session_id, skills_dir))
                 .await
@@ -1580,6 +1581,7 @@ impl Harness for ClaudeCode {
                 bridge_active: uses_permission_bridge(ctx.permission_mode)
                     && ctx.host.up_port().is_some(),
                 bin: find_claude(),
+                instructions,
             },
         };
         ctx.host
@@ -3171,7 +3173,7 @@ fn commit_attempt_session(ctx: &mut TurnCtx, state: &TurnState) {
 
 /// The reasoning-level → `--effort` value the spawn config carries. Split out so
 /// the harness and the host agree on exactly what the child was launched with.
-fn spawn_config(ctx: &TurnCtx, native_store: NativeStore) -> SpawnConfig {
+fn spawn_config(ctx: &TurnCtx, native_store: NativeStore, instructions: String) -> SpawnConfig {
     SpawnConfig {
         permission_mode: ctx.permission_mode,
         effort: claude_effort(ctx.reasoning_level.as_deref()).map(str::to_string),
@@ -3182,6 +3184,7 @@ fn spawn_config(ctx: &TurnCtx, native_store: NativeStore) -> SpawnConfig {
         // A failed bridge setup must respawn next turn rather than reuse a child without input.
         bridge_active: uses_permission_bridge(ctx.permission_mode) && ctx.host.up_port().is_some(),
         bin: find_claude(),
+        instructions,
     }
 }
 
@@ -3644,6 +3647,8 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     // playbook only on respawn, same tradeoff as codex (see opencode.rs's
     // playbook-freshness comment).
     let skills_dir = ClaudeCode.session_skills_dir();
+    // Read before the playbook is written, so a concurrent edit costs a respawn rather than going unseen.
+    let instructions = crate::local::chat::instructions::current_version()?;
     let (repo, playbook) =
         tokio::task::spawn_blocking(move || ensure_playbook(&project, &session_id, skills_dir))
             .await
@@ -3691,7 +3696,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         playbook,
         resume: resume.clone(),
         fork_at,
-        config: spawn_config(ctx, native_store),
+        config: spawn_config(ctx, native_store, instructions),
     };
     let mut retry_count = 0;
     let mut state;
@@ -4159,7 +4164,7 @@ mod tests {
             playbook: PathBuf::new(),
             resume: None,
             fork_at: None,
-            config: spawn_config(&ctx, NativeStore::Isolated),
+            config: spawn_config(&ctx, NativeStore::Isolated, String::new()),
         };
         assert!(run_attempt(&mut ctx, spec).await.is_err());
         let (kind, local_message) = ctx.terminal_error.as_ref().unwrap();
@@ -4215,6 +4220,7 @@ mod tests {
                 alphaxiv_signed_in: false,
                 bridge_active: false,
                 bin: None,
+                instructions: String::new(),
             },
         };
 

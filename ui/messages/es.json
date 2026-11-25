@@ -2601,7 +2601,7 @@
   "instructions_keep_mine": "Conservar mis ediciones",
   "instructions_use_saved": "Usar la versión guardada",
   "chat_instructions_title": "¿Cambiar tus instrucciones de OpenResearch?",
-  "chat_instructions_note": "Todos los agentes de OpenResearch las siguen desde su siguiente turno.",
+  "chat_instructions_note": "Claude Code, Codex y OpenCode las siguen desde su próximo turno; Cursor y otros agentes ACP, desde su próximo chat nuevo.",
   "chat_instructions_stale": "Tus instrucciones cambiaron después de que el agente propusiera esto. Recházalo y pide al agente que lo proponga de nuevo.",
   "chat_instructions_approve": "Aprobar",
   "chat_instructions_decline": "Rechazar",

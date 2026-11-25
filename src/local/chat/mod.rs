@@ -1593,7 +1593,6 @@ fn is_initial_chat_message(transcript_text: Option<&str>, has_messages: bool) ->
 
 fn with_turn_context(
     goal: Option<&str>,
-    instructions: Option<&str>,
     autonomy: Option<&str>,
     demo_evidence_context: Option<&str>,
     shell_context: Option<&str>,
@@ -1607,9 +1606,6 @@ fn with_turn_context(
     });
     if let Some(goal) = goal.as_deref() {
         contexts.push(goal);
-    }
-    if let Some(instructions) = instructions {
-        contexts.push(instructions);
     }
     if let Some(autonomy) = autonomy {
         contexts.push(autonomy);
@@ -2864,7 +2860,7 @@ mod shell_command_tests {
         assert!(context.contains("status=\"exit 1\">\ncat missing\n</command>"));
         assert!(context.contains("<stderr>\nboom\n</stderr>"));
         assert!(context.find("ls\n</command>").unwrap() < context.find("cat missing").unwrap());
-        let turn = with_turn_context(None, None, None, None, Some(&context), "why?".into());
+        let turn = with_turn_context(None, None, None, Some(&context), "why?".into());
         assert!(turn.starts_with("<user-shell-commands>"));
         assert!(turn.ends_with("<current-user-message>\nwhy?\n</current-user-message>"));
         assert!(shell_context(&[]).is_none());
@@ -2890,18 +2886,11 @@ mod initial_message_tests {
 
     #[test]
     fn the_goal_rides_every_turn() {
-        let seeded = with_turn_context(
-            Some("ship the sweep"),
-            None,
-            None,
-            None,
-            None,
-            "continue".into(),
-        );
+        let seeded = with_turn_context(Some("ship the sweep"), None, None, None, "continue".into());
         assert!(seeded.contains("ship the sweep"));
         assert!(seeded.contains("<current-user-message>\ncontinue"));
         assert_eq!(
-            with_turn_context(None, None, None, None, None, "continue".into()),
+            with_turn_context(None, None, None, None, "continue".into()),
             "continue"
         );
     }
@@ -2910,7 +2899,6 @@ mod initial_message_tests {
     fn autonomy_rides_every_turn_after_the_goal() {
         let turn = with_turn_context(
             Some("ship the sweep"),
-            None,
             Autonomy::Copilot.turn_context(),
             None,
             None,
@@ -2924,29 +2912,16 @@ mod initial_message_tests {
 
     #[test]
     fn demo_evidence_context_is_injected_without_rewrapping_the_user_message() {
-        let first = with_turn_context(
-            None,
-            None,
-            None,
-            Some("demo evidence"),
-            None,
-            "first".into(),
-        );
-        let follow_up = with_turn_context(
-            None,
-            None,
-            None,
-            Some("demo evidence"),
-            None,
-            "follow up".into(),
-        );
+        let first = with_turn_context(None, None, Some("demo evidence"), None, "first".into());
+        let follow_up =
+            with_turn_context(None, None, Some("demo evidence"), None, "follow up".into());
         assert!(first.contains("demo evidence"));
         assert!(first.contains("<current-user-message>\nfirst"));
         assert!(follow_up.contains("demo evidence"));
         assert!(follow_up.contains("<current-user-message>\nfollow up"));
         assert_eq!(first.matches("<current-user-message>").count(), 1);
         assert_eq!(
-            with_turn_context(None, None, None, None, None, "ordinary".into()),
+            with_turn_context(None, None, None, None, "ordinary".into()),
             "ordinary"
         );
     }
@@ -7386,11 +7361,6 @@ impl ChatHost {
                         .any(|m| m.text.trim_start().starts_with('/'))
             })
             .map(|message| delegation::message_ref(&message.id));
-        // Read afresh each turn; a replayed turn keeps the context it was first sent with.
-        let instructions = match prepared_input {
-            Some(_) => None,
-            None => instructions::turn_context(&instructions::path())?,
-        };
         let mut turn_text = prepared_input.unwrap_or_else(|| {
             let mut expanded = contextualize_messages(messages, |text| {
                 if orx.is_empty() {
@@ -7410,7 +7380,6 @@ impl ChatHost {
             }
             with_turn_context(
                 session.goal.as_deref(),
-                instructions.as_deref(),
                 Autonomy::from_stored(session.autonomy.as_deref()).turn_context(),
                 super::demo::turn_context(&project.id),
                 shell_context.as_deref(),

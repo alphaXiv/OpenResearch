@@ -2601,7 +2601,7 @@
   "instructions_keep_mine": "自分の編集を残す",
   "instructions_use_saved": "保存済みの版を使う",
   "chat_instructions_title": "OpenResearch の指示を変更しますか？",
-  "chat_instructions_note": "すべての OpenResearch エージェントが次のターンから従います。",
+  "chat_instructions_note": "Claude Code、Codex、OpenCode は次のターンから、Cursor やその他の ACP エージェントは次の新しいチャットから従います。",
   "chat_instructions_stale": "エージェントがこれを提案した後に指示が変更されました。却下して、エージェントにもう一度提案するよう依頼してください。",
   "chat_instructions_approve": "承認",
   "chat_instructions_decline": "却下",

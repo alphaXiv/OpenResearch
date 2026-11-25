@@ -29,8 +29,8 @@ turns; do not promise an immediate skill reload in the running harness.
 
 ## OpenResearch instructions
 
-The user's OpenResearch instructions reach every turn of every OpenResearch
-chat, for every agent, inside `<orx-instructions>`. They hold preferences for
+The user's OpenResearch instructions end the OpenResearch playbook of every
+chat, for every agent. They hold preferences for
 all their OpenResearch projects, like run naming or how to report results.
 When the user asks to remember such a preference, change them with:
 

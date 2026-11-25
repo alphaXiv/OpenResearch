@@ -2601,7 +2601,7 @@
   "instructions_keep_mine": "Оставить мои правки",
   "instructions_use_saved": "Использовать сохранённую версию",
   "chat_instructions_title": "Изменить инструкции OpenResearch?",
-  "chat_instructions_note": "Все агенты OpenResearch следуют им со своего следующего хода.",
+  "chat_instructions_note": "Claude Code, Codex и OpenCode следуют им со следующего хода; Cursor и другие агенты ACP — со следующего нового чата.",
   "chat_instructions_stale": "Инструкции изменились после того, как агент это предложил. Отклоните предложение и попросите агента предложить снова.",
   "chat_instructions_approve": "Одобрить",
   "chat_instructions_decline": "Отклонить",

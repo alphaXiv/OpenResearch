@@ -1,6 +1,6 @@
 //! The user's OpenResearch instructions: one file in the config directory that
-//! orx adds to every chat turn, whatever the agent. Agents change it only
-//! through a card the user approves.
+//! orx appends to every agent's playbook. Agents change it only through a card
+//! the user approves.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -96,18 +96,9 @@ pub fn write(
     }))
 }
 
-/// The turn's `<orx-instructions>` block, or `None` when the file is missing or blank.
-pub fn turn_context(path: &Path) -> Result<Option<String>> {
-    let snapshot = read(path)?;
-    let content = snapshot.content.trim();
-    if content.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(format!(
-        "<orx-instructions>\nThe user's OpenResearch instructions, for every OpenResearch project. Follow them. \
-         To change them, write the whole new file and run `orx instructions propose <file>` so the user can approve it; \
-         never edit the file yourself.\n\n{content}\n</orx-instructions>"
-    )))
+/// The version a harness compares to respawn or resume its agent with an edited playbook.
+pub fn current_version() -> Result<String> {
+    Ok(read(&path())?.version)
 }
 
 /// The change as `git diff` shows it, every line in context, for the card.
@@ -184,7 +175,7 @@ impl ChatHost {
             if written.is_err() {
                 bail!("Your OpenResearch instructions changed after the agent proposed this, so approving it would undo that change. Decline it and ask the agent to propose again.");
             }
-            "The user approved your proposed OpenResearch instructions, and they are saved. Every OpenResearch chat follows them from its next turn."
+            "The user approved your proposed OpenResearch instructions, and they are saved. Claude Code, Codex and OpenCode chats follow them from their next turn; Cursor and other ACP agents from their next new chat."
         } else {
             "The user declined your proposed change to their OpenResearch instructions, so they stay as they were."
         };
@@ -215,57 +206,13 @@ impl ChatHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local::chat::{with_turn_context, TurnState, WirePart};
+    use crate::local::chat::{TurnState, WirePart};
     use crate::store::Store;
 
     fn temp_path() -> PathBuf {
         crate::config::test_home()
             .join(format!("instructions-{}", uuid::Uuid::new_v4().simple()))
             .join("AGENTS.md")
-    }
-
-    #[test]
-    fn a_missing_or_blank_file_adds_nothing_and_content_rides_between_goal_and_autonomy() {
-        let path = temp_path();
-        assert_eq!(turn_context(&path).unwrap(), None);
-        let missing = read(&path).unwrap();
-        assert!(!missing.exists);
-
-        assert!(write(&path, "  \n\n", &missing.version).unwrap().is_ok());
-        assert_eq!(turn_context(&path).unwrap(), None);
-        assert_eq!(
-            with_turn_context(None, None, None, None, None, "plain".into()),
-            "plain"
-        );
-
-        let blank = read(&path).unwrap();
-        assert!(write(&path, "Name runs after the idea.\n", &blank.version)
-            .unwrap()
-            .is_ok());
-        let block = turn_context(&path).unwrap().unwrap();
-        assert!(block.contains("Name runs after the idea."));
-        assert!(block.contains("orx instructions propose"));
-        let turn = with_turn_context(
-            Some("ship it"),
-            Some(&block),
-            Some("<orx-autonomy level=\"x\">\n</orx-autonomy>"),
-            None,
-            None,
-            "continue".into(),
-        );
-        let goal = turn.find("<orx-goal>").unwrap();
-        let instructions = turn.find("<orx-instructions>").unwrap();
-        let autonomy = turn.find("<orx-autonomy").unwrap();
-        assert!(goal < instructions && instructions < autonomy);
-        assert_eq!(turn.matches("Name runs after the idea.").count(), 1);
-
-        let named = read(&path).unwrap();
-        assert!(write(&path, "Report results as a table.", &named.version)
-            .unwrap()
-            .is_ok());
-        let next = turn_context(&path).unwrap().unwrap();
-        assert!(next.contains("Report results as a table."));
-        assert!(!next.contains("Name runs"));
     }
 
     #[test]
@@ -285,7 +232,7 @@ mod tests {
         );
 
         assert!(write(&path, "", &saved.version).unwrap().is_ok());
-        assert_eq!(turn_context(&path).unwrap(), None);
+        assert_eq!(read(&path).unwrap().version, version(""));
     }
 
     #[cfg(unix)]
@@ -293,7 +240,7 @@ mod tests {
     fn an_unreadable_file_names_itself_rather_than_reading_as_empty() {
         let path = temp_path();
         std::fs::create_dir_all(&path).unwrap();
-        let error = turn_context(&path).unwrap_err().to_string();
+        let error = read(&path).unwrap_err().to_string();
         assert!(error.contains(&path.display().to_string()), "{error}");
     }
 
