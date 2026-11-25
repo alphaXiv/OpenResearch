@@ -21,7 +21,7 @@ async function repairScreen() {
     gatewayUrl: "http://localhost:4910/", error: "Permissions refused", repairCommand, installPaths: null,
     uiPreferences: { theme: null, locale: null }, canStartNewHost: false,
   };
-  serveApp({ "GET /_orx/runtime": () => ({ kind: "ssh", version: "test", buildChannel: "stable", dashboardProtocol: 1, session }) });
+  serveApp({ "GET /_orx/runtime": () => ({ kind: "ssh", version: "test", buildChannel: "stable", session }) });
   const view = await renderApp("/projects");
   return { ...view, button: (label) => find("button", label) };
 }
@@ -77,7 +77,7 @@ test("an older running host offers an update without stopping its work", async (
     installPaths: { binary: "/fixture/bin/orx", database: "/fixture/data", cache: "/fixture/cache" },
     uiPreferences: { theme: null, locale: null }, canStartNewHost: false,
   };
-  serveApp({ "GET /_orx/runtime": () => ({ kind: "ssh", version: "test", buildChannel: "stable", dashboardProtocol: 2, session }) });
+  serveApp({ "GET /_orx/runtime": () => ({ kind: "ssh", version: "test", buildChannel: "stable", session }) });
   await renderApp("/projects");
   assert.ok(find("button", m.remote_update()));
   assert.equal(find("button", m.remote_stop_host()), null);
@@ -89,7 +89,7 @@ test("the host restart is announced while its workspace reconnects", async () =>
     gatewayUrl: "http://localhost:4910/", error: null, repairCommand: null, installPaths: null,
     uiPreferences: { theme: null, locale: null }, canStartNewHost: false,
   };
-  serveApp({ "GET /_orx/runtime": () => ({ kind: "ssh", version: "test", buildChannel: "stable", dashboardProtocol: 2, session }) });
+  serveApp({ "GET /_orx/runtime": () => ({ kind: "ssh", version: "test", buildChannel: "stable", session }) });
   await renderApp("/projects");
   assert.ok(find("h1", m.remote_restarting_title({ host: ltr("fixture") })));
   assert.ok(document.querySelector('[role="status"]'));

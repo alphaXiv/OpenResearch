@@ -58,7 +58,7 @@ test("a publishing failure during project creation opens the project's settings"
 });
 
 const remote = {
-  kind: "ssh", version: "test", buildChannel: "stable", dashboardProtocol: 1,
+  kind: "ssh", version: "test", buildChannel: "stable",
   session: { id: "gpu", host: "gpu-lab", user: "me", status: "connected", version: "test", dashboardProtocol: 1, gatewayUrl: "http://localhost:4910/", error: null, repairCommand: null, installPaths: null, uiPreferences: { theme: null, locale: null }, canStartNewHost: true },
 };
 

@@ -40,7 +40,7 @@ export const StatusStrip = memo(function StatusStrip({ runtime, onDetails, setti
         onOpen={() => void usage.refetch()}
         machine={runtime.kind === "ssh" ? autoDir(runtime.session.host) : m.projects_local()}
         remote={runtime.kind === "ssh"}
-        stale={!live || (current !== null && current.state !== "connected")}
+        stale={!live || current?.state === "connecting" || current?.state === "disconnected"}
         fetchedAt={usage.dataUpdatedAt}
       />}
     </div>

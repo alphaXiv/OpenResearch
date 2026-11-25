@@ -9,11 +9,11 @@ import { find, press, render, renderApp, serveApp, settle, type } from "./render
 const session = {
   id: "s", host: "research", user: "me", status: "connected", version: "test", dashboardProtocol: 1,
   gatewayUrl: "http://localhost:4910/", error: null, repairCommand: null, installPaths: null,
-  uiPreferences: { theme: null, locale: null }, canStartNewHost: true,
+  uiPreferences: { theme: null, locale: null }, canStartNewHost: true, updateAvailable: false,
 };
 const runtimes = {
   local: { kind: "local", version: "test", buildChannel: "stable" },
-  ssh: { kind: "ssh", version: "test", buildChannel: "stable", dashboardProtocol: 1, session },
+  ssh: { kind: "ssh", version: "test", buildChannel: "stable", session },
 };
 const server = { ...session, id: "server" };
 const click = async (element) => {
@@ -83,6 +83,55 @@ for (const error of [null, "Connection to research closed."]) {
     assert.deepEqual(connects, ["research", "research"]);
   });
 }
+
+test("a machine on an older build is updated from the laptop's menu and stays open while it updates", async () => {
+  let remote = { ...server, updateAvailable: true };
+  const requests = await laptop("/projects/p/tasks/new", {
+    "POST /api/remote/sessions/server/update": () => {
+      remote = { ...remote, status: "updating", updateAvailable: false };
+      return remote;
+    },
+  }, () => remote);
+  const update = () => menuItem(m.remote_update_on_machine({ machine: autoDir("research") }));
+
+  await click(switcher());
+  await click(update());
+  assert.ok(requests.includes("POST /api/remote/sessions/server/update"));
+  assert.equal(visibleMachine(), "local");
+
+  await click(switcher());
+  assert.equal(update(), null);
+  await click(menuItem("research"));
+  assert.equal(visibleMachine(), "server");
+  assert.match(switcher().textContent, new RegExp(m.remote_machine_updating()));
+  assert.ok(find(`${visible} button`, "Project"));
+});
+
+test("orx up --remote offers its own machine's update", async () => {
+  let remote = { ...server, updateAvailable: true };
+  const updates = [];
+  serveApp({
+    "GET /_orx/runtime": () => ({ ...runtimes.ssh, session: remote }),
+    "GET /api/projects": () => ({ projects: [{ id: "p", name: "Project", updatedAt: 1 }] }),
+    "POST /_orx/update": () => {
+      updates.push(remote.id);
+      remote = { ...remote, status: "updating", updateAvailable: false };
+      return remote;
+    },
+  });
+  await renderApp("/projects/p/tasks/new");
+  await click(switcher());
+  await click(menuItem(m.remote_update_on_machine({ machine: autoDir("research") })));
+  assert.deepEqual(updates, ["server"]);
+});
+
+test("a connected machine on an older build says so in the switcher", async () => {
+  const outdated = { ...server, updateAvailable: true };
+  await laptop("/projects/p/tasks/new", {}, () => outdated);
+  await click(switcher());
+  await click(menuItem("research"));
+  assert.match(switcher().textContent, new RegExp(m.remote_machine_update_available()));
+});
 
 test("a saved machine with no session is listed and connects when selected", async () => {
   let sessions = [];

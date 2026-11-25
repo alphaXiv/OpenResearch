@@ -8496,8 +8496,12 @@ impl ChatHost {
     }
 
     /// Branch a side chat off `parent`, seeded with a snapshot of the parent's
-    /// live branch as it is right now.
-    pub async fn open_side_chat(&self, parent: &StoredChatSession) -> Result<StoredChatSession> {
+    /// live branch as it is right now, on `agent` or else the parent's agent.
+    pub async fn open_side_chat(
+        &self,
+        parent: &StoredChatSession,
+        agent: Option<crate::store::StoredAgentSelection>,
+    ) -> Result<StoredChatSession> {
         let catalog = self.harnesses.lock().await.clone();
         let store = Store::open()?;
         let transaction = store.begin_immediate()?;
@@ -8506,6 +8510,14 @@ impl ChatHost {
             .ok_or_else(|| anyhow!("chat session is gone"))?;
         let messages = store.list_chat_messages(&parent.id)?;
         let mut session = side_chat_session(&parent, &messages);
+        if let Some(agent) = agent {
+            session.harness = agent.harness;
+            session.profile_id = agent.profile;
+            session.model = agent.model;
+            session.service_tier = agent.service_tier;
+            session.permission_mode = agent.permission_mode;
+            session.reasoning_level = agent.reasoning_level;
+        }
         if let Some((_, payload)) = catalog.as_ref() {
             session.model = crate::local::harness::selected_model(
                 payload,
@@ -9363,6 +9375,9 @@ pub struct TurnCtx {
     pub(crate) orx_retry_started: Option<Instant>,
     orx_retry_count: u32,
     pub(crate) terminal_error: Option<(String, String)>,
+    /// Epoch ms when a usage limit that failed this turn resets, if the
+    /// harness could read one from the provider.
+    usage_reset_at: Option<i64>,
     pub session_id: String,
     pub harness: String,
     pub native_session_id: Option<String>,
@@ -9501,6 +9516,7 @@ fn turn_ctx_from_stored(
         orx_retry_started: None,
         orx_retry_count: 0,
         terminal_error: None,
+        usage_reset_at: None,
         session_id: session.id.clone(),
         harness: session.harness.clone(),
         native_session_id: session.native_session_id.clone(),
@@ -9734,6 +9750,15 @@ impl TurnCtx {
         })
     }
 
+    /// Records when a usage limit that failed the turn resets, so the
+    /// transcript can show the remaining wait next to its recovery button.
+    /// Informational only — the button stays clickable, and a press that the
+    /// provider accepts renews or resumes the turn. Takes how long the
+    /// provider asked to wait.
+    pub fn mark_usage_reset(&mut self, retry_after_ms: Option<i64>) {
+        self.usage_reset_at = retry_after_ms.map(|ms| crate::store::now_ms() + ms);
+    }
+
     pub fn schedule_orx_retry(&mut self, explicit: Option<Duration>) -> Option<(u32, Duration)> {
         let started = *self.orx_retry_started.get_or_insert_with(Instant::now);
         let retry_number = self.orx_retry_count + 1;
@@ -9867,15 +9892,20 @@ impl TurnCtx {
 
     fn push_turn_failure(&mut self, kind: &str, message: String, recovery_action: &str) {
         self.clear_retry_status();
+        let usage_reset_at = self.usage_reset_at.take();
         let mut part = WirePart::tool("turn-recovery", "error", "error", Some(message));
         if let Some(state) = part.state.as_mut() {
-            state.input = Some(json!({
+            let mut input = json!({
                 "turnId": self.turn_id,
                 "errorKind": kind,
                 "recoveryAction": recovery_action,
                 "harness": self.harness,
                 "profile": self.profile,
-            }));
+            });
+            if let Some(reset_at) = usage_reset_at {
+                input["resetAt"] = json!(reset_at);
+            }
+            state.input = Some(input);
         }
         classify_turn_failure(&mut part);
         self.upsert_part_raw(part);
@@ -9911,6 +9941,7 @@ impl TurnCtx {
             orx_retry_started: None,
             orx_retry_count: 0,
             terminal_error: None,
+            usage_reset_at: None,
             session_id: "test-session".into(),
             harness: "test".into(),
             native_session_id: None,
@@ -15886,6 +15917,57 @@ for line in sys.stdin:
         assert_eq!(ctx.schedule_orx_retry(None).unwrap().0, 2);
         assert_eq!(ctx.schedule_orx_retry(None).unwrap().0, 3);
         assert!(ctx.schedule_orx_retry(None).is_none());
+    }
+
+    #[test]
+    fn usage_reset_reaches_the_turn_recovery_part_when_known() {
+        let now = crate::store::now_ms();
+        let mut ctx = TurnCtx::test_stub();
+        ctx.mark_usage_reset(Some(60_000));
+        ctx.push_turn_failure(
+            "opencode_terminal",
+            "Free usage limit reached.".into(),
+            "continue",
+        );
+        let part = ctx
+            .assistant
+            .parts
+            .iter()
+            .find(|part| part.id == "turn-recovery")
+            .expect("recovery part recorded");
+        let input = part
+            .state
+            .as_ref()
+            .and_then(|state| state.input.as_ref())
+            .expect("input recorded");
+        let reset_at = input
+            .get("resetAt")
+            .and_then(serde_json::Value::as_i64)
+            .expect("reset recorded");
+        assert!(reset_at >= now + 60_000);
+        assert_eq!(input["recoveryAction"], "continue");
+
+        // Without a readable wait there is no reset key: the button still works,
+        // there is just nothing to count down to.
+        let mut ctx = TurnCtx::test_stub();
+        ctx.mark_usage_reset(None);
+        ctx.push_turn_failure(
+            "opencode_terminal",
+            "Free usage limit reached.".into(),
+            "continue",
+        );
+        let part = ctx
+            .assistant
+            .parts
+            .iter()
+            .find(|part| part.id == "turn-recovery")
+            .expect("recovery part recorded");
+        let input = part
+            .state
+            .as_ref()
+            .and_then(|state| state.input.as_ref())
+            .expect("input recorded");
+        assert!(input.get("resetAt").is_none());
     }
 
     #[test]

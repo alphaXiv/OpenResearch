@@ -1254,6 +1254,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             "/api/settings/telemetry",
             get(telemetry_settings).post(set_telemetry_settings),
         )
+        .route(
+            "/api/settings/bug-reports",
+            get(bug_report_settings).post(set_bug_report_settings),
+        )
         .route("/api/telemetry/event", post(record_ui_event))
         .route("/api/telemetry/locale", post(set_dashboard_locale))
         .route(
@@ -1300,6 +1304,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         .route(
             "/api/remote/sessions/{id}/reconnect",
             post(reconnect_remote_session),
+        )
+        .route(
+            "/api/remote/sessions/{id}/update",
+            post(update_remote_session),
         )
         .route(
             "/api/remote/sessions/{id}/disconnect",
@@ -6375,13 +6383,12 @@ async fn begin_restart(
         Some("the data directory is moving.")
     } else if state.opencode_signins.in_progress() {
         Some("an OpenCode sign-in is still open.")
-    } else if state
-        .remote_sessions
-        .list()
-        .await
-        .iter()
-        .any(|session| session.status == RemoteSessionStatus::Applying)
-    {
+    } else if state.remote_sessions.list().await.iter().any(|session| {
+        matches!(
+            session.status,
+            RemoteSessionStatus::Applying | RemoteSessionStatus::Updating
+        )
+    }) {
         Some("OpenResearch is installing on a remote machine.")
     } else if !stop_agents && !state.chat.stop_admitting_unless_restart_stops().await {
         Some("an agent is working that a restart would stop.")
@@ -7373,6 +7380,29 @@ async fn set_telemetry_settings(Json(req): Json<SetTelemetryReq>) -> ApiResult {
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("telemetry task failed: {e}")))?
+}
+
+async fn bug_report_settings() -> ApiResult {
+    tokio::task::spawn_blocking(|| {
+        let linear = crate::config::linear_bug_reports().map_err(ApiError::from)?;
+        Ok(Json(json!({ "linear": linear })))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("bug report settings task failed: {e}")))?
+}
+
+#[derive(Deserialize)]
+struct SetBugReportsReq {
+    linear: bool,
+}
+
+async fn set_bug_report_settings(Json(req): Json<SetBugReportsReq>) -> ApiResult {
+    tokio::task::spawn_blocking(move || {
+        crate::config::set_linear_bug_reports(req.linear).map_err(ApiError::from)?;
+        Ok(Json(json!({ "linear": req.linear })))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("bug report settings task failed: {e}")))?
 }
 
 #[derive(Deserialize)]
@@ -9073,6 +9103,15 @@ async fn reconnect_remote_session(
     Path(id): Path<String>,
 ) -> ApiResult {
     Ok(Json(json!(state.remote_sessions.reconnect(&id).await?)))
+}
+
+async fn update_remote_session(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    let session = state
+        .remote_sessions
+        .update(&id)
+        .await
+        .map_err(bad_request)?;
+    Ok(Json(json!(session)))
 }
 
 async fn disconnect_remote_session(
@@ -11204,8 +11243,21 @@ async fn import_native_chat(
     ))
 }
 
-async fn open_side_chat(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+#[derive(Deserialize)]
+struct OpenSideChatReq {
+    /// Absent, the side chat starts on the parent's agent.
+    agent: Option<crate::store::StoredAgentSelection>,
+}
+
+async fn open_side_chat(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<OpenSideChatReq>,
+) -> ApiResult {
     reject_if_moving(&state)?;
+    if let Some(agent) = &req.agent {
+        check_agent(agent)?;
+    }
     let parent = Store::open()?
         .get_chat_session(&id)?
         .ok_or_else(|| not_found("chat session"))?;
@@ -11217,13 +11269,17 @@ async fn open_side_chat(State(state): State<AppState>, Path(id): Path<String>) -
         .admit(&parent.project_id)
         .ok_or_else(|| bad_request("project deletion is in progress"))?;
     harnesses_payload(&state, &HarnessQuery::default()).await;
-    let session = state.chat.open_side_chat(&parent).await.map_err(|error| {
-        if error.is::<local::harness::ModelSelectionError>() {
-            bad_request(error)
-        } else {
-            ApiError::from(error)
-        }
-    })?;
+    let session = state
+        .chat
+        .open_side_chat(&parent, req.agent)
+        .await
+        .map_err(|error| {
+            if error.is::<local::harness::ModelSelectionError>() {
+                bad_request(error)
+            } else {
+                ApiError::from(error)
+            }
+        })?;
     Ok(Json(
         json!({ "session": state.chat.session_json(&session, false).await }),
     ))
@@ -11387,6 +11443,33 @@ async fn set_chat_configuration(
     ))
 }
 
+/// Rejects an agent selection whose account, permission mode or speed doesn't belong to its agent.
+fn check_agent(agent: &crate::store::StoredAgentSelection) -> Result<(), ApiError> {
+    if !local::harness::is_chat_harness(&agent.harness) {
+        return Err(bad_request("Choose an available agent"));
+    }
+    if let Some(profile) = &agent.profile {
+        local::agent_profiles::home(profile, &agent.harness).map_err(bad_request)?;
+    }
+    if agent
+        .permission_mode
+        .as_deref()
+        .is_some_and(|mode| local::harness::permission_mode_for(&agent.harness, mode).is_none())
+    {
+        return Err(bad_request(
+            "invalid permission mode for the selected agent",
+        ));
+    }
+    if agent
+        .service_tier
+        .as_deref()
+        .is_some_and(|tier| local::harness::service_tier_for(&agent.harness, tier).is_none())
+    {
+        return Err(bad_request("invalid speed for the selected agent"));
+    }
+    Ok(())
+}
+
 async fn update_chat_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -11401,9 +11484,6 @@ async fn update_chat_session(
             agent
         } else {
             let harness = req.harness.unwrap_or_else(|| current.harness.clone());
-            if !local::harness::is_chat_harness(&harness) {
-                return Err(bad_request("Choose an available agent"));
-            }
             let same_harness = harness == current.harness;
             let profile = req.profile.unwrap_or_else(|| {
                 if same_harness {
@@ -11446,9 +11526,7 @@ async fn update_chat_session(
                 }),
             }
         };
-        if let Some(profile) = &selection.profile {
-            local::agent_profiles::home(profile, &selection.harness).map_err(bad_request)?;
-        }
+        check_agent(&selection)?;
         let catalog = harnesses_payload(&state, &HarnessQuery::default()).await;
         selection.model = local::harness::selected_model(
             &catalog,
@@ -11457,18 +11535,6 @@ async fn update_chat_session(
             selection.model.as_deref(),
         )
         .map_err(bad_request)?;
-        if selection.permission_mode.as_deref().is_some_and(|mode| {
-            local::harness::permission_mode_for(&selection.harness, mode).is_none()
-        }) {
-            return Err(bad_request(
-                "invalid permission mode for the selected agent",
-            ));
-        }
-        if selection.service_tier.as_deref().is_some_and(|tier| {
-            local::harness::service_tier_for(&selection.harness, tier).is_none()
-        }) {
-            return Err(bad_request("invalid speed for the selected agent"));
-        }
         let window = catalog["harnesses"]
             .as_array()
             .and_then(|entries| {
@@ -14808,11 +14874,15 @@ mod tests {
                 "id":"codex","agentReady":false,"authState":"needsLogin"
             }]}),
         ));
-        let response = open_side_chat(State(state.clone()), Path("side-parent".into()))
-            .await
-            .err()
-            .unwrap()
-            .into_response();
+        let response = open_side_chat(
+            State(state.clone()),
+            Path("side-parent".into()),
+            Json(OpenSideChatReq { agent: None }),
+        )
+        .await
+        .err()
+        .unwrap()
+        .into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert!(state.harnesses.try_lock().is_ok());
         *state.harnesses.lock().await = Some((
@@ -14821,21 +14891,82 @@ mod tests {
                 "id":"codex","agentReady":true,"defaultModel":"concrete-model"
             }]}),
         ));
-        let Json(response) = open_side_chat(State(state.clone()), Path("side-parent".into()))
-            .await
-            .unwrap_or_else(|error| panic!("{}", error.1));
+        let Json(response) = open_side_chat(
+            State(state.clone()),
+            Path("side-parent".into()),
+            Json(OpenSideChatReq { agent: None }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{}", error.1));
         assert_eq!(response["session"]["model"], "concrete-model");
+        let claude = |permission_mode: &str| crate::store::StoredAgentSelection {
+            profile: None,
+            harness: "claude-code".into(),
+            model: Some("opus".into()),
+            service_tier: None,
+            permission_mode: Some(permission_mode.into()),
+            reasoning_level: Some("high".into()),
+        };
+        *state.harnesses.lock().await = Some((
+            std::time::Instant::now(),
+            json!({"harnesses":[
+                {"id":"codex","agentReady":true,"defaultModel":"concrete-model"},
+                {"id":"claude-code","agentReady":true}
+            ]}),
+        ));
+        let Json(response) = open_side_chat(
+            State(state.clone()),
+            Path("side-parent".into()),
+            Json(OpenSideChatReq {
+                agent: Some(claude("acceptEdits")),
+            }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{}", error.1));
+        let side = &response["session"];
+        assert_eq!(
+            [
+                &side["harness"],
+                &side["model"],
+                &side["permissionMode"],
+                &side["reasoningLevel"],
+                &side["sideParentSessionId"]
+            ],
+            [
+                &json!("claude-code"),
+                &json!("opus"),
+                &json!("acceptEdits"),
+                &json!("high"),
+                &json!("side-parent")
+            ]
+        );
+        let response = open_side_chat(
+            State(state.clone()),
+            Path("side-parent".into()),
+            Json(OpenSideChatReq {
+                agent: Some(claude("never-a-mode")),
+            }),
+        )
+        .await
+        .err()
+        .unwrap()
+        .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         connection
             .execute_batch(
                 "CREATE TRIGGER fail_side_chat BEFORE INSERT ON chat_sessions
                 BEGIN SELECT RAISE(FAIL, 'side chat insert failed'); END;",
             )
             .unwrap();
-        let response = open_side_chat(State(state.clone()), Path("side-parent".into()))
-            .await
-            .err()
-            .unwrap()
-            .into_response();
+        let response = open_side_chat(
+            State(state.clone()),
+            Path("side-parent".into()),
+            Json(OpenSideChatReq { agent: None }),
+        )
+        .await
+        .err()
+        .unwrap()
+        .into_response();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert!(state.harnesses.try_lock().is_ok());
     }

@@ -1569,11 +1569,9 @@ fn relaunch_as_app(no_telemetry: bool) {
 fn show_error_dialog(message: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 
-    // The app's console is hidden, and shared with the agents it runs, so it
-    // doesn't own it; the window's server leaves its errors to the window.
-    if commands::app::serves_window()
-        || (!owns_its_console() && !commands::app::launched_with_app_arg())
-    {
+    // orx's own children (the updater, the window's server) also own a console no one sees.
+    let double_clicked = std::env::args_os().len() == 1 && owns_its_console();
+    if !double_clicked && !commands::app::launched_with_app_arg() {
         return;
     }
     let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();

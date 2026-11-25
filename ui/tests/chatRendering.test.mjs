@@ -14,6 +14,7 @@ import {
   transcriptMarkdown,
   withoutDuplicateTurnError,
   splitResponseParts,
+  questionsInPlace,
 } from "../src/chatRendering.ts";
 
 const message = (...parts) => ({ id: "assistant", role: "assistant", parts, createdAt: 0 });
@@ -32,7 +33,7 @@ test("question replies stay visible and only represented question tool echoes di
   const reply = { id: "reply", type: "steer", text: "In response to: Color\n\nWhich color?\n\nGreen" };
   const final = { id: "final", type: "text", phase: "final_answer", text: "Received." };
   const messages = [message(tool, prompt, reply, final)];
-  const result = splitResponseParts(messages, false, questionReplies(messages));
+  const result = splitResponseParts(messages, true, questionReplies(messages));
   assert.ok(result.answer.includes(reply));
   assert.ok(result.answer.includes(final));
   assert.ok(![...result.answer, ...result.work.flatMap(turn => turn.parts)].includes(tool));
@@ -471,19 +472,21 @@ test("a wakeup continuation retains each earlier turn's recovery controls", asyn
 });
 
 
-test("answered questions stay visible when Claude continues with a final response", async () => {
+test("answered questions fold into the activity between where they were asked and the final response", async () => {
   const { splitResponseParts } = await import("../src/chatRendering.ts");
   const color = { id: "color", type: "prompt", prompt: { kind: "question", resolved: true, question: "Color?", answers: ["Green"] } };
   const shape = { id: "shape", type: "prompt", prompt: { kind: "question", resolved: true, question: "Shape?", answers: ["Square"] } };
   const tool = { id: "tool", type: "tool", tool: "AskUserQuestion" };
   const final = { id: "final", type: "text", phase: "final_answer", text: "Green and Square" };
-  const response = splitResponseParts([
+  const messages = [
     { ...message(color), id: "first" },
     { ...message(shape), id: "second" },
     { ...message(tool, final), id: "last" },
-  ], false);
-  assert.deepEqual(response.answer, [color, shape, final]);
-  assert.deepEqual(response.work, [{ id: "last", parts: [tool] }]);
+  ];
+  assert.deepEqual(splitResponseParts(messages, true).answer, [color, shape, final]);
+  const finished = splitResponseParts(messages, false);
+  assert.deepEqual(finished.answer, [final]);
+  assert.deepEqual(finished.work, [{ id: "first", parts: [color] }, { id: "second", parts: [shape] }, { id: "last", parts: [tool] }]);
 });
 
 test("questions answered together stay in the order asked while the turn resumes", async () => {
@@ -507,7 +510,31 @@ test("explicitly skipped questions stay visible without treating stale cleanup a
   const response = splitResponseParts([
     { ...message(skipped, historical, stale), id: "questions" },
     { ...message(final), id: "last" },
-  ], false);
+  ], true);
   assert.deepEqual(response.answer, [skipped, historical, final]);
   assert.deepEqual(response.work, [{ id: "questions", parts: [stale] }]);
+});
+
+test("Claude's question cards take the place of the call that asked them", () => {
+  const card = (id) => ({ id: `msg_${id}`, role: "assistant", createdAt: 1, parts: [{ id, type: "prompt", prompt: { kind: "question", resolved: true, question: `${id}?`, answers: ["Yes"], nativeId: id } }] });
+  const before = { id: "before", type: "tool", tool: "Bash" };
+  const ask = { id: "toolu_a", type: "tool", tool: "AskUserQuestion" };
+  const after = { id: "after", type: "tool", tool: "Bash" };
+  const final = { id: "final", type: "text", phase: "final_answer", text: "Done" };
+  const turn = { ...message(before, ask, after, final), id: "turn" };
+  const [first, second] = [card("perm_toolu_a_0"), card("perm_toolu_a_1")];
+  const transcript = questionsInPlace([turn, first, second]);
+  assert.deepEqual(transcript.map((m) => m.id), ["turn"]);
+  assert.deepEqual(transcript[0].parts, [before, first.parts[0], second.parts[0], after, final]);
+  assert.equal(questionsInPlace([turn, first, second])[0], transcript[0], "an unchanged turn keeps its identity");
+
+  const response = splitResponseParts(transcript, false);
+  assert.deepEqual(response.answer, [final]);
+  assert.deepEqual(response.work, [{ id: "turn", parts: [before, first.parts[0], second.parts[0], after] }]);
+
+  assert.deepEqual(questionsInPlace([first, turn])[0].parts, [before, first.parts[0], after, final], "a card stored before its turn");
+
+  const permission = { id: "msg_perm_before", role: "assistant", createdAt: 1, parts: [{ id: "perm_before", type: "prompt", prompt: { kind: "permission" } }] };
+  const unanchored = card("perm_toolu_elsewhere");
+  assert.deepEqual(questionsInPlace([turn, permission, unanchored]).map((m) => m.id), ["turn", "msg_perm_before", "msg_perm_toolu_elsewhere"]);
 });
