@@ -627,12 +627,20 @@ pub(crate) fn delete_found_provider(id: &str) -> Result<()> {
         })?;
     }
     if found.sources.contains(&"auth") {
-        if let Some(path) = opencode_auth_path() {
+        if let Some(path) =
+            opencode_auth_path().filter(|_| auth_json_providers().iter().any(|p| p == id))
+        {
             rewrite_json(&path, Some(0o600), |auth| {
                 if let Some(auth) = auth.as_object_mut() {
                     auth.retain(|key, _| key != id);
                 }
             })?;
+        }
+        // orx's database holds a copy of the user's sign-in, which would otherwise outlive it.
+        for store in [NativeStore::Legacy, NativeStore::Isolated] {
+            let db = native_store::opencode_db(store);
+            native_store::opencode_database::delete_credentials(&db, id)
+                .map_err(|error| anyhow!("Could not sign {id} out of {}: {error}", db.display()))?;
         }
     }
     Ok(())
@@ -739,8 +747,24 @@ pub(crate) fn free_models_offered() -> bool {
         .map_or(true, |state| state.opencode_free_models)
 }
 
-/// Providers opencode is signed into (its auth.json is `{provider: {type}}`).
+/// Providers the user's own OpenCode is signed into: OpenCode 1's auth.json and OpenCode 2's database.
 fn opencode_providers() -> Vec<String> {
+    let mut ids = auth_json_providers();
+    let db = native_store::opencode_db(NativeStore::Legacy);
+    match native_store::opencode_database::credential_integrations(&db) {
+        Ok(found) => ids.extend(found),
+        Err(error) => eprintln!(
+            "orx up: could not read OpenCode's sign-ins in {}: {error:#}",
+            db.display()
+        ),
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// Providers signed in through auth.json, which is `{provider: {type}}`.
+fn auth_json_providers() -> Vec<String> {
     let Some(auth) = opencode_auth_path().and_then(read_json) else {
         return Vec::new();
     };
@@ -1293,6 +1317,30 @@ mod tests {
                 0o600
             );
         }
+        // OpenCode 2 keeps sign-ins in its database, and orx's holds a copy of them.
+        let databases = [NativeStore::Legacy, NativeStore::Isolated].map(native_store::opencode_db);
+        for db in &databases {
+            std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+            rusqlite::Connection::open(db)
+                .unwrap()
+                .execute_batch(
+                    "CREATE TABLE credential (id TEXT PRIMARY KEY, integration_id TEXT);
+                     INSERT INTO credential VALUES ('c1', 'groq');",
+                )
+                .unwrap();
+        }
+        let groq = found_providers([], &integrations)
+            .into_iter()
+            .find(|found| found.id == "groq")
+            .unwrap();
+        assert_eq!((groq.sources, groq.removable), (vec!["auth"], true));
+        delete_found_provider("groq").unwrap();
+        for db in &databases {
+            assert!(native_store::opencode_database::credential_integrations(db)
+                .unwrap()
+                .is_empty());
+        }
+
         let broken = dir.join("broken.json");
         std::fs::write(&broken, "{ not json").unwrap();
         std::env::set_var("OPENCODE_CONFIG", &broken);

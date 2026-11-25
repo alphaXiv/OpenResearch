@@ -626,9 +626,17 @@ async fn prepare_database_waiting(
 /// still work without them.
 async fn copy_user_credentials(lease: &DatabaseLease) {
     use crate::local::native_store::{opencode_database, opencode_db, NativeStore};
-    let user = opencode_db(NativeStore::Legacy);
-    let Ok(user) = crate::paths::canonicalize(&user) else {
-        return;
+    let user = match crate::paths::canonicalize(opencode_db(NativeStore::Legacy)) {
+        Ok(user) => user,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            let path = opencode_db(NativeStore::Legacy);
+            eprintln!(
+                "orx up: could not read OpenCode database {}: {error}",
+                path.display()
+            );
+            return;
+        }
     };
     let orx = lease.path().to_path_buf();
     if user == orx {

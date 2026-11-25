@@ -217,6 +217,38 @@ pub fn copy_credentials(user: &Path, orx: &Path) -> Result<usize> {
     Ok(updated + inserted)
 }
 
+/// The providers an OpenCode 2 database holds sign-ins for.
+pub fn credential_integrations(path: &Path) -> Result<Vec<String>> {
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let connection = open_readonly(path)?;
+    if !has_columns(&connection, "credential", &["integration_id"])? {
+        return Ok(Vec::new());
+    }
+    let mut query = connection.prepare(
+        "SELECT DISTINCT integration_id FROM credential WHERE integration_id IS NOT NULL",
+    )?;
+    let ids = query.query_map([], |row| row.get(0))?;
+    Ok(ids.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Signs `integration` out of an OpenCode 2 database.
+pub fn delete_credentials(path: &Path, integration: &str) -> Result<()> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    if has_columns(&connection, "credential", &["integration_id"])? {
+        connection.execute(
+            "DELETE FROM credential WHERE integration_id = ?1",
+            [integration],
+        )?;
+    }
+    Ok(())
+}
+
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(suffix);
