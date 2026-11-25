@@ -32,7 +32,7 @@ import { chatSearchRanges } from "../chatSearch";
 import { ComposerProjectPicker } from "./ComposerProjectPicker";
 import { LibraryPicker } from "./LibraryPicker";
 import { ProjectInfoCard } from "./ProjectInfoCard";
-import { PendingProjectMove, ProjectProposalCard, projectLabel, projectProposal, useCreateProject, type ProjectProposal } from "./NoProject";
+import { PendingProjectMove, ProjectProposalCard, projectLabel, useCreateProject } from "./NoProject";
 import { mutCreateScratchProject } from "../queries/projects";
 import { mutSetChatLitSources } from "../queries/settings";
 import { ProjectIconTile } from "./ProjectIcon";
@@ -96,7 +96,6 @@ import {
   ArrowRightLeft,
   ArrowUpRight,
   Bell,
-  BookMarked,
   BookOpen,
   ChartSpline,
   Check,
@@ -107,14 +106,12 @@ import {
   CornerDownLeft,
   Copy,
   Link,
-  FileCode,
   FileText,
   FlaskConical,
   FolderPlus,
   Plus,
   SquarePen,
   CircleCheck,
-  Globe,
   Gauge,
   Hourglass,
   Undo2,
@@ -129,13 +126,11 @@ import {
   NotebookText,
   Paperclip,
   Pencil,
-  ScrollText,
   Search,
   SlidersHorizontal,
   SquareTerminal,
   TriangleAlert,
   Trash2,
-  Users,
   WifiOff,
   X,
 } from "lucide-react";
@@ -161,7 +156,6 @@ import {
   type ChatImageAttachment,
   type ArtifactEntry,
   type ChatMessage,
-  type AlphaXivFolder,
   type ChatPart,
   type ChatToolState,
   type FailureCause,
@@ -226,17 +220,22 @@ import {
   type ComposerAttachment,
   type ComposerStash,
 } from "../composerStash";
-import {
-  containsShellGlob,
-  orxArgsMatch,
-  orxArgv,
-  recordedDiscoveryQueries,
-  shellWords,
-  shellWrapperBody,
-  unwrapShellBody,
-  loopPaperIds,
-} from "../orxCommand";
 import { LitSourceLogo, parseOrxLit, paperUrl } from "./LitSourceLogo";
+import {
+  activityInProgress,
+  ALPHAXIV_TOOL,
+  alphaxivApprovalLabel,
+  exactInputStringArray,
+  inputString,
+  permissionActivityLabel,
+  plainActivity,
+  toolActivity,
+  type ToolActivity,
+} from "../worklog/activity";
+import { MoreSteps, ToolActivityLabel, type OpenTranscriptFile, type OpenTranscriptTarget } from "../worklog/ActivityLabel";
+import { ToolActivityIcon } from "../worklog/glyphs";
+import { baseName } from "../worklog/steps";
+import { codeSummary, leadActivity, mixedSummary } from "../worklog/summary";
 import { FileScopeContext } from "./FileReference";
 import { FILE_CARD_CLASS, FileCardContent } from "./FileTypeIcon";
 import { FigureReveal, PaperShelf, pluralMessage, ReportCard, RunCard, SourceStrip, type ShelfPaper } from "./ResearchCards";
@@ -306,14 +305,12 @@ import {
   tableMarkdown,
 } from "./annotationMarkdown";
 import { Button, IconButton, LoadingRow, MENU_LABEL, MENU_SEPARATOR, MenuItem, showAlert, Spinner, Tooltip } from "./ui";
+import { Boundary } from "./ui/Boundary";
 import { QuestionDock, useQuestions } from "./QuestionDock";
 import { PaperTitle } from "./PaperTitle";
 
 const TOOL_LINE_CLASS_NAME = "tool-line flex-1 min-w-0 line-clamp-2 break-words text-base leading-6";
 const TOOL_OUTPUT_CLASS_NAME = "tool-output py-1.5 px-2.5 font-mono text-xs text-subtext whitespace-pre-wrap wrap-anywhere max-h-65 overflow-y-auto bg-background border border-border-variant rounded-sm";
-const TOOL_TARGET_LIMIT = 256;
-const TOOL_TARGET_INSPECTION_LIMIT = 1_024;
-const TOOL_OUTPUT_SCAN_LIMIT = 20_000;
 const SELECTION_ACTION_GAP_PX = 8;
 const CHAT_ANNOTATION_HIGHLIGHT_NAME = "chat-annotations";
 const SIDE_CHAT_ANNOTATION_HIGHLIGHT_NAME = "side-chat-annotations";
@@ -947,153 +944,11 @@ const EMPTY_RECOVERY_OVERRIDES = {};
 
 // --- rendering ---------------------------------------------------------------
 
-/** The last path segment, for compact display ("src/a/b.rs" → "b.rs"). */
-function baseName(path: string): string {
-  const trimmed = path.replace(/\/+$/, "");
-  return trimmed.slice(trimmed.lastIndexOf("/") + 1) || trimmed;
-}
-
-function skillNameFromPath(path: string): string | null {
-  const parts = path.replace(/\\/g, "/").replace(/\/+$/, "").split("/").filter(Boolean);
-  if (parts.at(-1)?.toLowerCase() !== "skill.md") return null;
-  return parts.at(-2) ?? null;
-}
-
-function nativeOrxSkillPath(tool: string, skillName: string): string | null {
-  if (!/^orx-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(skillName)) return null;
-  if (tool === "Skill") return `.claude/skills/${skillName}/SKILL.md`;
-  if (tool === "skill") return `.opencode/skills/${skillName}/SKILL.md`;
-  return null;
-}
-
-/** What loading each of orx's research guides prepares the agent to do. */
-const GUIDE_LABELS: Record<string, [done: () => string, progress: () => string]> = {
-  "orx-agent-delegation": [m.activity_guide_delegation, m.activity_guide_delegation_progress],
-  "orx-compute": [m.activity_guide_compute, m.activity_guide_compute_progress],
-  "orx-create": [m.activity_guide_create, m.activity_guide_create_progress],
-  "orx-customize": [m.activity_guide_customize, m.activity_guide_customize_progress],
-  "orx-experiment-tree": [m.activity_guide_experiment_tree, m.activity_guide_experiment_tree_progress],
-  "orx-feedback": [m.activity_guide_feedback, m.activity_guide_feedback_progress],
-  "orx-figures": [m.activity_guide_figures, m.activity_guide_figures_progress],
-  "orx-git": [m.activity_guide_git, m.activity_guide_git_progress],
-  "orx-instances": [m.activity_guide_instances, m.activity_guide_instances_progress],
-  "orx-lit-review": [m.activity_guide_lit_review, m.activity_guide_lit_review_progress],
-  "orx-logs": [m.activity_guide_logs, m.activity_guide_logs_progress],
-  "orx-paper": [m.activity_guide_paper, m.activity_guide_paper_progress],
-  "orx-project-admin": [m.activity_guide_project, m.activity_guide_project_progress],
-  "orx-python-env": [m.activity_guide_python, m.activity_guide_python_progress],
-  "orx-reports": [m.activity_guide_reports, m.activity_guide_reports_progress],
-  "orx-results": [m.activity_guide_results, m.activity_guide_results_progress],
-};
-
-/** orx's own skills are the research guides it gives every agent, each named
- * for what it prepares the agent to do. */
-function guideFields(skillName: string | null): Partial<Pick<ToolActivity, "guide" | "label" | "progressLabel">> {
-  if (!skillName?.startsWith("orx-")) return {};
-  const labels = GUIDE_LABELS[skillName];
-  return labels
-    ? { guide: true, label: labels[0](), progressLabel: labels[1]() }
-    : { guide: true, progressLabel: m.activity_loading_research_guide() };
-}
-
-type ToolActivityKind = "skill" | "read" | "search" | "edit" | "web" | "agent" | "project" | "run" | "log" | "command";
-
-interface ToolActivity {
-  kind: ToolActivityKind;
-  label: string;
-  progressLabel?: string;
-  /** What an approval card asks to do, when the kind's verb alone says too little. */
-  approvalLabel?: string;
-  searchPattern?: string;
-  filePath?: string;
-  fileRef?: string;
-  labelTarget?: string;
-  litCall?: NonNullable<ReturnType<typeof parseOrxLit>>;
-  /** Every paper an `orx paper` call reads, when it reads more than one or reads them in a loop. */
-  paperIds?: string[];
-  queries?: string[];
-  runIds?: string[];
-  experimentIds?: string[];
-  /** Chat sessions `orx agent spawn` created in this tool call. */
-  spawnedSessionIds?: string[];
-  /** The label naming the experiment of the call's one run, in place of `label` and `progressLabel`. */
-  runLabel?: (experiment: string) => string;
-  runProgressLabel?: (experiment: string) => string;
-  /** A row about the chat itself, such as a compaction, which stays out of the research summary. */
-  aside?: boolean;
-  /** Reads one of orx's research guides. */
-  guide?: boolean;
-  /** The project an `orx project create` call proposed, once the command accepted it. */
-  projectProposal?: ProjectProposal;
-}
-
-type OpenTranscriptFile = (
-  path: string,
-  line: number | undefined,
-  exp: string | undefined,
-  ref: string | undefined,
-  intent: TabOpenIntent,
-) => void;
-type OpenTranscriptTarget = (id: string, intent: TabOpenIntent) => void;
 type OpenSubagent = (
   spawnPartId: string,
   label: string | undefined,
   intent: TabOpenIntent,
 ) => void;
-
-function inputString(input: Record<string, unknown>, ...keys: string[]): string | null {
-  for (const key of keys) {
-    const value = input[key];
-    if (typeof value === "string" && value) return value;
-  }
-  return null;
-}
-
-function arrayInputString(input: Record<string, unknown>, key: string, field: string): string | null {
-  const values = input[key];
-  if (!Array.isArray(values)) return null;
-  for (const value of values) {
-    if (!value || typeof value !== "object" || !(field in value)) continue;
-    const candidate = value[field];
-    if (typeof candidate === "string" && candidate) return candidate;
-  }
-  return null;
-}
-
-function inputStringArray(input: Record<string, unknown>, key: string): string[] {
-  const values = input[key];
-  if (!Array.isArray(values)) return [];
-  const strings: string[] = [];
-  for (let index = 0; index < Math.min(values.length, TOOL_TARGET_INSPECTION_LIMIT); index++) {
-    if (typeof values[index] === "string") strings.push(values[index]);
-    if (strings.length >= TOOL_TARGET_LIMIT) break;
-  }
-  return strings;
-}
-
-function exactInputStringArray(input: Record<string, unknown>, key: string): string[] | null {
-  const values = input[key];
-  if (!Array.isArray(values)) return null;
-  const strings: string[] = [];
-  for (const value of values) {
-    if (typeof value !== "string") return null;
-    strings.push(value);
-  }
-  return strings;
-}
-
-function normalizedTargetIds(...collections: string[][]): string[] {
-  const ids = new Set<string>();
-  const target = new RegExp(`^${RUN_TARGET_PATTERN}$`, "i");
-  let inspected = 0;
-  for (const collection of collections) {
-    for (const value of collection) {
-      if (ids.size >= TOOL_TARGET_LIMIT || inspected++ >= TOOL_TARGET_INSPECTION_LIMIT) return [...ids];
-      if (target.test(value)) ids.add(value.toLowerCase());
-    }
-  }
-  return [...ids];
-}
 
 function cleanToolError(value: string): string {
   return value
@@ -1102,1141 +957,6 @@ function cleanToolError(value: string): string {
     .filter((line) => !/^\s*\[orx-(?:run|experiment):[^\]]+\]\s*$/.test(line))
     .join("\n")
     .trim();
-}
-
-function editChange(input: Record<string, unknown>): { path: string; type: string | null } | null {
-  const changes = input.changes;
-  if (!Array.isArray(changes)) return null;
-  for (const change of changes) {
-    if (!change || typeof change !== "object" || !("path" in change) || typeof change.path !== "string") {
-      continue;
-    }
-    const kind = "kind" in change ? change.kind : null;
-    const type = kind && typeof kind === "object" && "type" in kind && typeof kind.type === "string"
-      ? kind.type
-      : null;
-    return { path: change.path, type };
-  }
-  return null;
-}
-
-/** Codex reports shell commands as `/bin/zsh -lc <script>`. That wrapper is
- * execution plumbing, not useful transcript content. */
-function meaningfulCommand(command: string): string {
-  const trimmed = command.trim();
-  const wrapped = trimmed.match(/^\/bin\/(?:ba|z)?sh\s+-lc\s+([\s\S]+)$/);
-  let body = (wrapped?.[1] ?? trimmed).trim();
-  body = unwrapShellBody(body);
-  return normalizeShellBody(body);
-}
-
-function normalizeShellBody(body: string): string {
-  return stripHeredocBodies(body).replace(/[\t\r ]+/g, " ").trim();
-}
-
-function heredocMarker(line: string): { delimiter: string; stripTabs: boolean } | null {
-  let quote: "\"" | "'" | null = null;
-  let escaped = false;
-  for (let index = 0; index < line.length - 1; index++) {
-    const char = line[index];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (char === "\\" && quote !== "'") {
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      if (char === quote) quote = null;
-      continue;
-    }
-    if (char === "\"" || char === "'") {
-      quote = char;
-      continue;
-    }
-    if (char !== "<" || line[index + 1] !== "<" || line[index + 2] === "<") continue;
-    index += 2;
-    const stripTabs = line[index] === "-";
-    if (stripTabs) index++;
-    while (/\s/.test(line[index] ?? "")) index++;
-    const delimiterQuote = line[index] === "\"" || line[index] === "'" ? line[index++] : null;
-    let delimiter = "";
-    while (index < line.length) {
-      const current = line[index];
-      if (delimiterQuote ? current === delimiterQuote : /\s|[;|&]/.test(current)) break;
-      delimiter += current;
-      index++;
-    }
-    if (delimiter) return { delimiter, stripTabs };
-  }
-  return null;
-}
-
-function stripHeredocBodies(command: string): string {
-  const lines = command.split("\n");
-  const kept: string[] = [];
-  let marker: { delimiter: string; stripTabs: boolean } | null = null;
-  for (const line of lines) {
-    if (marker) {
-      const candidate = marker.stripTabs ? line.replace(/^\t+/, "") : line;
-      if (candidate.trimEnd() === marker.delimiter) marker = null;
-      continue;
-    }
-    kept.push(line);
-    marker = heredocMarker(line);
-  }
-  return kept.join("\n");
-}
-
-function validReadTarget(value: string | undefined): string | null {
-  const target = value?.replace(/[)'\"]+$/, "");
-  if (
-    !target
-    || target === "-"
-    || /^\d+$/.test(target)
-    || /[$`]/.test(target)
-    || containsShellGlob(target)
-  ) return null;
-  return target;
-}
-
-function likelyPathReadTarget(value: string | undefined): string | null {
-  const target = validReadTarget(value);
-  if (!target) return null;
-  const name = baseName(target);
-  if (
-    target.includes("/")
-    || target.startsWith(".")
-    || /\.[A-Za-z0-9][A-Za-z0-9_-]*$/.test(name)
-    || /^(?:Dockerfile|Makefile|README|LICENSE|NOTICE|CHANGELOG)$/i.test(name)
-  ) {
-    return target;
-  }
-  return null;
-}
-
-interface ShellInvocation {
-  name: string;
-  args: string[];
-}
-
-interface GitShowTarget {
-  ref: string;
-  path: string;
-}
-
-function shellInvocation(command: string): ShellInvocation | null {
-  const words = shellWords(command);
-  let index = 0;
-  while (["do", "then", "else", "if", "while", "until"].includes(words[index])) index++;
-  while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index] ?? "")) index++;
-  if (words[index] === "command") {
-    index++;
-    while (words[index]?.startsWith("-")) index++;
-  }
-  if (words[index] === "env") {
-    index++;
-    while (words[index]?.startsWith("-") || /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index] ?? "")) index++;
-  }
-  const executable = words[index];
-  if (!executable) return null;
-  return { name: executable.split("/").pop() ?? executable, args: words.slice(index + 1) };
-}
-
-function commandReadTarget(invocation: ShellInvocation): string | null {
-  const { name, args } = invocation;
-
-  if (name === "sed") {
-    let index = 0;
-    let scriptProvidedByOption = false;
-    while (index < args.length && args[index].startsWith("-")) {
-      const option = args[index++];
-      if (option === "-e" || option === "--expression" || option === "-f" || option === "--file") {
-        scriptProvidedByOption = true;
-        index++;
-      }
-    }
-    if (!scriptProvidedByOption) index++;
-    for (const arg of args.slice(index)) {
-      if (arg.startsWith("-")) continue;
-      const target = likelyPathReadTarget(arg);
-      if (target) return target;
-    }
-    return null;
-  }
-
-  const files: string[] = [];
-  for (let index = 0; index < args.length; index++) {
-    const arg = args[index];
-    if (arg === "--") {
-      files.push(...args.slice(index + 1));
-      break;
-    }
-    if (name !== "cat" && ["-n", "--lines", "-c", "--bytes", "--pid"].includes(arg)) {
-      index++;
-      continue;
-    }
-    if (arg.startsWith("-")) continue;
-    files.push(arg);
-  }
-  return validReadTarget(files[0]);
-}
-
-function commandGitShowTarget(invocation: ShellInvocation | null): GitShowTarget | null {
-  if (invocation?.name !== "git" || invocation.args[0] !== "show") return null;
-  const object = invocation.args.slice(1).find((arg) => !arg.startsWith("-") && arg.includes(":"));
-  if (!object) return null;
-  const separator = object.indexOf(":");
-  const ref = object.slice(0, separator);
-  const path = object.slice(separator + 1);
-  return ref && likelyPathReadTarget(path) ? { ref, path } : null;
-}
-
-function commandSearchPattern(command: string): string | null {
-  const search = command.match(/\b(?:rg|grep)\b(?:\s+-[^\s]+)*\s+(?:"([^"]+)"|'([^']+)'|([^\s]+))/);
-  return search?.[1] ?? search?.[2] ?? search?.[3] ?? null;
-}
-
-function resolvePosixPath(base: string, target: string): string | null {
-  if (/[$`~]/.test(base) || /[$`~]/.test(target)) return null;
-  const absolute = target.startsWith("/") || (!target.startsWith("/") && base.startsWith("/"));
-  const parts = target.startsWith("/") ? [] : base.split("/").filter(Boolean);
-  for (const part of target.split("/")) {
-    if (!part || part === ".") continue;
-    if (part === "..") {
-      if (parts.length > 0 && parts[parts.length - 1] !== "..") parts.pop();
-      else if (!absolute) parts.push(part);
-      continue;
-    }
-    parts.push(part);
-  }
-  const resolved = `${absolute ? "/" : ""}${parts.join("/")}`;
-  return resolved || (absolute ? "/" : null);
-}
-
-function commandFilePath(
-  target: string,
-  segments: ShellCommandSegment[],
-  segmentIndex: number,
-  declaredWorkdir: string | null,
-): string | null {
-  if (target.startsWith("/")) return target;
-  let directory = declaredWorkdir ?? "";
-  for (let index = 0; index < segmentIndex; index++) {
-    const invocation = shellInvocation(segments[index].raw);
-    if (invocation?.name !== "cd") continue;
-    const next = invocation.args.find((arg) => !arg.startsWith("-"));
-    if (!next) return null;
-    const resolved = resolvePosixPath(directory, next);
-    if (!resolved) return null;
-    directory = resolved;
-  }
-  return directory ? resolvePosixPath(directory, target) : target;
-}
-
-const UUID_PATTERN = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
-/** Session ids as `orx agent spawn` prints them, so the spawn card can link to
- * the session it started. The id is only in the output — never the command. */
-const SPAWNED_SESSION_PATTERN = new RegExp(`\\bchat_(${UUID_PATTERN})\\b`, "gi");
-const RUN_TARGET_PATTERN = `(?:${UUID_PATTERN}|[0-9a-f]{8})`;
-
-interface ShellCommandSegment {
-  raw: string;
-  code: string;
-}
-
-function shellCommandSegments(command: string): ShellCommandSegment[] {
-  const segments: ShellCommandSegment[] = [];
-  let raw = "";
-  let code = "";
-  let quote: "\"" | "'" | null = null;
-  let escaped = false;
-  const push = () => {
-    if (raw.trim() || code.trim()) segments.push({ raw: raw.trim(), code: code.trim() });
-    raw = "";
-    code = "";
-  };
-  const scanSubstitution = (start: number): number => {
-    let depth = 1;
-    let nestedQuote: "\"" | "'" | null = null;
-    let nestedEscaped = false;
-    for (let index = start; index < command.length; index++) {
-      const char = command[index];
-      if (nestedEscaped) {
-        nestedEscaped = false;
-        continue;
-      }
-      if (char === "\\" && nestedQuote !== "'") {
-        nestedEscaped = true;
-        continue;
-      }
-      if (nestedQuote) {
-        if (char === nestedQuote) nestedQuote = null;
-        continue;
-      }
-      if (char === "\"" || char === "'") {
-        nestedQuote = char;
-        continue;
-      }
-      if (char === "(") depth++;
-      if (char === ")" && --depth === 0) return index;
-    }
-    return command.length - 1;
-  };
-  const scanBackticks = (start: number): number => {
-    let nestedEscaped = false;
-    for (let index = start; index < command.length; index++) {
-      const char = command[index];
-      if (nestedEscaped) {
-        nestedEscaped = false;
-        continue;
-      }
-      if (char === "\\") {
-        nestedEscaped = true;
-        continue;
-      }
-      if (char === "`") return index;
-    }
-    return command.length - 1;
-  };
-
-  for (let index = 0; index < command.length; index++) {
-    const char = command[index];
-    if (escaped) {
-      raw += char;
-      if (!quote) code += char;
-      escaped = false;
-      continue;
-    }
-    if (char === "\\" && quote !== "'") {
-      raw += char;
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      if (quote === "\"" && char === "$" && command[index + 1] === "(") {
-        const end = scanSubstitution(index + 2);
-        segments.push(...shellCommandSegments(command.slice(index + 2, end)));
-        raw += command.slice(index, end + 1);
-        index = end;
-        continue;
-      }
-      if (quote === "\"" && char === "`") {
-        const end = scanBackticks(index + 1);
-        segments.push(...shellCommandSegments(command.slice(index + 1, end)));
-        raw += command.slice(index, end + 1);
-        index = end;
-        continue;
-      }
-      raw += char;
-      if (char === quote) quote = null;
-      continue;
-    }
-    if (char === "\"" || char === "'") {
-      raw += char;
-      quote = char;
-      continue;
-    }
-    if (char === "`") {
-      const end = scanBackticks(index + 1);
-      segments.push(...shellCommandSegments(command.slice(index + 1, end)));
-      raw += command.slice(index, end + 1);
-      index = end;
-      continue;
-    }
-    if (char === ";" || char === "|" || char === "&" || char === "(" || char === ")" || char === "\n") {
-      push();
-      continue;
-    }
-    raw += char;
-    code += char;
-  }
-  push();
-  return segments;
-}
-
-function orxCommandSegments(command: string, args: string): ShellCommandSegment[] {
-  return shellCommandSegments(command).filter((segment) => orxArgsMatch(segment.raw, args));
-}
-
-function commandInvokesOrx(command: string, args: string): boolean {
-  return orxCommandSegments(command, args).length > 0;
-}
-
-function spawnedSessionIds(output: string | undefined): string[] {
-  if (!output) return [];
-  const ids = new Set<string>();
-  for (const match of output.slice(0, TOOL_OUTPUT_SCAN_LIMIT).matchAll(SPAWNED_SESSION_PATTERN)) {
-    ids.add(match[0].toLowerCase());
-    if (ids.size >= TOOL_TARGET_LIMIT) break;
-  }
-  return [...ids];
-}
-
-function idsFromToolOutput(output: string | undefined, resource: "runs" | "experiments"): string[] {
-  if (!output) return [];
-  const ids = new Set<string>();
-  const boundedOutput = output.slice(0, TOOL_OUTPUT_SCAN_LIMIT);
-  const patterns = resource === "runs"
-    ? [
-      new RegExp(`/runs/(${UUID_PATTERN})`, "gi"),
-      new RegExp(`\\brun(?:_|\\s+)id:\\s*(${UUID_PATTERN})`, "gi"),
-      new RegExp(`^\\s*RUN\\s+(${UUID_PATTERN})\\b`, "gim"),
-      new RegExp(`\\bRun\\s+(${UUID_PATTERN})\\b`, "g"),
-      new RegExp(`={3,}\\s*(${UUID_PATTERN})\\s*={3,}`, "gi"),
-    ]
-    : [
-      new RegExp(`/experiments/(${UUID_PATTERN})`, "gi"),
-      new RegExp(`^\\s*id:\\s*(${UUID_PATTERN})`, "gim"),
-      new RegExp(`={3,}\\s*(${UUID_PATTERN})\\s*={3,}`, "gi"),
-    ];
-  for (const pattern of patterns) {
-    for (const match of boundedOutput.matchAll(pattern)) {
-      ids.add(match[1]);
-      if (ids.size >= TOOL_TARGET_LIMIT) return [...ids];
-    }
-  }
-  const bareIdLine = new RegExp(`^\\s*(${UUID_PATTERN})(?:\\s|$)`, "gim");
-  for (const match of boundedOutput.matchAll(bareIdLine)) {
-    ids.add(match[1]);
-    if (ids.size >= TOOL_TARGET_LIMIT) break;
-  }
-  return [...ids];
-}
-
-function invocationOffsets(command: string, invocations: ShellCommandSegment[]): Array<{ invocation: ShellCommandSegment; offset: number }> {
-  let cursor = 0;
-  return invocations.map((invocation) => {
-    const next = command.indexOf(invocation.raw, cursor);
-    const offset = next === -1 ? command.indexOf(invocation.raw) : next;
-    cursor = Math.max(cursor, offset + invocation.raw.length);
-    return { invocation, offset: Math.max(0, offset) };
-  });
-}
-
-function assignedIdsBefore(command: string, variable: string, before: number, idPattern: string): string[] {
-  const assignment = new RegExp(
-    `(?:^|[\\s;])(?:export\\s+)?${variable}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s;]+))`,
-    "gi",
-  );
-  let resolved = "";
-  for (const match of command.matchAll(assignment)) {
-    if ((match.index ?? 0) >= before) break;
-    resolved = match[1] ?? match[2] ?? match[3] ?? "";
-  }
-  return [...resolved.matchAll(new RegExp(idPattern, "gi"))].map((match) => match[0]);
-}
-
-function loopIdsBefore(command: string, variable: string, before: number, idPattern: string): string[] {
-  const loop = new RegExp(`\\bfor\\s+${variable}\\s+in\\s+([\\s\\S]*?)(?:;|\\n)\\s*do\\b`, "gi");
-  let values = "";
-  for (const match of command.matchAll(loop)) {
-    const start = match.index ?? 0;
-    if (start >= before) break;
-    const headerEnd = start + match[0].length;
-    if (headerEnd <= before && /\bdone\b/.test(command.slice(headerEnd, before))) continue;
-    values = match[1];
-  }
-  if (/\$\(|`/.test(values)) return [];
-  return [...values.matchAll(new RegExp(idPattern, "gi"))].map((match) => match[0]);
-}
-
-function commandRunIds(command: string, output?: string, preservedIds: string[] = [], legacyIds: string[] = []): string[] {
-  const invocations = orxCommandSegments(command, "logs");
-  const ids = new Set<string>();
-  if (invocations.length === 0) {
-    if (!commandInvokesOrx(command, "logs")) return [];
-    const outputIds = preservedIds.length > 0 ? [] : idsFromToolOutput(output, "runs");
-    for (const id of preservedIds.length > 0 ? preservedIds : outputIds.length > 0 ? outputIds : legacyIds) {
-      ids.add(id);
-      if (ids.size >= TOOL_TARGET_LIMIT) break;
-    }
-    return normalizedTargetIds([...ids]);
-  }
-  let hasUnresolvedTarget = false;
-  for (const { invocation, offset } of invocationOffsets(command, invocations)) {
-    const argv = orxArgv(invocation.raw);
-    if (argv?.[0] !== "logs") continue;
-    const words = argv.slice(1);
-    let target: string | null = null;
-    for (let index = 0; index < words.length; index++) {
-      const word = words[index];
-      if (word === "--head") continue;
-      if (word === "--bytes" || word === "--range") {
-        index++;
-        continue;
-      }
-      if (word.startsWith("--bytes=") || word.startsWith("--range=")) continue;
-      target = word;
-      break;
-    }
-    if (!target) {
-      hasUnresolvedTarget = true;
-      continue;
-    }
-    if (new RegExp(`^${RUN_TARGET_PATTERN}$`, "i").test(target)) {
-      ids.add(target);
-      continue;
-    }
-    const variableMatch = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(target);
-    if (!variableMatch) {
-      hasUnresolvedTarget = true;
-      continue;
-    }
-    const variable = variableMatch[1];
-    const assignmentIds = assignedIdsBefore(command, variable, offset, RUN_TARGET_PATTERN);
-    for (const id of assignmentIds) ids.add(id);
-    const loopIds = loopIdsBefore(command, variable, offset, RUN_TARGET_PATTERN);
-    for (const id of loopIds) ids.add(id);
-    if (assignmentIds.length === 0 && loopIds.length === 0) hasUnresolvedTarget = true;
-  }
-  if (ids.size === 0 || hasUnresolvedTarget) {
-    const outputIds = preservedIds.length > 0 ? [] : idsFromToolOutput(output, "runs");
-    const fallback = preservedIds.length > 0 ? preservedIds : outputIds.length > 0 ? outputIds : legacyIds;
-    for (const id of fallback) {
-      ids.add(id);
-      if (ids.size >= TOOL_TARGET_LIMIT) break;
-    }
-  }
-  return normalizedTargetIds([...ids]);
-}
-
-function commandExperimentIds(command: string, output?: string, preservedIds: string[] = [], legacyIds: string[] = []): string[] {
-  const invocations = orxCommandSegments(command, "exp\\s+(?:status|desc)");
-  if (invocations.length === 0) return [];
-  const ids = new Set<string>();
-  let hasUnresolvedTarget = false;
-  for (const { invocation, offset } of invocationOffsets(command, invocations)) {
-    const argv = orxArgv(invocation.raw);
-    const target = argv?.[0] === "exp" && (argv[1] === "status" || argv[1] === "desc")
-      ? argv[2]
-      : null;
-    let resolved = false;
-    if (target && new RegExp(`^${RUN_TARGET_PATTERN}$`, "i").test(target)) {
-      ids.add(target);
-      resolved = true;
-    }
-    const variableMatch = target ? /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(target) : null;
-    if (variableMatch) {
-      const variable = variableMatch[1];
-      const assignmentIds = assignedIdsBefore(command, variable, offset, RUN_TARGET_PATTERN);
-      if (assignmentIds.length > 0) {
-        for (const id of assignmentIds) ids.add(id);
-        resolved = true;
-      }
-      const loopIds = loopIdsBefore(command, variable, offset, RUN_TARGET_PATTERN);
-      for (const id of loopIds) ids.add(id);
-      if (loopIds.length > 0) resolved = true;
-    }
-    if (!resolved) hasUnresolvedTarget = true;
-  }
-  if (ids.size === 0 || hasUnresolvedTarget) {
-    const outputIds = preservedIds.length > 0 ? [] : idsFromToolOutput(output, "experiments");
-    const fallback = preservedIds.length > 0 ? preservedIds : outputIds.length > 0 ? outputIds : legacyIds;
-    for (const id of fallback) {
-      ids.add(id);
-      if (ids.size >= TOOL_TARGET_LIMIT) break;
-    }
-  }
-  return normalizedTargetIds([...ids]);
-}
-
-/** User-facing activity inferred from the structured tool input. Shell calls
- * get a small set of realistic recognizers; unknown commands keep their actual
- * command after the shell wrapper is removed. */
-const toolActivities = new WeakMap<ChatPart, { locale: string; activity: ToolActivity }>();
-
-function toolActivity(part: ChatPart): ToolActivity {
-  const locale = getLocale();
-  const cached = toolActivities.get(part);
-  if (cached?.locale === locale) return cached.activity;
-  const activity = computeToolActivity(part);
-  // Stream updates replace parts; weak keys release labels with their transcript.
-  toolActivities.set(part, { locale, activity });
-  return activity;
-}
-
-function computeToolActivity(part: ChatPart): ToolActivity {
-  const tool = part.tool ?? "tool";
-  const input = part.state?.input ?? {};
-  const argumentsValue = input.arguments;
-  const argumentsInput = argumentsValue && typeof argumentsValue === "object" && !Array.isArray(argumentsValue)
-    ? Object.fromEntries(Object.entries(argumentsValue))
-    : {};
-  const normalizedInput = { ...input, ...argumentsInput };
-  const rawCommand = inputString(normalizedInput, "command", "cmd");
-  const commandArgv = exactInputStringArray(normalizedInput, "commandArgv");
-  const toolOutput = part.state?.output || part.state?.error;
-  const legacyTargetIds = normalizedTargetIds(inputStringArray(normalizedInput, "targetIds"));
-  const resourceRunIds = normalizedTargetIds(inputStringArray(normalizedInput, "runTargetIds"));
-  const resourceExperimentIds = normalizedTargetIds(inputStringArray(normalizedInput, "experimentTargetIds"));
-  const filePath = inputString(normalizedInput, "filePath", "file_path", "notebookPath", "notebook_path", "path");
-  const description = inputString(normalizedInput, "description");
-  if (part.state?.title === "subagent") return { kind: "agent", label: description ?? m.activity_ran_subagent() };
-  const alphaxivTool = [tool, part.state?.title]
-    .map((name) => name?.match(ALPHAXIV_TOOL)?.[1])
-    .find((name) => name != null);
-  if (alphaxivTool) return alphaxivActivity(alphaxivTool.toLowerCase(), normalizedInput);
-  const toolSegments = tool.toLowerCase().split(/(?::|\.|__)+/);
-  const baseTool = toolSegments.at(-1) ?? tool.toLowerCase();
-  if (baseTool === "run" && toolSegments.includes("web")) {
-    const query = arrayInputString(normalizedInput, "search_query", "q");
-    const imageQuery = arrayInputString(normalizedInput, "image_query", "q");
-    const pattern = arrayInputString(normalizedInput, "find", "pattern");
-    if (query) return { kind: "web", label: m.activity_searched_web({ query }) };
-    if (imageQuery) return { kind: "web", label: m.activity_searched_images({ query: imageQuery }) };
-    if (pattern) return { kind: "web", label: m.activity_searched_web_page({ pattern }) };
-    if (Array.isArray(normalizedInput.open)) return { kind: "web", label: m.chat_panel_opened_web_pages() };
-    if (Array.isArray(normalizedInput.weather)) return { kind: "web", label: m.chat_panel_checked_the_weather() };
-    if (Array.isArray(normalizedInput.finance)) return { kind: "web", label: m.chat_panel_checked_market_data() };
-    if (Array.isArray(normalizedInput.sports)) return { kind: "web", label: m.chat_panel_checked_sports_data() };
-    if (Array.isArray(normalizedInput.time)) return { kind: "web", label: m.chat_panel_checked_local_times() };
-    return { kind: "web", label: m.chat_panel_browsed_the_web() };
-  }
-  const normalizedTool = new Map([
-    ["read_file", "read"],
-    ["write_file", "write"],
-    ["edit_file", "edit"],
-    ["exec", "bash"],
-    ["exec_command", "bash"],
-    ["run_command", "bash"],
-    ["agent", "task"],
-    ["collabagenttoolcall", "subagent"],
-    // orx's own compaction marker reads as the agents' automatic one.
-    ["compacted", "contextcompaction"],
-    ["imported", "importedchat"],
-    ["subagentactivity", "subagent"],
-  ]).get(baseTool) ?? baseTool;
-  switch (normalizedTool) {
-    case "shell":
-    case "bash": {
-      const proposed = (proposal: ProjectProposal): ToolActivity => ({
-        kind: "project",
-        label: m.activity_proposed_project({ name: autoDir(proposal.name) }),
-        projectProposal: part.state?.status === "completed" ? proposal : undefined,
-      });
-      if (!rawCommand && !commandArgv?.length) {
-        // ACP agents may name the command only in the call's title.
-        const titled = shellCommandSegments(meaningfulCommand(part.state?.title ?? ""))
-          .map((segment) => projectProposal(orxArgv(segment.raw))).find(Boolean);
-        return titled ? proposed(titled) : { kind: "command", label: m.chat_panel_ran_a_command() };
-      }
-      const command = meaningfulCommand(rawCommand ?? commandArgv?.join(" ") ?? "");
-      const shellSegments = shellCommandSegments(command);
-      let literatureInputs: Array<string | readonly string[]> = shellSegments.map((segment) => segment.raw);
-      if (commandArgv?.length) {
-        const wrapperBody = shellWrapperBody(commandArgv);
-        literatureInputs = wrapperBody === null
-          ? [commandArgv]
-          : shellCommandSegments(normalizeShellBody(wrapperBody)).map((segment) => segment.raw);
-      }
-      const proposal = literatureInputs.map((input) => projectProposal(orxArgv(input))).find(Boolean);
-      if (proposal) return proposed(proposal);
-      const litCalls = literatureInputs.flatMap((input) => parseOrxLit(input) ?? []);
-      const litCall = litCalls[0] ?? null;
-      const hasNonLiteratureOrx = literatureInputs.some((input) => {
-        const argv = orxArgv(input);
-        return argv !== null && argv[0] !== "discover" && argv[0] !== "paper";
-      });
-      if (litCall && !hasNonLiteratureOrx) {
-        const chainedSearches = litCalls.filter((call) => call.kind === "discover");
-        const queries = chainedSearches.length > 1
-          ? chainedSearches.flatMap((call) => call.query ? [call.query] : [])
-          : litCall.kind === "discover" && !litCall.query
-            ? recordedDiscoveryQueries(commandArgv ? shellWrapperBody(commandArgv) ?? command : command, toolOutput ?? "", litCall.strategy)
-            : [];
-        const oneStrategy = new Set(chainedSearches.map((call) => call.strategy)).size <= 1;
-        const discoveryLabel = litCall.kind === "discover" && oneStrategy
-          ? {
-            keyword: m.activity_searched_alphaxiv_full_text(),
-            embedding: m.activity_searched_alphaxiv_semantically(),
-            openalex: m.activity_searched_openalex(),
-            biorxiv: m.activity_searched_biorxiv(),
-            pubmed: m.activity_searched_pubmed(),
-          }[litCall.strategy]
-          : null;
-        const literatureCommand = commandArgv ? shellWrapperBody(commandArgv) ?? command : command;
-        const paperIds = [...new Set([
-          ...litCalls.flatMap((call) => call.kind === "paper" && call.id ? [call.id] : []),
-          ...loopPaperIds(literatureCommand),
-        ])];
-        const searched = discoveryLabel ?? m.activity_searched_literature();
-        const query = litCall.kind === "discover" ? litCall.query ?? (queries.length === 1 ? queries[0] : null) : null;
-        const label = litCall.kind === "paper"
-          ? paperIds.length > 1
-            ? m.activity_read_papers({ count: fmtNumber(paperIds.length) })
-            : paperIds[0] ? m.activity_read_target({ target: ltr(paperIds[0]) }) : m.activity_read_paper()
-          : queries.length > 1
-            ? m.activity_for_queries({ activity: searched, count: fmtNumber(queries.length) })
-            : query ? m.activity_for_query({ activity: searched, query }) : searched;
-        const progressLabel = litCall.kind === "paper"
-          ? m.activity_reading_paper()
-          : litCall.query
-            ? m.activity_searching_literature_for({ query: litCall.query })
-            : m.activity_searching_literature();
-        return { kind: litCall.kind === "paper" ? "read" : "search", label, progressLabel, litCall, queries, paperIds: litCall.kind === "paper" ? paperIds : undefined };
-      }
-
-      if (commandInvokesOrx(command, "agent\\s+spawn")) {
-        return {
-          kind: "agent",
-          label: m.chat_panel_delegated_a_task_to_a_new_agent(),
-          spawnedSessionIds: spawnedSessionIds(toolOutput),
-          litCall: litCall ?? undefined,
-        };
-      }
-      const shellInvocations = shellSegments.map((segment) => shellInvocation(segment.raw));
-      const readsExperimentStatus = commandInvokesOrx(command, "exp\\s+status");
-      const readsExperimentNotes = commandInvokesOrx(command, "exp\\s+desc");
-      const updatesExperimentNotes = orxCommandSegments(command, "exp\\s+desc").some((segment) => {
-        const argv = orxArgv(segment.raw) ?? [];
-        return argv.some(
-          (token) => token === "--set" || token.startsWith("--set=") || token === "--stdin",
-        );
-      });
-      const notesLabel = updatesExperimentNotes ? m.activity_updated_experiment_notes() : m.activity_read_experiment_notes();
-      const combinedLabel = updatesExperimentNotes
-        ? m.activity_checked_status_updated_notes()
-        : m.activity_reviewed_status_notes();
-      if (commandInvokesOrx(command, "logs")) {
-        const runIds = commandRunIds(command, toolOutput, resourceRunIds, legacyTargetIds);
-        const label = runIds.length === 1 ? m.activity_reviewed_run_log() : m.activity_reviewed_run_logs();
-        return {
-          kind: "log",
-          label,
-          progressLabel: m.activity_reading_run_log(),
-          runIds,
-          runLabel: (experiment) => m.activity_read_log_of({ experiment }),
-          runProgressLabel: (experiment) => m.activity_reading_log_of({ experiment }),
-          litCall: litCall ?? undefined,
-        };
-      }
-      const runSegments = orxCommandSegments(command, "exp\\s+run");
-      if (runSegments.length > 0 && runSegments.every((segment) => orxArgv(segment.raw)?.includes("--estimate"))) {
-        return {
-          kind: "run",
-          label: m.activity_estimated_run(),
-          progressLabel: m.activity_estimating_run(),
-          litCall: litCall ?? undefined,
-        };
-      }
-      if (runSegments.length > 0) {
-        return {
-          kind: "run",
-          label: m.chat_panel_started_an_experiment_run(),
-          progressLabel: m.activity_launching_experiment(),
-          runIds: idsFromToolOutput(toolOutput, "runs"),
-          runLabel: (experiment) => m.activity_launched_experiment({ experiment }),
-          litCall: litCall ?? undefined,
-        };
-      }
-      if (commandInvokesOrx(command, "exp\\s+wait")) {
-        return {
-          kind: "run",
-          label: m.chat_panel_waited_for_an_experiment_run(),
-          progressLabel: m.activity_waiting_on_run(),
-          runIds: idsFromToolOutput(toolOutput, "runs"),
-          runLabel: (experiment) => m.activity_waited_on_experiment({ experiment }),
-          litCall: litCall ?? undefined,
-        };
-      }
-      if (commandInvokesOrx(command, "exp\\s+cancel")) {
-        return {
-          kind: "run",
-          label: m.chat_panel_requested_an_experiment_stop(),
-          runIds: idsFromToolOutput(toolOutput, "runs"),
-          runLabel: (experiment) => m.activity_stopped_experiment({ experiment }),
-          litCall: litCall ?? undefined,
-        };
-      }
-      const readsProject = commandInvokesOrx(command, "project\\s+view");
-      if (readsProject && readsExperimentStatus && readsExperimentNotes) {
-        return {
-          kind: "project",
-          label: combinedLabel,
-          experimentIds: commandExperimentIds(command, toolOutput, resourceExperimentIds, legacyTargetIds),
-          litCall: litCall ?? undefined,
-        };
-      }
-      if (readsProject && readsExperimentNotes) {
-        return {
-          kind: "project",
-          label: notesLabel,
-          experimentIds: commandExperimentIds(command, toolOutput, resourceExperimentIds, legacyTargetIds),
-          litCall: litCall ?? undefined,
-        };
-      }
-      if (readsProject && readsExperimentStatus) {
-        return {
-          kind: "project",
-          label: m.chat_panel_checked_experiment_status(),
-          experimentIds: commandExperimentIds(command, toolOutput, resourceExperimentIds, legacyTargetIds),
-          litCall: litCall ?? undefined,
-        };
-      }
-      if (readsProject) {
-        return { kind: "project", label: m.chat_panel_read_project_details(), litCall: litCall ?? undefined };
-      }
-      if (readsExperimentStatus && readsExperimentNotes) {
-        return {
-          kind: "project",
-          label: combinedLabel,
-          experimentIds: commandExperimentIds(command, toolOutput, resourceExperimentIds, legacyTargetIds),
-          litCall: litCall ?? undefined,
-        };
-      }
-      if (readsExperimentStatus) {
-        return {
-          kind: "project",
-          label: m.chat_panel_checked_experiment_status(),
-          experimentIds: commandExperimentIds(command, toolOutput, resourceExperimentIds, legacyTargetIds),
-          litCall: litCall ?? undefined,
-        };
-      }
-      if (readsExperimentNotes) {
-        return {
-          kind: "project",
-          label: notesLabel,
-          experimentIds: commandExperimentIds(command, toolOutput, resourceExperimentIds, legacyTargetIds),
-          litCall: litCall ?? undefined,
-        };
-      }
-      if (commandInvokesOrx(command, "create-experiment")) {
-        return { kind: "project", label: m.activity_created_an_experiment(), progressLabel: m.activity_creating_an_experiment(), litCall: litCall ?? undefined };
-      }
-      if (commandInvokesOrx(command, "runs?")) {
-        return { kind: "project", label: m.chat_panel_listed_project_runs(), litCall: litCall ?? undefined };
-      }
-      if (commandInvokesOrx(command, "projects")) {
-        return { kind: "project", label: m.chat_panel_listed_projects(), litCall: litCall ?? undefined };
-      }
-      if (commandInvokesOrx(command, "compute")) {
-        return { kind: "project", label: m.chat_panel_checked_compute_options(), litCall: litCall ?? undefined };
-      }
-
-      const gitShowTarget = shellInvocations
-        .map(commandGitShowTarget)
-        .find((target) => target != null);
-      if (gitShowTarget) {
-        const skillName = skillNameFromPath(gitShowTarget.path);
-        return {
-          kind: skillName ? "skill" : "read",
-          label: skillName ? m.activity_read_skill({ name: ltr(skillName) }) : m.activity_read_target({ target: ltr(baseName(gitShowTarget.path)) }),
-          ...guideFields(skillName),
-          filePath: gitShowTarget.path,
-          fileRef: gitShowTarget.ref,
-          labelTarget: skillName ? `${skillName} skill` : baseName(gitShowTarget.path),
-        };
-      }
-
-      const readSegmentIndex = shellInvocations.findIndex((invocation) =>
-        invocation != null && ["sed", "cat", "head", "tail"].includes(invocation.name),
-      );
-      const readInvocation = readSegmentIndex >= 0 ? shellInvocations[readSegmentIndex] : null;
-      const readTarget = readInvocation ? commandReadTarget(readInvocation) : null;
-      const readPath = readTarget
-        ? commandFilePath(
-          readTarget,
-          shellSegments,
-          readSegmentIndex,
-          inputString(normalizedInput, "cwd", "workdir"),
-        )
-        : null;
-      if (readTarget && readPath) {
-        const skillName = skillNameFromPath(readPath);
-        return {
-          kind: skillName ? "skill" : "read",
-          label: skillName ? m.activity_read_skill({ name: ltr(skillName) }) : m.activity_read_target({ target: ltr(baseName(readTarget)) }),
-          ...guideFields(skillName),
-          filePath: readPath,
-          labelTarget: skillName ? `${skillName} skill` : baseName(readTarget),
-        };
-      }
-      if (shellInvocations.some((invocation) =>
-        invocation?.name === "find"
-        || invocation?.name === "ls"
-        || (invocation?.name === "rg" && invocation.args.includes("--files")),
-      )) {
-        return { kind: "search", label: m.chat_panel_listed_files() };
-      }
-      const searchSegmentIndex = shellInvocations.findIndex((invocation) =>
-        invocation?.name === "rg" || invocation?.name === "grep",
-      );
-      if (searchSegmentIndex >= 0) {
-        const pattern = commandSearchPattern(shellSegments[searchSegmentIndex].raw);
-        return {
-          kind: "search",
-          label: pattern ? m.activity_searched_code_for({ pattern: ltr(pattern) }) : m.activity_searched_code(),
-          searchPattern: pattern ?? undefined,
-        };
-      }
-      const gitInvocation = shellInvocations.find((invocation) => invocation?.name === "git");
-      const gitAction = gitInvocation?.args[0];
-      if (gitAction === "grep") {
-        const pattern = gitInvocation?.args.slice(1).find((arg) => !arg.startsWith("-"));
-        return {
-          kind: "search",
-          label: pattern ? m.activity_searched_code_for({ pattern: ltr(pattern) }) : m.activity_searched_code(),
-          searchPattern: pattern,
-        };
-      }
-      if (gitAction === "status") return { kind: "command", label: m.chat_panel_checked_git_status() };
-      if (gitAction === "diff") return { kind: "command", label: m.chat_panel_reviewed_code_changes() };
-      if (gitAction === "log") return { kind: "command", label: m.chat_panel_read_git_history() };
-      const packageAction = (action: string) => shellInvocations.some((invocation) => {
-        if (!invocation || !["cargo", "pnpm", "npm", "yarn"].includes(invocation.name)) return false;
-        return invocation.args[0] === action || (invocation.args[0] === "run" && invocation.args[1] === action);
-      });
-      if (packageAction("test")) return { kind: "command", label: m.chat_panel_ran_tests() };
-      if (shellInvocations.some((invocation) => invocation?.name === "tsc") || packageAction("typecheck")) {
-        return { kind: "command", label: m.chat_panel_checked_types() };
-      }
-      if (packageAction("lint")) return { kind: "command", label: m.chat_panel_checked_code_style() };
-      if (packageAction("build")) return { kind: "command", label: m.chat_panel_built_the_project() };
-      return { kind: "command", label: m.activity_ran_command({ command: ltr(command) }) };
-    }
-    case "skill": {
-      const skillName = inputString(normalizedInput, "skill", "name");
-      const filePath = skillName ? nativeOrxSkillPath(tool, skillName) : null;
-      return {
-        kind: "skill",
-        label: skillName ? m.activity_loaded_skill({ name: ltr(skillName) }) : m.activity_loaded_a_skill(),
-        ...guideFields(skillName),
-        filePath: filePath ?? undefined,
-        labelTarget: filePath && skillName ? `${skillName} skill` : undefined,
-      };
-    }
-    case "read": {
-      const target = filePath ? baseName(filePath) : null;
-      const skillName = filePath ? skillNameFromPath(filePath) : null;
-      if (skillName) {
-        return {
-          kind: "skill",
-          label: m.activity_read_skill({ name: ltr(skillName) }),
-          ...guideFields(skillName),
-          filePath: filePath ?? undefined,
-          labelTarget: `${skillName} skill`,
-        };
-      }
-      return target
-        ? { kind: "read", label: m.activity_read_target({ target: ltr(target) }), filePath: filePath ?? undefined, labelTarget: target }
-        : { kind: "read", label: m.chat_panel_read_a_file() };
-    }
-    case "edit":
-    case "write":
-    case "notebookedit": {
-      const change = editChange(normalizedInput);
-      const resolvedPath = filePath ?? change?.path ?? null;
-      const target = resolvedPath ? baseName(resolvedPath) : null;
-      const label = target
-        ? change?.type === "add"
-          ? m.activity_created_target({ target: ltr(target) })
-          : change?.type === "delete"
-            ? m.activity_deleted_target({ target: ltr(target) })
-            : m.activity_edited_target({ target: ltr(target) })
-        : null;
-      return target
-        ? { kind: "edit", label: label ?? m.chat_panel_edited_a_file(), filePath: resolvedPath ?? undefined, labelTarget: target }
-        : { kind: "edit", label: m.chat_panel_edited_a_file() };
-    }
-    case "grep": {
-      const pattern = inputString(normalizedInput, "pattern");
-      return {
-        kind: "search",
-        label: pattern ? m.activity_searched_code_for({ pattern: ltr(pattern) }) : m.activity_searched_code(),
-        searchPattern: pattern ?? undefined,
-      };
-    }
-    case "glob": {
-      const pattern = inputString(normalizedInput, "pattern");
-      return { kind: "search", label: pattern ? m.activity_listed_files_matching({ pattern: ltr(pattern) }) : m.chat_panel_listed_files() };
-    }
-    case "websearch": {
-      const query = inputString(normalizedInput, "query");
-      const url = inputString(normalizedInput, "url");
-      const pattern = inputString(normalizedInput, "pattern");
-      if (query) return { kind: "web", label: m.activity_searched_web({ query }) };
-      if (pattern && url) return { kind: "web", label: m.activity_searched_on_page({ pattern }) };
-      if (url) return { kind: "web", label: m.activity_opened_target({ target: ltr(url) }) };
-      return { kind: "web", label: description ?? m.chat_panel_browsed_the_web() };
-    }
-    case "webfetch": {
-      const url = inputString(normalizedInput, "url");
-      return { kind: "web", label: url ? m.activity_read_target({ target: ltr(url) }) : description ?? m.activity_read_web_page() };
-    }
-    case "task":
-      // Always the task description — the row is the sub-agent's identity;
-      // liveness is the shimmer, and the current step lives in its tab.
-      return { kind: "agent", label: description ?? m.activity_ran_subagent() };
-    case "subagent":
-      return { kind: "agent", label: isParentUpdate(part) ? m.activity_sent_update_to_parent() : description ?? subagentLine(normalizedInput) };
-    case "error":
-      return { kind: "command", label: m.chat_panel_tool_failed() };
-    case "importedchat":
-      return { kind: "project", label: m.activity_imported_chat(), aside: true };
-    case "contextcompaction":
-      return {
-        kind: "command",
-        label: part.state?.status === "error"
-          ? m.activity_compacting_failed()
-          // A row left running (the host died mid-compaction) is not a success.
-          : part.state?.status === "running"
-            ? m.activity_compacting_context()
-            : m.activity_compacted_context(),
-        progressLabel: m.activity_compacting_context(),
-        aside: true,
-      };
-    default: {
-      const detail = description ?? filePath ?? rawCommand ?? part.state?.title ?? "";
-      return { kind: "command", label: detail ? `${tool}: ${detail}` : tool };
-    }
-  }
-}
-
-/** The tool of an alphaXiv MCP call: Claude names it `mcp__alphaxiv__x`, Codex
- * `alphaxiv:x` (`orx_alphaxiv:x` when the user configured their own `alphaxiv`),
- * OpenCode `orx_alphaxiv_x`; ACP agents put such a name, or `Tool: alphaxiv/x`,
- * in the title. Anchored so commands and URLs never match. */
-const ALPHAXIV_TOOL = /^(?:tool: )?(?:mcp__)?(?:orx_)?alphaxiv(?:__|[:/_])([a-z0-9_]+)$/i;
-
-function alphaxivActivity(tool: string, input: Record<string, unknown>): ToolActivity {
-  const row = (kind: ToolActivityKind, label: string, paper?: string, approvalLabel?: string): ToolActivity => ({
-    kind,
-    label,
-    approvalLabel,
-    // Paper arguments may be full titles, which have no page to link.
-    litCall: { kind: "paper", source: "alphaxiv", id: paper && !/\s/.test(paper) ? paper : undefined },
-    // Saving a paper or reading notes on it does not read it.
-    paperIds: [],
-  });
-  const read = (label: string, paper: string | null): ToolActivity => ({
-    ...row("read", label, paper ?? undefined),
-    paperIds: paper && !/\s/.test(paper) ? [paper] : [],
-  });
-  const readPaper = (paper: string | null) =>
-    paper ? m.activity_read_target({ target: ltr(paper) }) : m.activity_read_paper();
-  const forQuery = (activity: string, query: string | null) =>
-    query ? m.activity_for_query({ activity, query }) : activity;
-
-  switch (tool) {
-    case "list_library":
-      return row("read", m.activity_alphaxiv_read_library());
-    case "list_annotated_papers":
-      return row("read", m.activity_alphaxiv_listed_annotated_papers());
-    case "get_paper_notes": {
-      const paper = inputString(input, "paper_id_or_url");
-      const label = paper
-        ? m.activity_alphaxiv_read_notes_on({ paper: ltr(paper) })
-        : m.activity_alphaxiv_read_notes_on_a_paper();
-      return row("read", label, paper ?? undefined);
-    }
-    case "save_papers_to_folder": {
-      const papers = exactInputStringArray(input, "paper_ids_or_urls") ?? [];
-      const only = papers.length === 1 ? papers[0] : undefined;
-      const label = only
-        ? m.activity_alphaxiv_saved_paper({ paper: ltr(only) })
-        : m.activity_alphaxiv_saved_papers({ count: fmtNumber(papers.length) });
-      return row("edit", label, only, alphaxivApprovalLabel(tool, input));
-    }
-    case "create_folder": {
-      const name = inputString(input, "name");
-      return row(
-        "edit",
-        name ? m.activity_alphaxiv_created_folder({ name }) : m.activity_alphaxiv_created_a_folder(),
-        undefined,
-        alphaxivApprovalLabel(tool, input),
-      );
-    }
-    case "answer_pdf_queries": {
-      const paper = inputString(input, "paper");
-      const queries = typeof input.queries === "string" ? [input.queries] : exactInputStringArray(input, "queries") ?? [];
-      const label = queries.length > 1
-        ? m.activity_for_queries({ activity: readPaper(paper), count: fmtNumber(queries.length) })
-        : forQuery(readPaper(paper), queries[0] ?? null);
-      return read(label, paper);
-    }
-    case "get_paper_content": {
-      const paper = inputString(input, "url");
-      return read(readPaper(paper), paper);
-    }
-    case "read_files_from_github_repository": {
-      const repository = inputString(input, "githubUrl")
-        ?.replace(/^https?:\/\/(?:www\.)?github\.com\//i, "")
-        .replace(/(?:\.git)?\/*$/, "");
-      const path = inputString(input, "path")?.replace(/^\/+/, "");
-      const target = repository && path ? `${repository}/${path}` : repository;
-      return row("read", target ? m.activity_read_target({ target: ltr(target) }) : m.activity_alphaxiv_read_github_repository());
-    }
-    case "discover_papers": {
-      const keywords = exactInputStringArray(input, "keywords") ?? [];
-      const query = inputString(input, "question") ?? (keywords.join(", ") || null);
-      return {
-        ...row("search", forQuery(m.activity_searched_alphaxiv(), query)),
-        progressLabel: query ? m.activity_searching_literature_for({ query }) : m.activity_searching_literature(),
-      };
-    }
-    case "find_researchers":
-      return row("search", forQuery(m.activity_alphaxiv_searched_researchers(), inputString(input, "topic", "query")));
-    case "get_researcher":
-    case "resolve_researchers": {
-      const count = Array.isArray(input.people)
-        ? input.people.length
-        : exactInputStringArray(input, "researchers")?.length ?? 0;
-      const only = count === 1
-        ? arrayInputString(input, "people", "name") ?? exactInputStringArray(input, "researchers")?.[0]
-        : null;
-      const label = only
-        ? m.activity_alphaxiv_looked_up_researcher({ name: only })
-        : count > 1
-          ? m.activity_alphaxiv_looked_up_researchers({ count: fmtNumber(count) })
-          : m.activity_alphaxiv_looked_up_some_researchers();
-      return row("search", label);
-    }
-    case "get_researcher_papers": {
-      const researchers = exactInputStringArray(input, "researchers") ?? [];
-      const label = researchers.length === 1
-        ? m.activity_alphaxiv_listed_papers_by({ name: researchers[0] })
-        : researchers.length > 1
-          ? m.activity_alphaxiv_listed_papers_by_researchers({ count: fmtNumber(researchers.length) })
-          : m.activity_alphaxiv_listed_researcher_papers();
-      return row("search", label);
-    }
-    case "get_hot_feed":
-      return row("read", m.activity_alphaxiv_checked_trending_papers());
-    default:
-      return row("command", m.activity_used_alphaxiv());
-  }
-}
-
-/** What an alphaXiv write asks to do, naming its folders once `folders` has them. */
-function alphaxivApprovalLabel(
-  tool: string,
-  input: Record<string, unknown>,
-  folders?: AlphaXivFolder[],
-): string | undefined {
-  const folderName = (key: string) => {
-    const id = inputString(input, key);
-    return id ? folders?.find((folder) => folder.id === id)?.name : undefined;
-  };
-
-  switch (tool) {
-    case "save_papers_to_folder": {
-      const papers = exactInputStringArray(input, "paper_ids_or_urls") ?? [];
-      const folder = folderName("folder_id");
-      if (papers.length === 1) {
-        return folder ? m.activity_alphaxiv_save_a_paper_to({ folder }) : m.activity_alphaxiv_save_a_paper();
-      }
-      const count = fmtNumber(papers.length);
-      return folder ? m.activity_alphaxiv_save_papers_to({ count, folder }) : m.activity_alphaxiv_save_papers({ count });
-    }
-    case "create_folder": {
-      const name = inputString(input, "name");
-      const parent = folderName("parent_folder_id");
-      if (!name) return m.activity_alphaxiv_create_a_folder();
-      return parent ? m.activity_alphaxiv_create_folder_in({ name, parent }) : m.activity_alphaxiv_create_folder({ name });
-    }
-  }
 }
 
 /** The body of an alphaXiv write's approval card: what it writes, with each paper linked by title. */
@@ -2273,377 +993,6 @@ function AlphaXivApproval({ tool, input }: { tool: string; input: Record<string,
       )}
     </>
   );
-}
-
-/** Readable one-liner for a Codex sub-agent spawn/activity row, from the
- * collab item fields the backend put in `state.input`. The model-assigned
- * agent name (`nickname`) is the row's identity when present — matching how
- * Claude rows show the task description — with the generic verb phrasing as
- * the fallback. */
-function subagentLine(input: Record<string, unknown>): string {
-  const nickname = typeof input.nickname === "string" && input.nickname
-    ? input.nickname.replace(/[_-]+/g, " ")
-    : "";
-  // Sentence-cased for label-initial use; the bare snake_case name stays
-  // lowercase when composed mid-sentence ("Sent input to audit experiments").
-  const nickLabel = nickname && nickname.charAt(0).toUpperCase() + nickname.slice(1);
-  if (nickLabel) return nickLabel;
-  switch (typeof input.tool === "string" ? input.tool : "") {
-    case "spawnAgent":
-      return m.activity_spawned_agent();
-    case "sendInput":
-      return m.activity_sent_input_to_agent();
-    case "resumeAgent":
-      return m.activity_resumed_agent();
-    case "wait":
-      return m.activity_waiting_on_agent();
-    case "closeAgent":
-      return m.activity_closed_agent();
-  }
-  switch (typeof input.kind === "string" ? input.kind : "") {
-    case "started":
-      return m.activity_subagent_started();
-    case "interacted":
-      // Codex's cross-agent interaction marker — in practice, the agent
-      // handing its report up when it finishes.
-      return m.activity_agent_reported_back();
-    case "interrupted":
-      return m.activity_subagent_interrupted();
-  }
-  return m.activity_subagent();
-}
-
-function ToolActivityIcon({ activity, className = "" }: { activity: ToolActivity; className?: string }) {
-  const props = { size: 16, strokeWidth: 1.75, className: "tool-kind-icon" };
-  let icon: React.ReactNode = <SquareTerminal {...props} />;
-  if (activity.litCall) {
-    icon = <LitSourceLogo source={activity.litCall.source} size={16} className="tool-kind-icon" />;
-  } else {
-    switch (activity.kind) {
-      case "skill":
-        icon = <BookMarked {...props} />;
-        break;
-      case "read":
-        icon = /\.(?:md|markdown|txt|rst|tex|csv|tsv|log)$/i.test(activity.filePath ?? "")
-          ? <FileText {...props} />
-          : <FileCode {...props} />;
-        break;
-      case "project":
-      case "run":
-        icon = <FlaskConical {...props} />;
-        break;
-      case "log":
-        icon = <ScrollText {...props} />;
-        break;
-      case "search":
-        icon = <Search {...props} />;
-        break;
-      case "edit":
-        icon = <Pencil {...props} />;
-        break;
-      case "web":
-        icon = <Globe {...props} />;
-        break;
-      case "agent":
-        icon = <Users {...props} />;
-        break;
-      case "command":
-        break;
-    }
-  }
-  return <span className={`flex h-6 shrink-0 items-center ${className}`}>{icon}</span>;
-}
-
-function ToolTargetOverflow({
-  items,
-  onOpen,
-  onSelect,
-  targetType,
-}: {
-  items: Array<{ id: string; label: string }>;
-  onOpen?: OpenTranscriptTarget;
-  onSelect?: (id: string) => void;
-  targetType: string;
-}) {
-  const [open, setOpen] = useState(false);
-  const revealRef = useRef<HTMLSpanElement>(null);
-  const focusReveal = useRef(false);
-
-  useEffect(() => {
-    if (!open || !focusReveal.current) return;
-    focusReveal.current = false;
-    revealRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
-  }, [open]);
-
-  return (
-    <span className="tool-target-overflow inline">
-      {open && (
-        <span className="tool-target-reveal" ref={revealRef}>
-          {items.map((item, index) => (
-            <span key={item.id}>
-              {index > 0 && ", "}
-              {onOpen || onSelect ? (
-                <button
-                  className="tool-target"
-                  {...(onOpen
-                    ? tabOpenGestureHandlers<HTMLButtonElement>(
-                      (intent) => onOpen(item.id, intent),
-                      { stopPropagation: true },
-                    )
-                    : {
-                      onClick: (event: ReactMouseEvent<HTMLButtonElement>) => {
-                        event.stopPropagation();
-                        onSelect?.(item.id);
-                      },
-                    })}
-                >
-                  {item.label}
-                </button>
-              ) : (
-                <span>{item.label}</span>
-              )}
-            </span>
-          ))}
-        </span>
-      )}
-      {open && ", "}
-      <button
-        className="tool-target-more"
-        aria-expanded={open}
-        aria-label={open ? m.a11y_hide_additional({ target: targetType }) : m.a11y_show_more_targets({ count: fmtNumber(items.length), target: targetType })}
-        onClick={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          focusReveal.current = !open && event.detail === 0;
-          setOpen((value) => !value);
-        }}
-      >
-        {open ? m.common_show_less() : m.common_more_count({ count: fmtNumber(items.length) })}
-      </button>
-    </span>
-  );
-}
-
-function ToolActivityLabel({
-  activity,
-  onOpenFile,
-  onOpenRun,
-  onOpenSpawnedSession,
-  runExperimentName,
-  onOpenExperiment,
-  experimentName,
-}: {
-  activity: ToolActivity;
-  onOpenFile?: OpenTranscriptFile;
-  onOpenRun?: OpenTranscriptTarget;
-  onOpenSpawnedSession?: (sessionId: string) => void;
-  runExperimentName?: (runId: string) => string;
-  onOpenExperiment?: OpenTranscriptTarget;
-  experimentName?: (experimentId: string) => string;
-}) {
-  if (activity.searchPattern) {
-    return activity.label;
-  }
-  if (activity.litCall?.kind === "paper" && activity.litCall.id) {
-    return (
-      <a
-        className="tool-target"
-        href={paperUrl(activity.litCall.source, activity.litCall.id)}
-        target="_blank"
-        rel="noopener noreferrer"
-      >
-        {activity.label}
-        <ArrowUpRight className="inline ms-1 opacity-50" size={14} aria-hidden="true" />
-      </a>
-    );
-  }
-  if (activity.filePath && activity.labelTarget && onOpenFile) {
-    const filePath = activity.filePath;
-    return (
-      <span
-        className="tool-target"
-        role="button"
-        tabIndex={0}
-        {...tabOpenGestureHandlers<HTMLSpanElement>((intent) =>
-          onOpenFile(filePath, undefined, undefined, activity.fileRef, intent),
-          { stopPropagation: true })}
-      >
-        {activity.label}
-      </span>
-    );
-  }
-  if (activity.spawnedSessionIds?.length && onOpenSpawnedSession) {
-    const sessionIds = activity.spawnedSessionIds;
-    const visibleSessionIds = sessionIds.slice(0, 3);
-    const hiddenSessions = sessionIds.slice(visibleSessionIds.length).map((sessionId, index) => ({
-      id: sessionId,
-      label: m.chat_agent_number({ number: fmtNumber(visibleSessionIds.length + index + 1) }),
-    }));
-    return (
-      <>
-        {activity.label}{" — "}
-        {visibleSessionIds.map((sessionId, index) => (
-          <span key={sessionId}>
-            {index > 0 && ", "}
-            <button
-              className="tool-target"
-              title={m.chat_panel_open_the_session_this_agent_spawned()}
-              onClick={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                onOpenSpawnedSession(sessionId);
-              }}
-            >
-              {m.chat_agent_number({ number: fmtNumber(index + 1) })}
-            </button>
-          </span>
-        ))}
-        {hiddenSessions.length > 0 && (
-          <>
-            {", "}
-            <ToolTargetOverflow
-              items={hiddenSessions}
-              onSelect={onOpenSpawnedSession}
-              targetType={m.chat_agent_sessions()}
-            />
-          </>
-        )}
-      </>
-    );
-  }
-  const onlyRunId = activity.runIds?.length === 1 ? activity.runIds[0] : null;
-  const onlyRunName = onlyRunId && runExperimentName?.(onlyRunId);
-  if (activity.runLabel && onlyRunId && onlyRunName) {
-    const label = activity.runLabel(autoDir(onlyRunName));
-    return onOpenRun ? (
-      <button
-        type="button"
-        className="tool-target text-start"
-        title={m.a11y_open_logs_for_run({ run: ltr(onlyRunId) })}
-        {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpenRun(onlyRunId, intent), { stopPropagation: true })}
-      >
-        {label}
-      </button>
-    ) : label;
-  }
-  if (activity.runIds?.length) {
-    const runIds = runExperimentName
-      ? activity.runIds.filter((runId) => Boolean(runExperimentName(runId)))
-      : activity.runIds;
-    if (runIds.length === 0) return activity.label;
-    const visibleRunIds = runIds.slice(0, 3);
-    const hiddenRuns = runIds.slice(visibleRunIds.length).map((runId) => ({
-      id: runId,
-      label: runExperimentName?.(runId) || m.tree_experiment(),
-    }));
-    return (
-      <>
-        {activity.label}{" — "}
-        {visibleRunIds.map((runId, index) => (
-          <span key={runId}>
-            {index > 0 && ", "}
-            {onOpenRun ? (
-              <button
-                className="tool-target"
-                title={m.a11y_open_logs_for_run({ run: ltr(runId) })}
-                {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
-                  onOpenRun(runId, intent),
-                  { stopPropagation: true })}
-              >
-                {runExperimentName?.(runId) || m.tree_experiment()}
-              </button>
-            ) : (
-              <span>{runExperimentName?.(runId) || m.tree_experiment()}</span>
-            )}
-          </span>
-        ))}
-        {hiddenRuns.length > 0 && (
-          <>
-            {", "}
-            <ToolTargetOverflow items={hiddenRuns} onOpen={onOpenRun} targetType={m.chat_run_logs()} />
-          </>
-        )}
-      </>
-    );
-  }
-  if (activity.experimentIds?.length) {
-    const experimentIds = experimentName
-      ? activity.experimentIds.filter((experimentId) => Boolean(experimentName(experimentId)))
-      : activity.experimentIds;
-    if (experimentIds.length === 0) return activity.label;
-    const visibleExperimentIds = experimentIds.slice(0, 3);
-    const hiddenExperiments = experimentIds.slice(visibleExperimentIds.length).map((experimentId) => ({
-      id: experimentId,
-      label: experimentName?.(experimentId) || m.tree_experiment(),
-    }));
-    return (
-      <>
-        {activity.label}{" — "}{visibleExperimentIds.map((experimentId, index) => (
-          <span key={experimentId}>
-            {index > 0 && ", "}
-            {onOpenExperiment ? (
-              <button
-                className="tool-target"
-                title={m.a11y_open_experiment({ name: experimentName?.(experimentId) || ltr(experimentId) })}
-                {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
-                  onOpenExperiment(experimentId, intent),
-                  { stopPropagation: true })}
-              >
-                {experimentName?.(experimentId) || m.tree_experiment()}
-              </button>
-            ) : (
-              <span>{experimentName?.(experimentId) || m.tree_experiment()}</span>
-            )}
-          </span>
-        ))}
-        {hiddenExperiments.length > 0 && (
-          <>
-            {", "}
-            <ToolTargetOverflow items={hiddenExperiments} onOpen={onOpenExperiment} targetType={m.chat_experiments()} />
-          </>
-        )}
-      </>
-    );
-  }
-  return activity.label;
-}
-
-function activityInProgress(activity: ToolActivity): ToolActivity {
-  const label = activity.progressLabel ?? {
-    skill: m.activity_loading(),
-    read: m.activity_reading(),
-    search: m.activity_searching(),
-    edit: m.activity_editing(),
-    project: m.activity_checking_experiments(),
-    run: m.activity_running(),
-    log: m.activity_reading_run_log(),
-    web: m.activity_browsing(),
-    agent: m.activity_delegating(),
-    command: m.activity_running(),
-  }[activity.kind];
-  return { ...activity, label, runLabel: activity.runProgressLabel };
-}
-
-function permissionActivityLabel(tool: string | undefined, input: Record<string, unknown> | undefined): string {
-  const activity = toolActivity({
-    id: "permission-preview",
-    type: "tool",
-    tool,
-    state: { status: "running", input },
-  });
-  if (activity.approvalLabel) return activity.approvalLabel;
-  return {
-    skill: m.activity_load(),
-    read: m.activity_read(),
-    search: m.activity_search(),
-    edit: m.activity_edit(),
-    project: m.activity_review(),
-    run: m.activity_run(),
-    log: m.activity_read(),
-    web: m.activity_browse(),
-    agent: m.activity_delegate(),
-    command: m.activity_run(),
-  }[activity.kind];
 }
 
 function emptyToolInput(input: unknown): boolean {
@@ -2713,15 +1062,6 @@ function useDelayedToolShimmer(active: boolean): boolean {
   return active && visible;
 }
 
-function groupIconActivity(activities: ToolActivity[]): ToolActivity {
-  const priority: ToolActivityKind[] = ["skill", "read", "search", "edit", "project", "run", "log", "web", "command", "agent"];
-  for (const kind of priority) {
-    const activity = activities.find((candidate) => candidate.kind === kind);
-    if (activity) return activity;
-  }
-  return activities[0] ?? { kind: "command", label: m.chat_panel_used_tools() };
-}
-
 interface SquashedToolPart {
   part: ChatPart;
   activity: ToolActivity;
@@ -2733,8 +1073,9 @@ function squashableToolPartKey(part: ChatPart, activity: ToolActivity): string |
   return JSON.stringify([
     activity.kind,
     activity.label,
-    activity.filePath ?? null,
-    activity.fileRef ?? null,
+    activity.files ?? null,
+    activity.more ?? null,
+    activity.command ?? null,
     activity.litCall?.kind === "paper" ? activity.litCall.id ?? null : null,
     activity.runIds ?? null,
     activity.experimentIds ?? null,
@@ -2890,6 +1231,20 @@ function TurnStatusRow({
   );
 }
 
+/** A tool run that failed to draw, one row per call as it reads without the work log's recognizers. */
+function PlainToolRun({ parts }: { parts: ChatPart[] }) {
+  return parts.map((part) => {
+    const activity = plainActivity(part);
+    const label = part.state?.status === "running" ? activity.progressLabel ?? activity.label : activity.label;
+    return (
+      <div key={part.id} data-part-id={part.id} className="tool-row flex items-start gap-2 min-w-0 py-1 px-1">
+        <ToolActivityIcon activity={activity} className="text-muted" />
+        <span className={`${TOOL_LINE_CLASS_NAME} text-subtext`} title={activity.command}>{label}</span>
+      </div>
+    );
+  });
+}
+
 /** Routine successful calls are static activity rows. Only failures disclose
  * raw command/output, because that detail is useful for diagnosis. */
 function ToolRow({
@@ -2957,7 +1312,7 @@ function ToolRow({
       ) : (
         <ToolActivityIcon activity={activity} className="text-muted" />
       )}
-      <span className={`${TOOL_LINE_CLASS_NAME} ${failed ? "text-accent-red group-hover/detail:text-text" : quiet ? "text-muted" : "text-subtext"}`}>
+      <span className={`${TOOL_LINE_CLASS_NAME} ${failed ? "text-accent-red group-hover/detail:text-text" : quiet ? "text-muted" : "text-subtext"}`} title={activity.command}>
         <ToolActivityLabel
           activity={activity}
           onOpenFile={onOpenFile}
@@ -3028,6 +1383,7 @@ function ToolGroup({
   pendingTail,
   streaming = false,
   summary,
+  summaryMore,
   quiet = false,
   onOpenSubagent,
   onOpenFile,
@@ -3045,6 +1401,8 @@ function ToolGroup({
   streaming?: boolean;
   /** What the closed group says it did; "Used tools" when absent. */
   summary?: string;
+  /** The other steps a summary that names one step leaves out. */
+  summaryMore?: string[];
   quiet?: boolean;
   onOpenSubagent?: OpenSubagent;
   onOpenFile?: OpenTranscriptFile;
@@ -3086,7 +1444,7 @@ function ToolGroup({
     (emptyToolInput(tailPart.state?.input) || (rawPending?.kind === "command" && !inputString(tailPart.state?.input ?? {}, "command", "cmd")));
   const pendingActivity = useDwelledActivity(rawPending, tailUnclassified);
   const shimmering = useDelayedToolShimmer(pendingActivity != null);
-  const iconActivity = pendingActivity ?? groupIconActivity(activities);
+  const iconActivity = pendingActivity ?? leadActivity(activities) ?? { kind: "command", label: m.chat_panel_used_tools() };
   const summaryLabel = pendingActivity
     ? pendingActivity.label
     : summary ?? m.chat_panel_used_tools();
@@ -3109,7 +1467,7 @@ function ToolGroup({
             <ToolActivityIcon activity={pendingActivity} className={shimmering ? "tool-running-shimmer-icon" : "text-muted"} />
             <span
               className={`${shimmering ? "tool-running-shimmer" : ""} min-w-0 line-clamp-2 break-words`}
-              title={summaryLabel}
+              title={pendingActivity.command ?? summaryLabel}
             >
               <ToolActivityLabel
                 activity={pendingActivity}
@@ -3152,7 +1510,7 @@ function ToolGroup({
         {pendingActivity ? (
           <span
             className={`tool-group-label min-w-0 line-clamp-2 break-words ${shimmering ? "tool-running-shimmer" : ""}`}
-            title={summaryLabel}
+            title={pendingActivity.command ?? summaryLabel}
           >
             <ToolActivityLabel
               activity={pendingActivity}
@@ -3174,6 +1532,7 @@ function ToolGroup({
             {summaryLabel}
           </button>
         )}
+        {!pendingActivity && summaryMore?.length ? <MoreSteps steps={summaryMore} className="h-6 items-center" /> : null}
         <button
           type="button"
           className="tool-group-chevron-button inline-flex h-6 shrink-0 items-center justify-center p-px cursor-pointer rounded-sm"
@@ -3237,7 +1596,7 @@ function toolFacet(part: ChatPart, activity: ToolActivity): ToolFacet {
     case "skill":
       return "guides";
     case "edit":
-      return reportPath(activity) ? "reports" : "code";
+      return reportPaths(activity).length > 0 ? "reports" : "code";
     case "read":
     case "search":
     case "command":
@@ -3247,10 +1606,10 @@ function toolFacet(part: ChatPart, activity: ToolActivity): ToolFacet {
   }
 }
 
-/** A Markdown file the agent wrote to the artifacts directory. */
-function reportPath(activity: ToolActivity): string | null {
-  const path = activity.kind === "edit" ? activity.filePath : undefined;
-  return path && /(?:^|[\\/])artifacts[\\/].+\.md$/i.test(path) ? path : null;
+/** The Markdown files the agent wrote to the artifacts directory. */
+function reportPaths(activity: ToolActivity): string[] {
+  if (activity.kind !== "edit") return [];
+  return (activity.files ?? []).flatMap((file) => /(?:^|[\\/])artifacts[\\/].+\.md$/i.test(file.path) ? [file.path] : []);
 }
 
 /** The papers a call finished reading, which the shelf shows in place of its row. */
@@ -3275,42 +1634,11 @@ function knownRunIds(activity: ToolActivity, runExperimentName?: (runId: string)
   return (activity.runIds ?? []).filter((runId) => !runExperimentName || Boolean(runExperimentName(runId)));
 }
 
-/** One line for a stretch of code work: the file it touched, else how much it did. */
-function codeSummary(activities: ToolActivity[]): string {
-  const files = new Map<string, { read: boolean; edited: boolean }>();
-  let commands = 0;
-  for (const activity of activities) {
-    if ((activity.kind === "read" || activity.kind === "edit") && activity.labelTarget) {
-      const file = files.get(activity.labelTarget) ?? { read: false, edited: false };
-      if (activity.kind === "read") file.read = true;
-      else file.edited = true;
-      files.set(activity.labelTarget, file);
-    } else {
-      commands++;
-    }
-  }
-
-  if (files.size === 1) {
-    const [[name, { read, edited }]] = [...files];
-    const target = ltr(name);
-    if (commands > 0) {
-      const [one, other] = edited
-        ? [m.activity_worked_on_and_ran_one, m.activity_worked_on_and_ran_other]
-        : [m.activity_read_and_ran_one, m.activity_read_and_ran_other];
-      return pluralMessage(commands, one, other)({ target, count: fmtNumber(commands) });
-    }
-    if (read && edited) return m.activity_read_and_edited({ target });
-    return edited ? m.activity_edited_target({ target }) : m.activity_read_target({ target });
-  }
-  if (files.size === 0) return pluralMessage(commands, m.activity_ran_commands_one, m.activity_ran_commands_other)({ count: fmtNumber(commands) });
-  return m.activity_worked_on_files({ count: fmtNumber(files.size) });
-}
-
 function reportTitle(parts: ChatPart[], path: string): { title: string; lines: number | null } {
   for (const part of [...parts].reverse()) {
     const input = part.state?.input ?? {};
     const content = typeof input.content === "string" ? input.content : null;
-    if (!content || toolActivity(part).filePath !== path) continue;
+    if (!content || !toolActivity(part).files?.some((file) => file.path === path)) continue;
     const heading = /^#\s+(.+)$/m.exec(content)?.[1]?.trim();
     return { title: heading || baseName(path), lines: content.replace(/\n$/, "").split("\n").length };
   }
@@ -3375,7 +1703,8 @@ function ResearchToolRun({ parts, pendingTail, discovered, ...props }: ToolGroup
         const cards = new Map<string, ChatPart[]>();
         const rows: ChatPart[] = [];
         for (const part of facetParts) {
-          const runIds = part.state?.status === "error" ? [] : knownRunIds(toolActivity(part), props.runExperimentName);
+          // A card names one decision, so a call that made others stays a row that lists them.
+          const runIds = part.state?.status === "error" || toolActivity(part).more ? [] : knownRunIds(toolActivity(part), props.runExperimentName);
           for (const runId of runIds) cards.set(runId, [...(cards.get(runId) ?? []), part]);
           if (runIds.length === 0) rows.push(part);
         }
@@ -3417,9 +1746,12 @@ function ResearchToolRun({ parts, pendingTail, discovered, ...props }: ToolGroup
         const reports = new Set<string>();
         const rows: ChatPart[] = [];
         for (const part of facetParts) {
-          const path = reportPath(toolActivity(part));
-          if (path && part.state?.status === "completed") reports.add(path);
-          else rows.push(part);
+          const activity = toolActivity(part);
+          const paths = reportPaths(activity);
+          const completed = part.state?.status === "completed";
+          if (completed) for (const path of paths) reports.add(path);
+          // Cards stand in for the row only when they cover everything it did.
+          if (!completed || paths.length < (activity.files?.length ?? 0) || activity.more) rows.push(part);
         }
         return (
           <Fragment key={`reports-${facetParts[0].id}`}>
@@ -3429,7 +1761,7 @@ function ResearchToolRun({ parts, pendingTail, discovered, ...props }: ToolGroup
                 key={path}
                 path={path}
                 {...reportTitle(facetParts, path)}
-                partIds={facetParts.filter((part) => toolActivity(part).filePath === path).map((part) => part.id)}
+                partIds={facetParts.filter((part) => toolActivity(part).files?.some((file) => file.path === path)).map((part) => part.id)}
                 onOpen={props.onOpenFile && ((target, intent) => props.onOpenFile?.(target, undefined, undefined, undefined, intent))}
               />
             ))}
@@ -3439,7 +1771,7 @@ function ResearchToolRun({ parts, pendingTail, discovered, ...props }: ToolGroup
       case "code":
         return group(facetParts, { quiet: true, summary: codeSummary(activities) });
       case "other":
-        return group(facetParts);
+        return group(facetParts, mixedSummary(activities));
     }
   });
 }
@@ -4130,8 +2462,7 @@ function turnReceipt(parts: ChatPart[], figures: number, runExperimentName?: (ru
     searches += literatureSearches(activity);
     if (literatureSearches(activity) > 0) searchSource ??= activity.litCall?.source ?? null;
     if (part.state?.status !== "error") for (const runId of knownRunIds(activity, runExperimentName)) runs.add(runId);
-    const report = reportPath(activity);
-    if (report && part.state?.status === "completed") reports.add(report);
+    if (part.state?.status === "completed") for (const report of reportPaths(activity)) reports.add(report);
   }
 
   const icon = (Icon: typeof FlaskConical) => <Icon size={16} strokeWidth={1.75} aria-hidden="true" className="shrink-0 text-muted" />;
@@ -4403,23 +2734,24 @@ function renderParts(
   const flushTools = () => {
     if (toolRun.length === 0) return;
     rendered.push(
-      <ResearchToolRun
-        key={`tg-${toolRun[0].id}`}
-        parts={toolRun}
-        discovered={discovered}
-        expansionState={expansionState}
-        revealNonce={revealNonce}
-        revealPartId={revealPartId}
-        pendingTail={toolRun.some((part) => part.id === pendingTailToolId)}
-        streaming={predictTextTail}
-        onOpenSubagent={onOpenSubagent}
-        onOpenFile={onOpenFile}
-        onOpenRun={onOpenRun}
-        onOpenSpawnedSession={onOpenSpawnedSession}
-        runExperimentName={runExperimentName}
-        onOpenExperiment={onOpenExperiment}
-        experimentName={experimentName}
-      />,
+      <Boundary key={`tg-${toolRun[0].id}`} name="work log" rev={toolRun.at(-1)} fallback={<PlainToolRun parts={toolRun} />}>
+        <ResearchToolRun
+          parts={toolRun}
+          discovered={discovered}
+          expansionState={expansionState}
+          revealNonce={revealNonce}
+          revealPartId={revealPartId}
+          pendingTail={toolRun.some((part) => part.id === pendingTailToolId)}
+          streaming={predictTextTail}
+          onOpenSubagent={onOpenSubagent}
+          onOpenFile={onOpenFile}
+          onOpenRun={onOpenRun}
+          onOpenSpawnedSession={onOpenSpawnedSession}
+          runExperimentName={runExperimentName}
+          onOpenExperiment={onOpenExperiment}
+          experimentName={experimentName}
+        />
+      </Boundary>,
     );
     toolRun = [];
   };

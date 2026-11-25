@@ -76,7 +76,7 @@ test("alphaXiv rows name the paper, folder, query or researcher from the call", 
 });
 
 test("commands and URLs that mention alphaXiv keep their own rows", () => {
-  assert.equal(label(call("mcp__other__list_library", {})), "mcp__other__list_library");
+  assert.equal(label(call("mcp__other__list_library", {})), plain(m.activity_used_tool_from({ tool: "list_library", server: "other" })));
   const curl = call("bash", { command: "curl https://alphaxiv.org/abs/1" }, { title: "curl https://alphaxiv.org/abs/1" });
   assert.notEqual(label(curl), plain(m.activity_used_alphaxiv()));
   assert.doesNotMatch(label(curl), /alphaXiv/);
