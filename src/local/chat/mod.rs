@@ -7325,8 +7325,8 @@ impl ChatHost {
                         .any(|m| m.text.trim_start().starts_with('/'))
             })
             .map(|message| delegation::message_ref(&message.id));
-        // A replayed turn already carries the note, so only a fresh turn takes it.
-        let copilot_ended = prepared_input.is_none() && store.take_copilot_mode(&session.id)?;
+        // A replayed turn already carries the note; the mode is cleared only with the turn that does.
+        let copilot_ended = prepared_input.is_none() && store.in_copilot_mode(&session.id)?;
         let mut turn_text = prepared_input.unwrap_or_else(|| {
             let mut expanded = contextualize_messages(messages, |text| {
                 if orx.is_empty() {
@@ -7484,6 +7484,9 @@ impl ChatHost {
                 ctx.continuation = continuation;
                 let admitted = Store::append_chat_turn(&tx, stored_user.as_ref(), &turn)?;
                 if matches!(admitted, ChatTurnAdmission::Inserted) {
+                    if copilot_ended {
+                        Store::clear_copilot_mode(&tx, session_id)?;
+                    }
                     if let Some(previous) = previous_flag_turn {
                         Store::reattach_flag_wakes(
                             &tx,
