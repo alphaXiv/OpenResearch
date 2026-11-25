@@ -698,9 +698,10 @@ pub fn upsert_preserving_children(parts: &mut Vec<WirePart>, mut part: WirePart)
             }
             if let (Some(incoming), Some(previous)) = (part.state.as_mut(), existing.state.as_ref())
             {
-                if let (Some(incoming_input), Some(previous_input)) =
-                    (incoming.input.as_mut(), previous.input.as_ref())
-                {
+                if let (Some(incoming_input), Some(previous_input)) = (
+                    incoming.input.as_mut().and_then(Value::as_object_mut),
+                    previous.input.as_ref(),
+                ) {
                     for key in [
                         "runTargetIds",
                         "runTargetIdsAuthoritative",
@@ -708,9 +709,9 @@ pub fn upsert_preserving_children(parts: &mut Vec<WirePart>, mut part: WirePart)
                         "experimentTargetIdsAuthoritative",
                         "targetIds",
                     ] {
-                        if incoming_input.get(key).is_none() {
+                        if !incoming_input.contains_key(key) {
                             if let Some(value) = previous_input.get(key) {
-                                incoming_input[key] = value.clone();
+                                incoming_input.insert(key.into(), value.clone());
                             }
                         }
                     }
@@ -13008,6 +13009,36 @@ mod cap_tests {
         let input = parts[0].state.as_ref().unwrap().input.as_ref().unwrap();
         assert_eq!(input["runTargetIds"], json!([target]));
         assert_eq!(input["runTargetIdsAuthoritative"], true);
+    }
+
+    #[test]
+    fn tool_upsert_accepts_string_input_after_targets() {
+        let part = |input: Value| WirePart {
+            id: "status".into(),
+            kind: "tool".into(),
+            text: None,
+            tool: Some("shell".into()),
+            state: Some(WireToolState {
+                status: "running".into(),
+                input: Some(input),
+                output: None,
+                error: None,
+                title: None,
+            }),
+            prompt: None,
+            phase: None,
+            children: Vec::new(),
+            orx: None,
+        };
+        let mut parts = vec![part(json!({
+            "command": "orx exp status $id",
+            "experimentTargetIds": ["11111111-1111-1111-1111-111111111111"]
+        }))];
+
+        upsert_preserving_children(&mut parts, part(json!("{\"command\":\"orx exp")));
+
+        let input = parts[0].state.as_ref().unwrap().input.as_ref().unwrap();
+        assert_eq!(input, &json!("{\"command\":\"orx exp"));
     }
 
     #[test]
