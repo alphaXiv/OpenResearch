@@ -3,7 +3,7 @@ use std::process::Command;
 
 /// Variables that would lead a launched `orx` or agent to the developer's own
 /// state, credentials or session: `config::REDIRECT_VARS` and `PROVIDER_VARS`.
-const CLEARED: [&str; 52] = [
+const CLEARED: [&str; 53] = [
     "ORX_DATA_DIR",
     "ORX_CACHE_DIR",
     "OPENCODE_CONFIG",
@@ -42,6 +42,7 @@ const CLEARED: [&str; 52] = [
     "OPENCODE_PASSWORD",
     "HF_TOKEN",
     "HF_ENDPOINT",
+    "ORX_HF_NAMESPACE",
     "MODAL_PROFILE",
     "MODAL_TOKEN_ID",
     "MODAL_TOKEN_SECRET",

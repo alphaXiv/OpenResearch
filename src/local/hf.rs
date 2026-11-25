@@ -8,7 +8,7 @@ use crate::error::{anyhow, Result};
 use crate::jobs::huggingface as hf;
 use crate::store::LaunchSpec;
 
-/// Requires `--flavor`; the namespace is the token's account.
+/// Requires `--flavor`; the namespace is the chosen one (`ORX_HF_NAMESPACE`), else the token's account.
 pub async fn launch_spec(
     args: &crate::ExpRunArgs,
     _source: &SourceSnapshot,
@@ -27,7 +27,7 @@ pub async fn launch_spec(
         Some(t) => hf::parse_timeout(t)?,
         None => 4 * 3600,
     };
-    let namespace = hf::whoami(&hf::resolve_token()?).await?;
+    let namespace = hf::jobs_namespace(&hf::resolve_token()?).await?;
     let image = args
         .image
         .clone()

@@ -18,6 +18,12 @@ pub(super) struct HfSettings {
     /// Whether the token can create or read the bucket staging uploads each run's source to.
     source_staging: Option<bool>,
     source_staging_error: Option<String>,
+    /// Where jobs launch; the account itself unless a namespace was chosen.
+    namespace: Option<String>,
+    /// `"env"` or `"syncedEnv"` for a chosen namespace, `None` for the account.
+    namespace_source: Option<&'static str>,
+    namespace_error: Option<String>,
+    orgs: Vec<crate::jobs::huggingface::OrgSummary>,
 }
 
 /// Never the full token: first 3 chars + ellipsis + last 4.
@@ -48,8 +54,14 @@ pub(super) async fn hf_token_status() -> HfSettings {
             jobs_write: None,
             source_staging: None,
             source_staging_error: None,
+            namespace: None,
+            namespace_source: None,
+            namespace_error: None,
+            orgs: Vec::new(),
         };
     };
+    let saved = huggingface::saved_namespace();
+    let namespace_source = saved.as_ref().map(|(_, source)| *source);
     let source = match source {
         TokenSource::Env => "env",
         TokenSource::OpenresearchEnv => "openresearchEnv",
@@ -57,15 +69,20 @@ pub(super) async fn hf_token_status() -> HfSettings {
     };
     match huggingface::whoami_details(&token).await {
         Ok(details) => {
-            let (source_staging, source_staging_error) =
-                match huggingface::can_stage_source(&token, &details.name).await {
+            let org_names: Vec<String> = details.orgs.iter().map(|org| org.name.clone()).collect();
+            let picked = huggingface::pick_namespace(&details.name, &org_names, saved);
+            let (namespace, namespace_error) = match picked {
+                Ok(namespace) => (Some(namespace), None),
+                Err(error) => (None, Some(error.to_string())),
+            };
+            let (source_staging, source_staging_error) = match &namespace {
+                None => (None, None),
+                Some(namespace) => match huggingface::can_stage_source(&token, namespace).await {
                     Ok(true) => (Some(true), None),
-                    Ok(false) => (
-                        Some(false),
-                        Some(huggingface::staging_forbidden(&details.name)),
-                    ),
+                    Ok(false) => (Some(false), Some(huggingface::staging_forbidden(namespace))),
                     Err(error) => (None, Some(error.to_string())),
-                };
+                },
+            };
             HfSettings {
                 configured: true,
                 source: Some(source),
@@ -76,6 +93,10 @@ pub(super) async fn hf_token_status() -> HfSettings {
                 jobs_write: details.jobs_write,
                 source_staging,
                 source_staging_error,
+                namespace,
+                namespace_source,
+                namespace_error,
+                orgs: details.orgs,
             }
         }
         Err(error) => {
@@ -97,6 +118,10 @@ pub(super) async fn hf_token_status() -> HfSettings {
                 jobs_write: None,
                 source_staging: None,
                 source_staging_error: None,
+                namespace: None,
+                namespace_source,
+                namespace_error: None,
+                orgs: Vec::new(),
             }
         }
     }
@@ -181,6 +206,52 @@ pub(super) async fn set_hf_token(Json(req): Json<SetHfTokenReq>) -> ApiResult {
         .map_err(|e| anyhow!("env write task failed: {e}"))??;
     // Freshly re-resolved: if HF_TOKEN is set in this process env, env still
     // wins over the file — source says "env" and the UI explains it.
+    Ok(Json(json!(hf_token_status().await)))
+}
+
+#[derive(Deserialize)]
+pub(super) struct SetHfNamespaceReq {
+    /// An organization of the token's account; empty or absent launches in the account itself.
+    namespace: Option<String>,
+}
+
+pub(super) async fn set_hf_namespace(Json(req): Json<SetHfNamespaceReq>) -> ApiResult {
+    use crate::jobs::huggingface;
+    if matches!(huggingface::saved_namespace(), Some((_, "env"))) {
+        return Err(bad_request(format!(
+            "{} is set in the process environment. Remove it there to choose where Hugging Face \
+             Jobs launch here.",
+            huggingface::NAMESPACE
+        )));
+    }
+    let namespace = req
+        .namespace
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty());
+    if let Some(namespace) = &namespace {
+        let token = huggingface::resolve_token().map_err(bad_request)?;
+        let details = huggingface::whoami_details(&token)
+            .await
+            .map_err(bad_request)?;
+        let orgs: Vec<String> = details.orgs.into_iter().map(|org| org.name).collect();
+        if *namespace != details.name && !orgs.contains(namespace) {
+            let choices = std::iter::once(details.name.as_str())
+                .chain(orgs.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(bad_request(format!(
+                "The token's account {} isn't {namespace} or a member of it, so Hugging Face Jobs \
+                 can't launch there. Choose one of: {choices}.",
+                details.name
+            )));
+        }
+    }
+    tokio::task::spawn_blocking(move || match namespace {
+        Some(namespace) => crate::config::write_synced_env_var(huggingface::NAMESPACE, &namespace),
+        None => crate::config::remove_synced_env_var(huggingface::NAMESPACE),
+    })
+    .await
+    .map_err(|e| anyhow!("env write task failed: {e}"))??;
     Ok(Json(json!(hf_token_status().await)))
 }
 
@@ -2017,7 +2088,17 @@ pub(crate) async fn configure(backend: &str, body: Value) -> Result<Value> {
             .map_err(ApiError::from),
         "ray" => set_ray_settings(Json(serde_json::from_value(body)?)).await,
         "k8s" => set_k8s_settings(Json(serde_json::from_value(body)?)).await,
-        "hf" => set_hf_token(Json(serde_json::from_value(body)?)).await,
+        "hf" => {
+            if let Some(namespace) = body.get("namespace") {
+                let namespace = namespace.as_str().map(str::to_string);
+                cli_result(set_hf_namespace(Json(SetHfNamespaceReq { namespace })).await)?;
+            }
+            if body.get("token").is_some() {
+                set_hf_token(Json(serde_json::from_value(body)?)).await
+            } else {
+                Ok(Json(json!(hf_token_status().await)))
+            }
+        }
         "modal" => set_modal_token(Json(serde_json::from_value(body)?)).await,
         "tinker" => set_tinker_key(Json(serde_json::from_value(body)?)).await,
         _ => {

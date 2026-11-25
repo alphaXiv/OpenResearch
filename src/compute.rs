@@ -440,7 +440,7 @@ backend_adapter!(
             return Ok(not_ready("Hugging Face Jobs requires --flavor."));
         }
         let token = crate::jobs::huggingface::resolve_token()?;
-        crate::jobs::huggingface::whoami(&token).await?;
+        crate::jobs::huggingface::jobs_namespace(&token).await?;
         ready()
     },
     prepare | args,

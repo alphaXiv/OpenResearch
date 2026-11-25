@@ -252,6 +252,53 @@ pub async fn whoami(token: &str) -> Result<String> {
     Ok(who(token).await?.name)
 }
 
+/// The account or organization jobs launch in and are billed to, when the user chose one.
+pub const NAMESPACE: &str = "ORX_HF_NAMESPACE";
+
+/// The chosen namespace and where it came from: a non-empty process value, then the synced env.
+pub fn saved_namespace() -> Option<(String, &'static str)> {
+    let present = |v: String| Some(v.trim().to_string()).filter(|v| !v.is_empty());
+    std::env::var(NAMESPACE)
+        .ok()
+        .and_then(present)
+        .map(|v| (v, "env"))
+        .or_else(|| {
+            crate::config::synced_env_var(NAMESPACE)
+                .and_then(present)
+                .map(|v| (v, "syncedEnv"))
+        })
+}
+
+/// The chosen namespace when the token's account is it or a member of it; the account otherwise.
+pub fn pick_namespace(
+    account: &str,
+    orgs: &[String],
+    saved: Option<(String, &'static str)>,
+) -> Result<String> {
+    match saved {
+        None => Ok(account.to_string()),
+        Some((namespace, _)) if namespace == account || orgs.contains(&namespace) => Ok(namespace),
+        Some((namespace, source)) => Err(anyhow!(
+            "orx is set to launch Hugging Face Jobs in {namespace} ({NAMESPACE}, from {}), but the \
+             token's account {account} isn't {namespace} or a member of it. Choose another \
+             namespace with `orx compute configure hf --namespace <name>` or `--clear namespace`, \
+             or use a token of a member of {namespace}.",
+            if source == "env" {
+                "the environment"
+            } else {
+                "Settings → Environment"
+            }
+        )),
+    }
+}
+
+/// Where this token's jobs launch: one whoami call, checked against the chosen namespace.
+pub async fn jobs_namespace(token: &str) -> Result<String> {
+    let who = who(token).await?;
+    let orgs: Vec<String> = who.orgs.into_iter().map(|org| org.name).collect();
+    pick_namespace(&who.name, &orgs, saved_namespace())
+}
+
 /// After a 404 for job `job_id` in `namespace`: `None` when the token's account is `namespace`
 /// or a member of it, so the job is gone; otherwise why the 404 proves nothing.
 pub(crate) fn unseen(who: &WhoAmI, namespace: &str, job_id: &str) -> Option<String> {
@@ -272,6 +319,17 @@ pub struct WhoamiDetails {
     pub name: String,
     /// Can this token submit jobs? `None` = shape didn't say.
     pub jobs_write: Option<bool>,
+    pub orgs: Vec<OrgSummary>,
+}
+
+/// An organization the token's account belongs to, as whoami-v2 describes it.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrgSummary {
+    pub name: String,
+    pub plan: Option<String>,
+    pub can_pay: Option<bool>,
+    pub role: Option<String>,
 }
 
 pub async fn whoami_details(token: &str) -> Result<WhoamiDetails> {
@@ -314,7 +372,24 @@ pub async fn whoami_details(token: &str) -> Result<WhoamiDetails> {
         }
         _ => None,
     };
-    Ok(WhoamiDetails { name, jobs_write })
+    let orgs = body["orgs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|org| {
+            Some(OrgSummary {
+                name: org["name"].as_str()?.to_string(),
+                plan: org["plan"].as_str().map(str::to_string),
+                can_pay: org["canPay"].as_bool(),
+                role: org["roleInOrg"].as_str().map(str::to_string),
+            })
+        })
+        .collect();
+    Ok(WhoamiDetails {
+        name,
+        jobs_write,
+        orgs,
+    })
 }
 
 /// The private bucket `sync_job_volume` stages each run's source into.
@@ -801,6 +876,32 @@ pub async fn find_run(token: &str, namespace: &str, run: &str) -> Result<Vec<Job
 #[cfg(test)]
 mod settings_tests {
     use super::*;
+
+    #[test]
+    fn jobs_launch_in_the_account_unless_a_member_namespace_is_chosen() {
+        let orgs = vec!["pbai".to_string(), "ibm".to_string()];
+        assert_eq!(pick_namespace("ada", &orgs, None).unwrap(), "ada");
+        assert_eq!(
+            pick_namespace("ada", &orgs, Some(("pbai".into(), "syncedEnv"))).unwrap(),
+            "pbai"
+        );
+        assert_eq!(
+            pick_namespace("ada", &orgs, Some(("ada".into(), "env"))).unwrap(),
+            "ada"
+        );
+        let refused = pick_namespace("ada", &orgs, Some(("acme".into(), "syncedEnv")))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("acme") && refused.contains("ada"),
+            "{refused}"
+        );
+        assert!(refused.contains("Settings → Environment"), "{refused}");
+        let from_env = pick_namespace("ada", &orgs, Some(("acme".into(), "env")))
+            .unwrap_err()
+            .to_string();
+        assert!(from_env.contains("the environment"), "{from_env}");
+    }
 
     #[tokio::test]
     async fn invalid_token_retains_http_status() {

@@ -542,6 +542,17 @@ export const mutSaveHfToken = mutations.define({
   refetchOnSuccess: false,
 });
 
+export const mutSaveHfNamespace = mutations.define({
+  id: "settings/hf/namespace",
+  mutate: (ws: Workspace, namespace: string | null) => ws.api.saveHfNamespace(namespace),
+  optimistic({ args: [ws], onSuccess }) {
+    onSuccess((saved) => ws.setScopedQueryData(ws.queries.getHfSettingsQuery().queryKey, saved));
+  },
+  describe: "save where Hugging Face Jobs launch",
+  describeResult: null,
+  refetchOnSuccess: false,
+});
+
 /** Changes the machine's default, which every project without its own follows. */
 export const mutSetComputeDefault = mutations.define({
   id: "settings/compute-default",

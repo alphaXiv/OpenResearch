@@ -49,6 +49,7 @@ import {
   mutRetryEngineHost,
   mutSaveAcpHarness,
   mutSaveHfToken,
+  mutSaveHfNamespace,
   mutSaveK8sSettings,
   mutSaveModalToken,
   mutSaveRaySettings,
@@ -3484,7 +3485,21 @@ function HfSection({ remote }: { remote: boolean }) {
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [namespaceSaving, setNamespaceSaving] = useState(false);
   const login = useCommandRun();
+
+  async function chooseNamespace(id: string) {
+    if (!settings?.username || namespaceSaving) return;
+    setNamespaceSaving(true);
+    setError(null);
+    try {
+      await mutSaveHfNamespace.runAsHeadlessPromise(workspace, id === settings.username ? null : id, {});
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setNamespaceSaving(false);
+    }
+  }
 
   async function refresh() {
     if (saving || refreshing || (!settings && !loadError)) return;
@@ -3531,6 +3546,26 @@ function HfSection({ remote }: { remote: boolean }) {
                 {settings.username}
               </dd>
             </div>}
+            {settings.username && settings.orgs.length > 0 && <div className="flex items-center justify-between gap-4">
+              <dt className="font-medium text-subtext">{m.settings_hf_namespace()}</dt>
+              <dd className="m-0 min-w-0">
+                <OptionPicker
+                  choices={[
+                    { id: settings.username, label: m.settings_hf_namespace_personal({ name: settings.username }) },
+                    ...settings.orgs.map((org) => ({
+                      id: org.name,
+                      label: org.plan ? m.settings_hf_namespace_org_plan({ name: org.name, plan: org.plan }) : org.name,
+                    })),
+                  ]}
+                  value={settings.namespace ?? settings.username}
+                  variant="field"
+                  floating
+                  dropDown
+                  disabled={settings.namespaceSource === "env" || namespaceSaving || saving}
+                  onSelect={(id) => void chooseNamespace(id)}
+                />
+              </dd>
+            </div>}
             {(settings.validationStatus === "missing" || settings.validationStatus === "invalid" ||
               (settings.validationStatus === "valid" && (settings.jobsWrite !== null || settings.sourceStaging === false))) && (
                 <div className="flex items-center justify-between gap-4">
@@ -3541,6 +3576,10 @@ function HfSection({ remote }: { remote: boolean }) {
           </dl>
           {settings.validationStatus === "unreachable" && settings.validationError && (
             <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{settings.validationError}</p>
+          )}
+          {settings.namespaceError && <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{settings.namespaceError}</p>}
+          {settings.namespaceSource === "env" && (
+            <p className={SETTINGS_NOTE_CLASS_NAME}>{m.settings_hf_namespace_env_override()}</p>
           )}
           {settings.sourceStaging === null && settings.sourceStagingError && (
             <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{settings.sourceStagingError}</p>
