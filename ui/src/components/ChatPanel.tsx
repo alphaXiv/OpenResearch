@@ -6923,7 +6923,10 @@ export function ChatPanel({
     ? pendingClientTurn.current
     : composerStashes.get(stashKey)?.pendingClientTurn)?.options;
   // Another agent picked during a turn waits here for the message that takes the chat over.
-  const pendingAgent = openSession && sessionOverride.harness !== undefined ? sessionOverride as ModelSelection : null;
+  const pendingAgent = openSession && sessionOverride.harness !== undefined
+    && (sessionOverride.harness !== openSession.harness || (sessionOverride.profile ?? null) !== (openSession.profile ?? null))
+    ? sessionOverride as ModelSelection
+    : null;
   const rawSelection: ModelSelection | null = pendingAgent ?? (openSession
     ? {
       harness: openSession.harness,

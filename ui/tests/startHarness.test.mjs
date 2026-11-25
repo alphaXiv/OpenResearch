@@ -153,6 +153,24 @@ test("permissions picked for the pending agent wait for the takeover", async () 
   assert.equal(sent.body.agent.permissionMode, "ask");
 });
 
+test("permissions picked after a model on the chat's own agent are saved at once", async () => {
+  const asking = { ...codex, options: { ...codex.options, permissionModes: [{ id: "auto", label: "Auto" }, { id: "ask", label: "Ask" }] } };
+  const chat = await renderChat("/projects/p/tasks/s", {
+    harnesses: [asking],
+    routes: { "PATCH /api/chat/sessions/s": (init) => ({ session: session("s", JSON.parse(init.body)) }) },
+  });
+  await composer().pick("GPT-6 Astra");
+  const settings = [...document.querySelectorAll('[data-onboarding="model-picker"] button')].find((button) => button.getAttribute("aria-label")?.startsWith(m.model_picker_permissions()));
+  for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+    await act(async () => settings.dispatchEvent(new (type.startsWith("pointer") ? PointerEvent : MouseEvent)(type, { bubbles: true, button: 0, pointerType: "mouse" })));
+  }
+  await settle();
+  await act(async () => [...document.querySelectorAll('[role="menuitemradio"]')].find((item) => item.textContent.includes("Ask")).click());
+  await settle();
+  const saved = chat.requests.filter(({ request, body }) => request === "PATCH /api/chat/sessions/s" && body.permissionMode).map(({ body }) => body.permissionMode);
+  assert.deepEqual(saved, ["ask"]);
+});
+
 test("a remote too old to take over says to stop the turn instead", async () => {
   const chat = await renderChat("/projects/p/tasks/s", { sessions: [session("s", { busy: true })], harnesses: [codex, claude], remote: true });
   await composer().pick("Opus 5.5", "Claude Code");
