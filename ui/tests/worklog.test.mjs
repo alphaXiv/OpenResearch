@@ -131,8 +131,9 @@ test("orx's own tools for other chats read by what they did, under every harness
   assert.equal(row(call("ToolSearch", { query: "select:Monitor" })).label, words(m.activity_loaded_tools({ names: "Monitor" })));
 });
 
-async function renderTurn(parts, onOpenFile) {
+async function renderTurn(parts, onOpenFile, props = {}) {
   const { container } = await render(createElement(Message, {
+    ...props,
     message: { id: "msg-1", role: "assistant", parts, createdAt: 0, completedAt: 60_000 },
     activePermissionId: null,
     forkDisabled: false,
@@ -240,4 +241,22 @@ test("a work log that fails to draw shows each call as it was typed", async (t) 
   const rows = [...container.querySelectorAll(".tool-row")].map((element) => plain(element.textContent));
   assert.deepEqual(rows, [words(m.activity_ran_command({ command: "uv run train.py --steps 600" })), "Write: /repo/artifacts/report.md"]);
   assert.ok(plain(container.textContent).includes("Done."));
+});
+
+test("a row that fails to draw reads as its plain words, and the rows beside it still link", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const experiment = "c4425968-59e7-41f0-8a7b-2a6b2f2b8c1e";
+  const container = await renderTurn([
+    { id: "text-1", type: "text", text: "Checking.", phase: "commentary" },
+    bash(`orx exp status ${experiment}`),
+    bash("cd /repo && sed -n 1,80p train.py"),
+    { id: "text-2", type: "text", text: "Done.", phase: "final_answer" },
+  ], () => {}, { experimentName: () => { throw new Error("unreadable"); }, onOpenExperiment: () => {} });
+
+  const rows = [...container.querySelectorAll(".tool-row")];
+  const status = rows.find((element) => plain(element.textContent) === words(m.chat_panel_checked_experiment_status()));
+  assert.ok(status, rows.map((element) => plain(element.textContent)).join(" | "));
+  assert.equal(status.querySelector("button"), null);
+  const read = rows.find((element) => plain(element.textContent) === words(m.activity_read_target({ target: "train.py" })));
+  assert.ok(read?.querySelector(".tool-target"), rows.map((element) => plain(element.textContent)).join(" | "));
 });

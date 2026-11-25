@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type R
 import { paperUrl } from "../components/LitSourceLogo";
 import { autoDir, fmtNumber, ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
+import { Boundary } from "../components/ui/Boundary";
 import { Tooltip } from "../components/ui/Tooltip";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import type { ActivityFile, ToolActivity } from "./activity";
@@ -124,7 +125,16 @@ export function MoreSteps({ steps, className = "ms-1.5" }: { steps: string[]; cl
   );
 }
 
-export function ToolActivityLabel({
+/** A label that fails to draw reads as its plain words, and the rows around it draw as usual. */
+export function ToolActivityLabel(props: Parameters<typeof RichLabel>[0]) {
+  return (
+    <Boundary name="work log row" rev={props.activity} fallback={props.activity.label}>
+      <RichLabel {...props} />
+    </Boundary>
+  );
+}
+
+function RichLabel({
   activity,
   onOpenFile,
   onOpenRun,
