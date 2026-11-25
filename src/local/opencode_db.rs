@@ -173,6 +173,50 @@ pub(super) fn has_session(path: &Path, id: &str) -> Result<bool> {
     }
 }
 
+const CREDENTIAL_COLUMNS: &str =
+    "id, integration_id, label, value, connector_id, method_id, active, time_created, time_updated";
+
+/// Copies the user's OpenCode sign-ins into orx's database, where OpenCode 2 keeps them. A row takes
+/// whichever side was updated last, so a token either side refreshed survives; a provider orx
+/// already has its own sign-in for is left alone. Returns how many rows changed.
+pub fn copy_credentials(user: &Path, orx: &Path) -> Result<usize> {
+    let columns: Vec<&str> = CREDENTIAL_COLUMNS.split(", ").collect();
+    if !user.is_file() || !has_columns(&open_readonly(user)?, "credential", &columns)? {
+        return Ok(0);
+    }
+    let mut connection = Connection::open_with_flags(orx, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    if !has_columns(&connection, "credential", &columns)? {
+        return Ok(0);
+    }
+    connection.execute(
+        "ATTACH DATABASE ?1 AS user",
+        [user.to_string_lossy().as_ref()],
+    )?;
+    let transaction = connection.transaction()?;
+    let updated = transaction.execute(
+        &format!(
+            "UPDATE main.credential AS mine SET ({CREDENTIAL_COLUMNS}) =
+               (SELECT {CREDENTIAL_COLUMNS} FROM user.credential AS theirs WHERE theirs.id = mine.id)
+             WHERE EXISTS (SELECT 1 FROM user.credential AS theirs
+                           WHERE theirs.id = mine.id AND theirs.time_updated > mine.time_updated)"
+        ),
+        [],
+    )?;
+    let inserted = transaction.execute(
+        &format!(
+            "INSERT INTO main.credential ({CREDENTIAL_COLUMNS})
+             SELECT {CREDENTIAL_COLUMNS} FROM user.credential AS theirs
+             WHERE NOT EXISTS (SELECT 1 FROM main.credential AS mine
+                               WHERE mine.id = theirs.id
+                                  OR mine.integration_id IS theirs.integration_id)"
+        ),
+        [],
+    )?;
+    transaction.commit()?;
+    Ok(updated + inserted)
+}
+
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(suffix);
@@ -1156,6 +1200,77 @@ mod tests {
         assert!(!DatabaseLease::acquire(&path, 2)
             .unwrap()
             .requires_migration());
+    }
+
+    #[test]
+    fn user_sign_ins_reach_orx_without_overwriting_its_own() {
+        let (user_dir, orx_dir) = (Fixture::new(), Fixture::new());
+        let (user, orx) = (user_dir.path(), orx_dir.path());
+        let table = "CREATE TABLE credential (id TEXT PRIMARY KEY, integration_id TEXT, label TEXT NOT NULL,
+            value TEXT NOT NULL, connector_id TEXT, method_id TEXT, active INTEGER,
+            time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL);";
+        let row = |id: &str, integration: &str, value: &str, updated: i64| {
+            format!("INSERT INTO credential VALUES ('{id}', '{integration}', 'Default', '{value}', NULL, NULL, 1, 1, {updated});")
+        };
+        Connection::open(&user)
+            .unwrap()
+            .execute_batch(&format!(
+                "{table}{}{}{}",
+                row("zen", "opencode", "user-zen", 5),
+                row("copilot", "github-copilot", "user-new", 9),
+                row("own", "anthropic", "user-anthropic", 9),
+            ))
+            .unwrap();
+        // orx has never seen Zen, holds an older Copilot copy, and has its own Anthropic sign-in.
+        Connection::open(&orx)
+            .unwrap()
+            .execute_batch(&format!(
+                "{table}{}{}",
+                row("copilot", "github-copilot", "orx-old", 3),
+                row("mine", "anthropic", "orx-anthropic", 1),
+            ))
+            .unwrap();
+        assert_eq!(copy_credentials(&user, &orx).unwrap(), 2);
+        let values = |path: &Path| -> Vec<(String, String)> {
+            let connection = Connection::open(path).unwrap();
+            let mut query = connection
+                .prepare("SELECT id, value FROM credential ORDER BY id")
+                .unwrap();
+            query
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        let pairs = |items: &[(&str, &str)]| -> Vec<(String, String)> {
+            items
+                .iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect()
+        };
+        assert_eq!(
+            values(&orx),
+            pairs(&[
+                ("copilot", "user-new"),
+                ("mine", "orx-anthropic"),
+                ("zen", "user-zen")
+            ])
+        );
+        // A token orx refreshed since is not rolled back, and the user's database is untouched.
+        Connection::open(&orx)
+            .unwrap()
+            .execute_batch(
+                "UPDATE credential SET value = 'orx-refreshed', time_updated = 7 WHERE id = 'zen';",
+            )
+            .unwrap();
+        assert_eq!(copy_credentials(&user, &orx).unwrap(), 0);
+        assert_eq!(values(&orx)[2], ("zen".into(), "orx-refreshed".into()));
+        assert_eq!(values(&user)[2], ("zen".into(), "user-zen".into()));
+        // A user without OpenCode 2's sign-ins has nothing to copy.
+        assert_eq!(
+            copy_credentials(&user_dir.0.path().join("none.db"), &orx).unwrap(),
+            0
+        );
     }
 
     #[test]
