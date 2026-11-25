@@ -12,7 +12,7 @@ for (const size of ["clientHeight", "clientWidth", "offsetHeight", "offsetWidth"
 const DAY = 24 * 60 * 60 * 1000;
 const chat = (id, age) => ({
   id, projectId: "p", harness: "codex", title: `Chat ${id}`, model: null, serviceTier: null, permissionMode: null, planMode: false,
-  autonomy: "ask", reasoningLevel: null, archived: false, busy: false, createdAt: Date.now() - age, updatedAt: Date.now() - age,
+  reasoningLevel: null, archived: false, busy: false, createdAt: Date.now() - age, updatedAt: Date.now() - age,
 });
 
 function serve(chats, projectAge) {

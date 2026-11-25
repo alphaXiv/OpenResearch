@@ -78,7 +78,7 @@ test("a run that reports in chunks is almost done past its midpoint, and late on
 });
 
 test("a flag waiting on the user opens the choice while one the agent handles keeps its state", () => {
-  const waiting = model(run({ monitor: summary({ tone: "flag", sentence: flagged.sentence, bindings: { loss: "NaN" }, flag: { id: "f1", state: "waiting", mode: "copilot" } }) }), { monitor: flagged });
+  const waiting = model(run({ monitor: summary({ tone: "flag", sentence: flagged.sentence, bindings: { loss: "NaN" }, flag: { id: "f1", state: "waiting" } }) }), { monitor: flagged });
   assert.equal(waiting.tone, "flag");
   assert.equal(waiting.text, "Loss is **NaN**.");
   assert.ok(waiting.needsChoice);
@@ -165,12 +165,12 @@ test("lost contact speaks in the contact notice's words and freezes the bar", ()
 
 test("a chat's sidebar row warns while a flag is unsettled, else shows the flask while a run runs", () => {
   const row = (sessionId, value) => ({ sessionId, run: value, experimentName: null });
-  const flag = (state, mode) => run({ monitor: summary({ flag: { id: "f", state, mode } }) });
+  const flag = (state) => run({ monitor: summary({ flag: { id: "f", state } }) });
   assert.equal(sessionRunMark([row("a", run())], "a"), "running");
   assert.equal(sessionRunMark([row("a", run({ status: "done" }))], "a"), null);
-  assert.equal(sessionRunMark([row("a", run()), row("a", flag("agent_looking", "agentic"))], "a"), "flagged");
-  assert.equal(sessionRunMark([row("a", flag("waiting", "copilot"))], "a"), "waiting");
-  assert.equal(sessionRunMark([row("b", flag("waiting", "copilot"))], "a"), null);
+  assert.equal(sessionRunMark([row("a", run()), row("a", flag("agent_looking"))], "a"), "flagged");
+  assert.equal(sessionRunMark([row("a", flag("waiting"))], "a"), "waiting");
+  assert.equal(sessionRunMark([row("b", flag("waiting"))], "a"), null);
 });
 
 test("a summary newer than the monitor speaks alone, never beside the older revision's numbers", () => {
@@ -193,7 +193,7 @@ test("a summary newer than the monitor speaks alone, never beside the older revi
 
 test("a monitor newer than the summary states every fact, the flag and the tone included", () => {
   const kept = { ...flagged, flagId: null, flags: [{ ...flagged.flags[0], state: "kept" }] };
-  const older = summary({ rev: kept.rev - 1, tone: "flag", sentence: flagged.sentence, bindings: { loss: "NaN" }, flag: { id: "f1", state: "waiting", mode: "copilot" } });
+  const older = summary({ rev: kept.rev - 1, tone: "flag", sentence: flagged.sentence, bindings: { loss: "NaN" }, flag: { id: "f1", state: "waiting" } });
   const line = model(run({ monitor: older }), { monitor: kept });
   assert.equal(line.needsChoice, false, "the kept flag needs no choice");
   assert.equal(line.flag, null);
@@ -203,7 +203,7 @@ test("a monitor newer than the summary states every fact, the flag and the tone 
   assert.ok(waiting.needsChoice && waiting.tone === "flag");
   assert.equal(waiting.flag.record.evidence.byteFrom, flagged.flags[0].evidence.byteFrom);
 
-  const otherFlag = model(run({ monitor: summary({ rev: kept.rev + 1, tone: "flag", flag: { id: "f2", state: "waiting", mode: "copilot" } }) }), { monitor: flagged });
+  const otherFlag = model(run({ monitor: summary({ rev: kept.rev + 1, tone: "flag", flag: { id: "f2", state: "waiting" } }) }), { monitor: flagged });
   assert.equal(otherFlag.flag.id, "f2");
   assert.equal(otherFlag.flag.record, null, "evidence shows only for the newest source's flag");
 });
@@ -298,7 +298,7 @@ test("a run that hasn't started says why it waits, in its backend's words, until
 test("a kept flag retains its record and falls through to the pace note", () => {
   const sentence = { template: "Test accuracy **{loss}**, far below the parent.", t: now - 60_000 };
   const kept = { ...running, sentence, pace: { than: "parent", times: 2.5 }, flags: [{ id: "f1", at: now - 60_000, whole: 0.2, template: sentence.template, detail: sentence.template, evidence: null,
-    state: "kept", mode: "copilot", source: "look", lookId: "4", choice: { by: "user", c: "keep", at: now - 30_000 } }] };
+    state: "kept", source: "look", lookId: "4", choice: { by: "user", c: "keep", at: now - 30_000 } }] };
   const line = model(run({ monitor: summary({ sentence }) }), { monitor: kept });
   assert.equal(line.name, "Rank 16");
   assert.equal(line.note, m.run_pace_slower_parent({ times: "⁦2.5⁩" }));

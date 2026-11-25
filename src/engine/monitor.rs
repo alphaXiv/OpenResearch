@@ -5015,7 +5015,7 @@ mod tests {
     fn an_open_watch_flag_uses_its_look_in_the_summary_monitor_and_status() {
         let f = Fixture::new("orx-monitor-frozen-flag");
         let run = f.run("running", local());
-        f.store.put_chat_session("chat", "claude-code", None);
+        f.store.put_chat_session("chat", "claude-code");
         let tx = f.store.begin_immediate().unwrap();
         let look = Store::prepare_watch_look(
             &tx,
@@ -5072,7 +5072,7 @@ mod tests {
         let f = Fixture::new("orx-monitor-finished-flag");
         let run = f.run("running", local());
         let chat = "chat";
-        f.store.put_chat_session(chat, "claude-code", None);
+        f.store.put_chat_session(chat, "claude-code");
         f.store.subscribe_run(&run.id, chat, T0).unwrap();
         let body = json!({"id": "f1", "source": "look", "text": "Loss rose."});
         let flag = super::super::flags::new_flag(&f.store, &run, body, true).unwrap();
@@ -7371,8 +7371,8 @@ mod tests {
     fn a_flag_raised_once_the_run_is_done_colours_it_and_waits_for_the_user() {
         let f = Fixture::new("orx-monitor-flag-after-end");
         let run = f.run("done", local());
-        f.store
-            .put_chat_session("chat-1", "claude-code", Some("copilot"));
+        f.store.put_chat_session("chat-1", "claude-code");
+        f.store.set_chat_session_archived("chat-1", true).unwrap();
         f.store.conn_execute_for_tests(
             "UPDATE runs SET chat_session_id = 'chat-1', ended_at = 1 WHERE id = 'r1'",
         );
@@ -8143,7 +8143,7 @@ mod tests {
         let f = Fixture::new("orx-finished-flag-review");
         let run = f.run("running", local());
         let chat = "reviewer";
-        f.store.put_chat_session(chat, "claude-code", None);
+        f.store.put_chat_session(chat, "claude-code");
         f.store.subscribe_run(&run.id, chat, T0).unwrap();
         let flag = super::super::flags::new_flag(
             &f.store,
@@ -8182,12 +8182,11 @@ mod tests {
         let f = Fixture::new("orx-ended-ask-handback");
         let run = f.run("done", local());
         let chat = "reviewer";
-        f.store
-            .put_chat_session(chat, "claude-code", Some("copilot"));
-        f.store.subscribe_run(&run.id, chat, T0).unwrap();
+        f.store.put_chat_session(chat, "claude-code");
         let body = json!({"id": "f1", "source": "look", "text": "Loss rose."});
         let flag = super::super::flags::new_flag(&f.store, &run, body.clone(), true).unwrap();
         f.store.raise_flags(&[flag], T0).unwrap();
+        f.store.subscribe_run(&run.id, chat, T0).unwrap();
         let before = advance(&f.store, &run, T0).unwrap();
         assert_eq!(before.summary()["flag"]["state"], "waiting");
 
@@ -8209,7 +8208,7 @@ mod tests {
     }
 
     #[test]
-    fn an_ask_flags_the_run_wakes_its_agentic_chat_once_and_the_run_keeps_going() {
+    fn an_ask_flags_the_run_wakes_its_chat_once_and_the_run_keeps_going() {
         let f = Fixture::new("orx-rules-ask");
         ruled(
             &f,
@@ -8219,11 +8218,8 @@ mod tests {
             json!([{"name": "eval-zero", "text": "Ask when the eval score falls below 0.1.", "does": "ask",
                 "when": {"kind": "compare", "signal": "eval_score", "op": "lt", "value": 0.1}}]),
         );
-        f.store.put_chat_session("chat-1", "claude-code", None);
-        f.store
-            .put_chat_session("chat-2", "claude-code", Some("copilot"));
+        f.store.put_chat_session("chat-1", "claude-code");
         f.store.subscribe_run("r1", "chat-1", T0).unwrap();
-        f.store.subscribe_run("r1", "chat-2", T0).unwrap();
         reported(&f, "r1", "eval_score", &["0.5", "0.05"], 600);
         rules_at(&f, "r1", T0 + 2_000);
         reported(&f, "r1", "eval_score", &["0.5", "0.05", "0.0"], 600);
@@ -9767,12 +9763,12 @@ mod tests {
         json!({"run": run, "now": T0 + 10_000, "monitor": monitor, "summary": summary, "expect": expect})
     }
 
-    /// A Copilot chat's run the watcher flagged: the flag waits for the user's choice.
+    /// A run the watcher flagged whose chat is marked done: the flag waits for the user's choice.
     fn flagged_state() -> Value {
         let f = Fixture::new("orx-monitor-contract-flagged");
         let run = f.run("running", local());
-        f.store
-            .put_chat_session("chat-1", "claude-code", Some("copilot"));
+        f.store.put_chat_session("chat-1", "claude-code");
+        f.store.set_chat_session_archived("chat-1", true).unwrap();
         f.store
             .conn_execute_for_tests("UPDATE runs SET chat_session_id = 'chat-1' WHERE id = 'r1'");
         f.collect(&folded(&declared(0..=20, 400)));

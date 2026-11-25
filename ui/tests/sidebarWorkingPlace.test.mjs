@@ -11,7 +11,7 @@ for (const size of ["clientHeight", "clientWidth", "offsetHeight", "offsetWidth"
 
 const chat = (id, title, updatedAt, busy) => ({
   id, projectId: "p", harness: "codex", title, model: null, serviceTier: null, permissionMode: null, planMode: false,
-  autonomy: "ask", reasoningLevel: null, archived: false, busy, createdAt: Date.now(), updatedAt,
+  reasoningLevel: null, archived: false, busy, createdAt: Date.now(), updatedAt,
 });
 
 test("the one-list sidebar puts Working above the inbox, below it, or at the bottom", { timeout: 20_000 }, async () => {

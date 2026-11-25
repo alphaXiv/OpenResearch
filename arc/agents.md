@@ -81,7 +81,7 @@ OpenCode runs local inference over connections to OpenAI-compatible servers (`sr
 - **The `orx` CLI.** The running `orx`'s directory goes first on `PATH` and stays there after the user's startup files, so the agent runs the dashboard's version. The environment names the chat, the dashboard and its data directory, which is how `orx exp run` records its chat and every `orx` the agent runs opens the store the dashboard serves.
 - **alphaXiv tools.** `orx alphaxiv-mcp` (`src/commands/alphaxiv_mcp.rs`) gives agents an allowlist of research tools; tokens stay in orx ([storage](storage.md)), and on an SSH host the attached laptop's sign-in counts ([remote](remote.md)).
 - **Saved variables.** The agent starts with `~/.openresearch/env` and its project's variables over it. Through `orx mcp` it can ask the user for more on a card in its chat (`src/local/chat/env_request.rs`); a secret's value never enters the transcript.
-- **Turn context.** Autonomy and the goal ride the turn as context blocks, so changing them never restarts the agent.
+- **Turn context.** The goal rides the turn as a context block, so changing it never restarts the agent.
 - **Run attribution.** Each agent's shell commands carry the model that issued them, so a run records which model launched it.
 
 ## Permissions

@@ -44,7 +44,7 @@ fn say(store: &Store, chat: &str, id: &str, role: &str, text: &str, at: i64) {
 }
 
 fn chat(store: &Store, id: &str, harness: &str) -> StoredChatSession {
-    store.put_chat_session(id, harness, None);
+    store.put_chat_session(id, harness);
     store.get_chat_session(id).unwrap().unwrap()
 }
 
@@ -665,7 +665,7 @@ fn delegates_side_chats_and_deleted_chats_keep_no_report() {
     store
         .record_chat_delegate("delegate", "parent", false)
         .unwrap();
-    store.put_chat_session("side", "claude-code", None);
+    store.put_chat_session("side", "claude-code");
     store.conn_execute_for_tests(
         "UPDATE chat_sessions SET side_parent_session_id = 'parent' WHERE id = 'side'",
     );

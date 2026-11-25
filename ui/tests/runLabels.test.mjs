@@ -76,7 +76,7 @@ test("each cancellation state agrees across the badge, notice, lineage and sessi
 test("flagged, auto-stopped and revising runs read alike on the badge, the lineage and the chat's hover card", async () => {
   const rule = { id: "nan", name: "nan-loss", text: "Loss is NaN.", does: "stop" };
   for (const [value, label, status] of [
-    [run({ status: "running", monitor: { tone: "flag", flag: { id: "f", state: "waiting", mode: "copilot" } } }), m.status_flagged(), "flagged"],
+    [run({ status: "running", monitor: { tone: "flag", flag: { id: "f", state: "waiting" } } }), m.status_flagged(), "flagged"],
     [run({ outcome: { by: "rule", rule, at: 1 } }), m.status_auto_stopped(), "auto_stopped"],
     [run({ monitor: { tone: "revising", flag: null }, outcome: { by: "agent", at: 1 } }), m.status_revising(), "revising"],
   ]) {

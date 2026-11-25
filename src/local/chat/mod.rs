@@ -32,7 +32,6 @@ use sha2::{Digest as _, Sha256};
 use tokio::sync::{broadcast, mpsc, watch, Mutex};
 
 use crate::error::{anyhow, Result};
-use crate::local::autonomy::Autonomy;
 use crate::local::harness::ResumeAction;
 use crate::local::model::LocalProject;
 use crate::local::opencode::AgentHost;
@@ -1415,7 +1414,6 @@ pub fn import_native_chat(
         context_usage_json: None,
         bootstrap_context: None,
         goal: None,
-        autonomy: None,
         active_leaf_id: None,
         side_parent_session_id: None,
         side_parent_leaf_id: None,
@@ -1526,7 +1524,6 @@ pub fn session_json_with(store: Option<&Store>, s: &StoredChatSession, busy: boo
         "sideParentSessionId": s.side_parent_session_id,
         "delegate": delegate,
         "goal": s.goal,
-        "autonomy": Autonomy::from_stored(s.autonomy.as_deref()).id(),
     })
 }
 
@@ -1593,7 +1590,6 @@ fn is_initial_chat_message(transcript_text: Option<&str>, has_messages: bool) ->
 
 fn with_turn_context(
     goal: Option<&str>,
-    autonomy: Option<&str>,
     demo_evidence_context: Option<&str>,
     shell_context: Option<&str>,
     text: String,
@@ -1606,9 +1602,6 @@ fn with_turn_context(
     });
     if let Some(goal) = goal.as_deref() {
         contexts.push(goal);
-    }
-    if let Some(autonomy) = autonomy {
-        contexts.push(autonomy);
     }
     if let Some(context) = demo_evidence_context {
         contexts.push(context);
@@ -2896,7 +2889,7 @@ mod shell_command_tests {
         assert!(context.contains("status=\"exit 1\">\ncat missing\n</command>"));
         assert!(context.contains("<stderr>\nboom\n</stderr>"));
         assert!(context.find("ls\n</command>").unwrap() < context.find("cat missing").unwrap());
-        let turn = with_turn_context(None, None, None, Some(&context), "why?".into());
+        let turn = with_turn_context(None, None, Some(&context), "why?".into());
         assert!(turn.starts_with("<user-shell-commands>"));
         assert!(turn.ends_with("<current-user-message>\nwhy?\n</current-user-message>"));
         assert!(shell_context(&[]).is_none());
@@ -2910,7 +2903,6 @@ mod initial_message_tests {
         contextualize_messages, is_initial_chat_message, with_selected_chat_context,
         with_turn_context, AnnotatedText, TextAnnotation,
     };
-    use crate::local::autonomy::Autonomy;
     use serde_json::{json, Value};
 
     #[test]
@@ -2922,42 +2914,26 @@ mod initial_message_tests {
 
     #[test]
     fn the_goal_rides_every_turn() {
-        let seeded = with_turn_context(Some("ship the sweep"), None, None, None, "continue".into());
+        let seeded = with_turn_context(Some("ship the sweep"), None, None, "continue".into());
         assert!(seeded.contains("ship the sweep"));
         assert!(seeded.contains("<current-user-message>\ncontinue"));
         assert_eq!(
-            with_turn_context(None, None, None, None, "continue".into()),
+            with_turn_context(None, None, None, "continue".into()),
             "continue"
         );
     }
 
     #[test]
-    fn autonomy_rides_every_turn_after_the_goal() {
-        let turn = with_turn_context(
-            Some("ship the sweep"),
-            Autonomy::Copilot.turn_context(),
-            None,
-            None,
-            "continue".into(),
-        );
-        let goal = turn.find("<orx-goal>").unwrap();
-        let autonomy = turn.find("<orx-autonomy level=\"copilot\">").unwrap();
-        assert!(goal < autonomy);
-        assert!(turn.ends_with("<current-user-message>\ncontinue\n</current-user-message>"));
-    }
-
-    #[test]
     fn demo_evidence_context_is_injected_without_rewrapping_the_user_message() {
-        let first = with_turn_context(None, None, Some("demo evidence"), None, "first".into());
-        let follow_up =
-            with_turn_context(None, None, Some("demo evidence"), None, "follow up".into());
+        let first = with_turn_context(None, Some("demo evidence"), None, "first".into());
+        let follow_up = with_turn_context(None, Some("demo evidence"), None, "follow up".into());
         assert!(first.contains("demo evidence"));
         assert!(first.contains("<current-user-message>\nfirst"));
         assert!(follow_up.contains("demo evidence"));
         assert!(follow_up.contains("<current-user-message>\nfollow up"));
         assert_eq!(first.matches("<current-user-message>").count(), 1);
         assert_eq!(
-            with_turn_context(None, None, None, None, "ordinary".into()),
+            with_turn_context(None, None, None, "ordinary".into()),
             "ordinary"
         );
     }
@@ -7582,7 +7558,6 @@ impl ChatHost {
             }
             with_turn_context(
                 session.goal.as_deref(),
-                Autonomy::from_stored(session.autonomy.as_deref()).turn_context(),
                 super::demo::turn_context(&project.id),
                 shell_context.as_deref(),
                 expanded,
@@ -8791,16 +8766,6 @@ impl ChatHost {
     ) -> Result<Option<StoredChatSession>> {
         let store = Store::open()?;
         store.set_chat_session_goal(session_id, goal)?;
-        Ok(self.emit_session(store.get_chat_session(session_id)?).await)
-    }
-
-    pub async fn set_autonomy(
-        &self,
-        session_id: &str,
-        autonomy: Autonomy,
-    ) -> Result<Option<StoredChatSession>> {
-        let store = Store::open()?;
-        store.set_chat_session_autonomy(session_id, autonomy)?;
         Ok(self.emit_session(store.get_chat_session(session_id)?).await)
     }
 
@@ -11022,7 +10987,6 @@ fn side_chat_session(
         context_usage_json: None,
         bootstrap_context,
         goal: None,
-        autonomy: parent.autonomy.clone(),
         active_leaf_id: None,
         side_parent_session_id: Some(parent.id.clone()),
         side_parent_leaf_id: leaf.cloned(),
@@ -12354,7 +12318,6 @@ mod cap_tests {
                 context_usage_json: None,
                 bootstrap_context: None,
                 goal: None,
-                autonomy: None,
                 active_leaf_id: None,
                 side_parent_session_id: None,
                 side_parent_leaf_id: None,
@@ -12467,7 +12430,6 @@ mod cap_tests {
             context_usage_json: None,
             bootstrap_context: None,
             goal: None,
-            autonomy: None,
             active_leaf_id: None,
             side_parent_session_id: None,
             side_parent_leaf_id: None,
@@ -12545,7 +12507,6 @@ mod cap_tests {
             context_usage_json: Some("{\"usedTokens\":9000}".into()),
             bootstrap_context: None,
             goal: None,
-            autonomy: None,
             active_leaf_id: None,
             side_parent_session_id: None,
             side_parent_leaf_id: None,
@@ -13816,7 +13777,6 @@ mod bridge_tests {
             context_usage_json: None,
             bootstrap_context: None,
             goal: None,
-            autonomy: None,
             active_leaf_id: None,
             side_parent_session_id: None,
             side_parent_leaf_id: None,
@@ -14972,7 +14932,6 @@ mod run_wakeup_tests {
                 context_usage_json: None,
                 bootstrap_context: None,
                 goal: None,
-                autonomy: None,
                 active_leaf_id: None,
                 side_parent_session_id: None,
                 side_parent_leaf_id: None,
@@ -16139,7 +16098,7 @@ for line in sys.stdin:
         let store = Store::open().unwrap();
         let mut ctx = TurnCtx::test_stub();
         ctx.durable = true;
-        store.put_chat_session(&ctx.session_id, &ctx.harness, None);
+        store.put_chat_session(&ctx.session_id, &ctx.harness);
         store.put_chat_turn(&ctx.session_id, &ctx.turn_id, "running", now_ms());
         ctx.persist_delivery(DeliveryState::Unknown).unwrap();
 
@@ -17447,10 +17406,10 @@ done
             .collect()
     }
 
-    /// Chat `owner` at `autonomy` on an agent that ends every turn having done nothing, and a
+    /// Chat `owner` on an agent that ends every turn having done nothing, and a
     /// running run it launched with one flag raised.
-    fn quiet_agent_chat(store: &Store, autonomy: Option<&str>) -> StoredRun {
-        quiet_agent(store, autonomy);
+    fn quiet_agent_chat(store: &Store) -> StoredRun {
+        quiet_agent(store);
         let run = run("running");
         store.upsert_run(&run).unwrap();
         let body = json!({"id": "f1", "source": "tripwire", "kind": "error", "fingerprint": "error:boom",
@@ -17463,7 +17422,7 @@ done
         run
     }
 
-    fn quiet_agent(store: &Store, autonomy: Option<&str>) {
+    fn quiet_agent(store: &Store) {
         let repo = crate::store::data_dir().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         crate::local::git::initialize_own_repository(&repo).unwrap();
@@ -17522,8 +17481,8 @@ for line in sys.stdin:
         ];
         let tx = store.begin().unwrap();
         tx.execute(
-            "UPDATE chat_sessions SET harness = ?1, model = 'fixture-model', autonomy = ?2",
-            rusqlite::params![launch.id, autonomy],
+            "UPDATE chat_sessions SET harness = ?1, model = 'fixture-model'",
+            rusqlite::params![launch.id],
         )
         .unwrap();
         tx.execute(
@@ -17560,22 +17519,12 @@ for line in sys.stdin:
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn agentic_flag_wakes_explain_how_to_review_and_tune_each_source() {
-        if crate::config::in_test_child(&[]) {
-            check_flag_wake_advice(false).await;
+    async fn flag_wakes_explain_how_to_review_and_tune_each_source() {
+        if !crate::config::in_test_child(&[]) {
+            return;
         }
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn copilot_flag_asks_explain_how_to_review_and_tune_each_source() {
-        if crate::config::in_test_child(&[]) {
-            check_flag_wake_advice(true).await;
-        }
-    }
-
-    async fn check_flag_wake_advice(copilot: bool) {
         let store = Store::open().unwrap();
-        quiet_agent(&store, copilot.then_some("copilot"));
+        quiet_agent(&store);
         let host = notice_host();
         for ended in [false, true] {
             for (source, details) in [
@@ -17602,11 +17551,6 @@ for line in sys.stdin:
                 );
 
                 let before = prompts().len();
-                if copilot {
-                    settle_all(&host).await;
-                    assert_eq!(prompts().len(), before);
-                    ask_about_flag(&store, &run);
-                }
                 if ended {
                     run.status = "done".into();
                     run.ended_at = Some(3);
@@ -17615,13 +17559,9 @@ for line in sys.stdin:
                 settle_all(&host).await;
                 let sent = prompts();
                 let review = &sent[before..];
-                assert_eq!(review.len(), if copilot { 1 } else { 2 }, "{review:#?}");
+                assert_eq!(review.len(), 2, "{review:#?}");
 
                 let wake = &review[0];
-                assert_eq!(
-                    wake.contains("The user asked you to look at a flag"),
-                    copilot
-                );
                 for prompt in review {
                     let choice = format!("orx exp flag {} --flag f1", run.id);
                     for text in [
@@ -17685,7 +17625,7 @@ for line in sys.stdin:
 
     async fn marking_done_withdraws_ask(ended: bool) {
         let store = Store::open().unwrap();
-        let mut run = quiet_agent_chat(&store, Some("copilot"));
+        let mut run = quiet_agent_chat(&store);
         if ended {
             run.status = "done".into();
             run.ended_at = Some(1);
@@ -17708,7 +17648,7 @@ for line in sys.stdin:
             return;
         }
         let store = Store::open().unwrap();
-        let run = quiet_agent_chat(&store, None);
+        let run = quiet_agent_chat(&store);
         let host = notice_host();
         let guard = TurnGuard::claim_idle(&host, "owner", TurnState::Reserved { turn_id: None })
             .await
@@ -17736,7 +17676,7 @@ for line in sys.stdin:
             return;
         }
         let store = Store::open().unwrap();
-        let run = quiet_agent_chat(&store, None);
+        let run = quiet_agent_chat(&store);
         settle_all(&notice_host()).await;
 
         let prompts = prompts();
@@ -17756,37 +17696,27 @@ for line in sys.stdin:
     #[tokio::test(flavor = "current_thread")]
     async fn a_continued_independent_flag_review_gets_its_reminder() {
         if crate::config::in_test_child(&[]) {
-            recover_flag_review("continue", false, false).await;
-        }
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_continued_copilot_ask_tracks_the_new_review_turn() {
-        if crate::config::in_test_child(&[]) {
-            recover_flag_review("continue", true, false).await;
+            recover_flag_review("continue", false).await;
         }
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn retrying_a_flag_review_keeps_its_original_turn() {
         if crate::config::in_test_child(&[]) {
-            recover_flag_review("retry", false, false).await;
+            recover_flag_review("retry", false).await;
         }
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn retrying_a_flag_review_after_switching_agents_tracks_the_new_turn() {
         if crate::config::in_test_child(&[]) {
-            recover_flag_review("retry", false, true).await;
+            recover_flag_review("retry", true).await;
         }
     }
 
-    async fn recover_flag_review(action: &str, copilot: bool, switched: bool) {
+    async fn recover_flag_review(action: &str, switched: bool) {
         let store = Store::open().unwrap();
-        let run = quiet_agent_chat(&store, copilot.then_some("copilot"));
-        if copilot {
-            ask_about_flag(&store, &run);
-        }
+        let run = quiet_agent_chat(&store);
         let batch = store.run_notice_batch("owner").unwrap();
         let notice = &batch[0];
         let client_turn = &notice.client_turn_id;
@@ -17852,7 +17782,7 @@ for line in sys.stdin:
         settle_all(&host).await;
 
         let sent = prompts();
-        assert_eq!(sent.len(), if copilot { 1 } else { 2 }, "{sent:#?}");
+        assert_eq!(sent.len(), 2, "{sent:#?}");
         assert_eq!(sent[0].matches(notice.body.as_str()).count(), 1);
         let continued = store
             .get_chat_turn("owner", &reply.turn_id)
@@ -17864,17 +17794,8 @@ for line in sys.stdin:
             store.flag_notice_runs_for_turn(&reply.turn_id).unwrap(),
             [run.id.as_str()]
         );
-        if copilot {
-            assert_eq!(flag(&store, &run)["state"], "waiting");
-            assert!(flag(&store, &run)["handback"].is_number());
-            assert_eq!(
-                store.run_flag_notices(&run.id).unwrap()[0].dedupe,
-                "ask:first"
-            );
-        } else {
-            assert!(sent[1].contains("Your last turn ended without settling flag f1"));
-            assert_eq!(flag(&store, &run)["state"], "kept");
-        }
+        assert!(sent[1].contains("Your last turn ended without settling flag f1"));
+        assert_eq!(flag(&store, &run)["state"], "kept");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -17883,7 +17804,7 @@ for line in sys.stdin:
             return;
         }
         let store = Store::open().unwrap();
-        let run = quiet_agent_chat(&store, None);
+        let run = quiet_agent_chat(&store);
         let carried = store.run_notice_batch("owner").unwrap();
         let tx = store.begin().unwrap();
         tx.execute(
@@ -17930,7 +17851,7 @@ for line in sys.stdin:
         }
 
         let store = Store::open().unwrap();
-        let run = quiet_agent_chat(&store, None);
+        let run = quiet_agent_chat(&store);
         let carried = store.run_notice_batch("owner").unwrap();
         store
             .record_run_notice_failure(
@@ -17980,7 +17901,7 @@ for line in sys.stdin:
         }
         if std::env::var_os(CRASH).is_some() {
             let store = Store::open().unwrap();
-            quiet_agent_chat(&store, None);
+            quiet_agent_chat(&store);
             let batch = store.run_notice_batch("owner").unwrap();
             store
                 .record_run_notice_failure(
@@ -18108,7 +18029,7 @@ for line in sys.stdin:
             return;
         }
         let store = Store::open().unwrap();
-        let mut run = quiet_agent_chat(&store, None);
+        let mut run = quiet_agent_chat(&store);
         run.status = "done".into();
         run.ended_at = Some(2);
         run.exit_code = Some(0);
@@ -18143,41 +18064,6 @@ for line in sys.stdin:
         assert!(prompts[2].contains("ended without settling flag f1"));
         assert!(!prompts[2].contains("--stop"), "{}", prompts[2]);
         assert_eq!(flag(&store, &run)["state"], "kept");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_copilot_flag_waits_for_the_user_after_the_turn_they_asked_for() {
-        if !crate::config::in_test_child(&[]) {
-            return;
-        }
-        let store = Store::open().unwrap();
-        let run = quiet_agent_chat(&store, Some("copilot"));
-        let host = notice_host();
-        settle_all(&host).await;
-        assert!(prompts().is_empty(), "a Copilot chat isn't woken");
-        let raised = flag(&store, &run);
-        assert_eq!(raised["state"], "waiting");
-
-        let ask = crate::store::FlagChoice {
-            run_id: run.id.clone(),
-            body: json!({"flagId": "f1", "c": "ask", "by": "user", "reason": null, "requestId": "r1"}),
-            wakes: vec![(
-                "owner".into(),
-                crate::engine::flags::wake(&run, &raised, true),
-            )],
-        };
-        assert_eq!(
-            store.record_flag_choices(&[ask], None, 3).unwrap(),
-            crate::store::Chosen::Recorded
-        );
-        settle_all(&host).await;
-        let prompts = prompts();
-        assert_eq!(prompts.len(), 1, "{prompts:#?}");
-        assert!(prompts[0].contains("The user asked you to look at a flag"));
-        let reviewed = flag(&store, &run);
-        assert_eq!(reviewed["state"], "waiting");
-        let ask = store.run_flag_events(&run.id).unwrap().pop().unwrap();
-        assert_eq!(reviewed["handback"], ask.seq);
     }
 }
 
@@ -18276,7 +18162,6 @@ mod transcript_tree_tests {
             context_usage_json: None,
             bootstrap_context: None,
             goal: Some("keep training".into()),
-            autonomy: None,
             active_leaf_id: Some("a3".into()),
             side_parent_session_id: None,
             side_parent_leaf_id: None,
@@ -18525,7 +18410,6 @@ pub(crate) mod steering_tests {
                 context_usage_json: None,
                 bootstrap_context: None,
                 goal: None,
-                autonomy: None,
                 active_leaf_id: None,
                 side_parent_session_id: None,
                 side_parent_leaf_id: None,
