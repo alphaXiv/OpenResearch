@@ -816,7 +816,6 @@
   "activity_delegate": "Devret",
   "activity_run": "Çalıştır",
   "activity_more_steps": "+{count}",
-  "activity_steps_failed": "Bu adımlar gösterilemedi",
   "activity_more_names": "{count} tane daha",
   "activity_in_background": "{activity} (arka planda)",
   "activity_reading_a_file": "Bir dosya okunuyor…",

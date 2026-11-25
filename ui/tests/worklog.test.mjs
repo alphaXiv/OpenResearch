@@ -227,15 +227,17 @@ test("a call the work log trips on still shows its command", (t) => {
   assert.equal(errors.mock.callCount(), 1);
 });
 
-test("a work log that fails to draw leaves the rest of the chat", async (t) => {
+test("a work log that fails to draw shows each call as it was typed", async (t) => {
   t.mock.method(console, "error", () => {});
   const report = call("Write", { file_path: "/repo/artifacts/report.md" });
   Object.defineProperty(report.state.input, "content", { enumerable: false, get() { throw new Error("unreadable"); } });
   const container = await renderTurn([
     { id: "text-1", type: "text", text: "Writing it up.", phase: "commentary" },
+    codex("uv run train.py --steps 600"),
     report,
     { id: "text-2", type: "text", text: "Done.", phase: "final_answer" },
   ]);
-  assert.ok(plain(container.textContent).includes(words(m.activity_steps_failed())), plain(container.textContent));
+  const rows = [...container.querySelectorAll(".tool-row")].map((element) => plain(element.textContent));
+  assert.deepEqual(rows, [words(m.activity_ran_command({ command: "uv run train.py --steps 600" })), "Write: /repo/artifacts/report.md"]);
   assert.ok(plain(container.textContent).includes("Done."));
 });

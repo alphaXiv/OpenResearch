@@ -229,6 +229,7 @@ import {
   exactInputStringArray,
   inputString,
   permissionActivityLabel,
+  plainActivity,
   toolActivity,
   type ToolActivity,
 } from "../worklog/activity";
@@ -1247,6 +1248,20 @@ function TurnStatusRow({
       )}
     </div>
   );
+}
+
+/** A tool run that failed to draw, one row per call as it reads without the work log's recognizers. */
+function PlainToolRun({ parts }: { parts: ChatPart[] }) {
+  return parts.map((part) => {
+    const activity = plainActivity(part);
+    const label = part.state?.status === "running" ? activity.progressLabel ?? activity.label : activity.label;
+    return (
+      <div key={part.id} data-part-id={part.id} className="tool-row flex items-start gap-2 min-w-0 py-1 px-1">
+        <ToolActivityIcon activity={activity} className="text-muted" />
+        <span className={`${TOOL_LINE_CLASS_NAME} text-subtext`} title={activity.command}>{label}</span>
+      </div>
+    );
+  });
 }
 
 /** Routine successful calls are static activity rows. Only failures disclose
@@ -2733,14 +2748,8 @@ function renderParts(
   );
   const flushTools = () => {
     if (toolRun.length === 0) return;
-    const failed = (
-      <div className="tool-row flex items-start gap-2 min-w-0 py-1 px-1 text-base leading-6 text-muted">
-        <span className="flex h-6 shrink-0 items-center"><TriangleAlert size={16} strokeWidth={1.75} aria-hidden="true" /></span>
-        {m.activity_steps_failed()}
-      </div>
-    );
     rendered.push(
-      <Boundary key={`tg-${toolRun[0].id}`} name="work log" rev={toolRun.at(-1)} fallback={failed}>
+      <Boundary key={`tg-${toolRun[0].id}`} name="work log" rev={toolRun.at(-1)} fallback={<PlainToolRun parts={toolRun} />}>
         <ResearchToolRun
           parts={toolRun}
           discovered={discovered}

@@ -206,11 +206,8 @@ export function toolActivity(part: ChatPart): ToolActivity {
   try {
     activity = computeToolActivity(part);
   } catch (error) {
-    // A call the recognizers trip on reads like one they don't know: its command, or its tool.
     console.error("work log could not describe a tool call", part.tool, error);
-    const command = part.state?.input?.command;
-    const text = typeof command === "string" ? command.replace(/\s+/g, " ").trim() : "";
-    activity = text ? ranCommand(text) : { kind: "command", icon: "wrench", label: part.tool ?? m.chat_panel_used_tools() };
+    activity = plainActivity(part);
   }
 
   // Stream updates replace parts; weak keys release labels with their transcript.
@@ -438,6 +435,15 @@ function codexWebActivity(input: Record<string, unknown>): ToolActivity {
   if (Array.isArray(input.sports)) return web(m.chat_panel_checked_sports_data(), m.activity_browsing());
   if (Array.isArray(input.time)) return web(m.chat_panel_checked_local_times(), m.activity_browsing());
   return web(m.chat_panel_browsed_the_web(), m.activity_browsing());
+}
+
+/** A call as it reads without the recognizers, for one they trip on: its command, or its tool and what it was given. */
+export function plainActivity(part: ChatPart): ToolActivity {
+  const input = part.state?.input ?? {};
+  const command = shellBody(inputString(input, "command", "cmd") ?? "").replace(/\s+/g, " ").trim();
+  if (command) return ranCommand(command);
+  const detail = inputString(input, "description", "filePath", "file_path", "path") ?? codexChanges(input).map((change) => change.path).join(", ");
+  return otherActivity(part.tool ?? "tool", part.state?.title, input, detail || null);
 }
 
 /** A command named as it was typed, for one no recognizer describes. */

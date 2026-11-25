@@ -784,7 +784,6 @@
   "activity_delegate": "واگذاری",
   "activity_run": "اجرا",
   "activity_more_steps": "+{count}",
-  "activity_steps_failed": "این مراحل نمایش داده نشد",
   "activity_more_names": "{count} مورد دیگر",
   "activity_in_background": "{activity} در پس‌زمینه",
   "activity_reading_a_file": "در حال خواندن فایل…",

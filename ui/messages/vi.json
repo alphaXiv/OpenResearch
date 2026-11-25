@@ -790,7 +790,6 @@
   "activity_delegate": "Ủy thác",
   "activity_run": "Chạy",
   "activity_more_steps": "+{count}",
-  "activity_steps_failed": "Không thể hiển thị các bước này",
   "activity_more_names": "{count} mục khác",
   "activity_in_background": "{activity} trong nền",
   "activity_reading_a_file": "Đang đọc một tệp…",

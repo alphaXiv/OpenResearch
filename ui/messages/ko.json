@@ -790,7 +790,6 @@
   "activity_delegate": "위임",
   "activity_run": "실행",
   "activity_more_steps": "+{count}",
-  "activity_steps_failed": "이 단계를 표시할 수 없습니다",
   "activity_more_names": "외 {count}개",
   "activity_in_background": "{activity} (백그라운드)",
   "activity_reading_a_file": "파일 읽는 중…",
