@@ -926,6 +926,7 @@
   "settings_hf_namespace_personal": "{name} (شخصي)",
   "settings_hf_namespace_org_plan": "{name} · خطة {plan}",
   "settings_hf_namespace_env_override": "المتغير ORX_HF_NAMESPACE محدد في بيئة العملية. أزله من هناك للاختيار هنا.",
+  "settings_hf_namespace_use_personal": "التشغيل في {name}",
   "settings_restart_version": "الإصدار {installed} مثبّت. لا تزال هذه النافذة تعمل بالإصدار {current}.",
   "settings_install_cli_title": "تثبيت أمر {command}",
   "settings_install_cli_description": "يضيف {command} إلى طرفيتك موجّهًا إلى هذا التطبيق، بحيث تكون واجهة سطر الأوامر والتطبيق دائمًا بالإصدار نفسه.",

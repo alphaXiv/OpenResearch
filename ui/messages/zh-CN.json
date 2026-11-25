@@ -921,6 +921,7 @@
   "settings_hf_namespace_personal": "{name}(个人)",
   "settings_hf_namespace_org_plan": "{name} · {plan} 套餐",
   "settings_hf_namespace_env_override": "ORX_HF_NAMESPACE 已在进程环境中设置。请先从那里移除,才能在此选择。",
+  "settings_hf_namespace_use_personal": "在 {name} 中运行",
   "settings_restart_version": "已安装版本 {installed}。此窗口仍在运行 {current}。",
   "settings_install_cli_title": "安装 {command} 命令",
   "settings_install_cli_description": "将 {command} 添加到终端并指向此应用，使 CLI 和应用始终使用同一版本。",

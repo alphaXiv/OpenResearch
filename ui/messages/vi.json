@@ -927,6 +927,7 @@
   "settings_hf_namespace_personal": "{name} (cá nhân)",
   "settings_hf_namespace_org_plan": "{name} · gói {plan}",
   "settings_hf_namespace_env_override": "ORX_HF_NAMESPACE được đặt trong môi trường tiến trình. Hãy xóa nó ở đó để chọn tại đây.",
+  "settings_hf_namespace_use_personal": "Chạy tại {name}",
   "settings_restart_version": "Phiên bản {installed} đã được cài đặt. Cửa sổ này vẫn đang chạy {current}.",
   "settings_install_cli_title": "Cài đặt lệnh {command}",
   "settings_install_cli_description": "Thêm {command} vào terminal của bạn, trỏ tới ứng dụng này, để CLI và ứng dụng luôn cùng phiên bản.",

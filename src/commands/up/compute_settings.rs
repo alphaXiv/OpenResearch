@@ -215,7 +215,7 @@ pub(super) struct SetHfNamespaceReq {
     namespace: Option<String>,
 }
 
-pub(super) async fn set_hf_namespace(Json(req): Json<SetHfNamespaceReq>) -> ApiResult {
+fn hf_namespace_locked() -> Result<(), ApiError> {
     use crate::jobs::huggingface;
     if matches!(huggingface::saved_namespace(), Some((_, "env"))) {
         return Err(bad_request(format!(
@@ -224,27 +224,44 @@ pub(super) async fn set_hf_namespace(Json(req): Json<SetHfNamespaceReq>) -> ApiR
             huggingface::NAMESPACE
         )));
     }
-    let namespace = req
-        .namespace
+    Ok(())
+}
+
+/// Empty or absent launches in the token's own account.
+fn hf_namespace_choice(namespace: Option<String>) -> Option<String> {
+    namespace
         .map(|n| n.trim().to_string())
-        .filter(|n| !n.is_empty());
+        .filter(|n| !n.is_empty())
+}
+
+fn check_hf_namespace(
+    details: &crate::jobs::huggingface::WhoamiDetails,
+    namespace: &str,
+) -> Result<(), ApiError> {
+    if namespace == details.name || details.orgs.iter().any(|org| org.name == namespace) {
+        return Ok(());
+    }
+    let choices = std::iter::once(details.name.as_str())
+        .chain(details.orgs.iter().map(|org| org.name.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(bad_request(format!(
+        "The token's account {} isn't {namespace} or a member of it, so Hugging Face Jobs \
+         can't launch there. Choose one of: {choices}.",
+        details.name
+    )))
+}
+
+pub(super) async fn set_hf_namespace(Json(req): Json<SetHfNamespaceReq>) -> ApiResult {
+    use crate::jobs::huggingface;
+    hf_namespace_locked()?;
+    let namespace = hf_namespace_choice(req.namespace);
     if let Some(namespace) = &namespace {
         let token = huggingface::resolve_token().map_err(bad_request)?;
         let details = huggingface::whoami_details(&token)
             .await
             .map_err(bad_request)?;
-        let orgs: Vec<String> = details.orgs.into_iter().map(|org| org.name).collect();
-        if *namespace != details.name && !orgs.contains(namespace) {
-            let choices = std::iter::once(details.name.as_str())
-                .chain(orgs.iter().map(String::as_str))
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(bad_request(format!(
-                "The token's account {} isn't {namespace} or a member of it, so Hugging Face Jobs \
-                 can't launch there. Choose one of: {choices}.",
-                details.name
-            )));
-        }
+        check_hf_namespace(&details, namespace)?;
     }
     tokio::task::spawn_blocking(move || match namespace {
         Some(namespace) => crate::config::write_synced_env_var(huggingface::NAMESPACE, &namespace),
@@ -2089,14 +2106,25 @@ pub(crate) async fn configure(backend: &str, body: Value) -> Result<Value> {
         "ray" => set_ray_settings(Json(serde_json::from_value(body)?)).await,
         "k8s" => set_k8s_settings(Json(serde_json::from_value(body)?)).await,
         "hf" => {
-            if let Some(namespace) = body.get("namespace") {
-                let namespace = namespace.as_str().map(str::to_string);
-                cli_result(set_hf_namespace(Json(SetHfNamespaceReq { namespace })).await)?;
+            let namespace = body
+                .get("namespace")
+                .map(|namespace| namespace.as_str().map(str::to_string));
+            // Both are checked against the token that takes effect before either is saved.
+            if let (Some(token), Some(namespace)) = (body["token"].as_str(), &namespace) {
+                cli_result(hf_namespace_locked().map(|()| Json(Value::Null)))?;
+                if let Some(namespace) = hf_namespace_choice(namespace.clone()) {
+                    let details = crate::jobs::huggingface::whoami_details(token.trim()).await?;
+                    cli_result(
+                        check_hf_namespace(&details, &namespace).map(|()| Json(Value::Null)),
+                    )?;
+                }
             }
             if body.get("token").is_some() {
-                set_hf_token(Json(serde_json::from_value(body)?)).await
-            } else {
-                Ok(Json(json!(hf_token_status().await)))
+                cli_result(set_hf_token(Json(serde_json::from_value(body.clone())?)).await)?;
+            }
+            match namespace {
+                Some(namespace) => set_hf_namespace(Json(SetHfNamespaceReq { namespace })).await,
+                None => Ok(Json(json!(hf_token_status().await))),
             }
         }
         "modal" => set_modal_token(Json(serde_json::from_value(body)?)).await,

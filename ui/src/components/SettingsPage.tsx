@@ -3473,7 +3473,7 @@ function HfStatusBadge({ settings }: { settings: HfSettings }) {
   return null;
 }
 
-function HfSection({ remote }: { remote: boolean }) {
+export function HfSection({ remote }: { remote: boolean }) {
   const workspace = useWorkspace();
   const { getHfSettingsQuery } = workspace.queries;
   const { queryClient } = workspace;
@@ -3546,7 +3546,7 @@ function HfSection({ remote }: { remote: boolean }) {
                 {settings.username}
               </dd>
             </div>}
-            {settings.username && settings.orgs.length > 0 && <div className="flex items-center justify-between gap-4">
+            {settings.username && settings.orgs && settings.orgs.length > 0 && <div className="flex items-center justify-between gap-4">
               <dt className="font-medium text-subtext">{m.settings_hf_namespace()}</dt>
               <dd className="m-0 min-w-0">
                 <OptionPicker
@@ -3578,6 +3578,16 @@ function HfSection({ remote }: { remote: boolean }) {
             <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{settings.validationError}</p>
           )}
           {settings.namespaceError && <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{settings.namespaceError}</p>}
+          {settings.namespaceError && settings.namespaceSource === "syncedEnv" && settings.username && (
+            <Button
+              type="button"
+              className="mt-2 self-start"
+              disabled={namespaceSaving || saving}
+              onClick={() => void chooseNamespace(settings.username!)}
+            >
+              {m.settings_hf_namespace_use_personal({ name: settings.username })}
+            </Button>
+          )}
           {settings.namespaceSource === "env" && (
             <p className={SETTINGS_NOTE_CLASS_NAME}>{m.settings_hf_namespace_env_override()}</p>
           )}

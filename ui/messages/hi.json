@@ -927,6 +927,7 @@
   "settings_hf_namespace_personal": "{name} (व्यक्तिगत)",
   "settings_hf_namespace_org_plan": "{name} · {plan} प्लान",
   "settings_hf_namespace_env_override": "ORX_HF_NAMESPACE प्रोसेस एनवायरनमेंट में सेट है। यहाँ चुनने के लिए उसे वहाँ से हटाएँ।",
+  "settings_hf_namespace_use_personal": "{name} में चलाएँ",
   "settings_restart_version": "वर्शन {installed} इंस्टॉल है। यह विंडो अभी भी {current} चला रही है।",
   "settings_install_cli_title": "{command} कमांड इंस्टॉल करें",
   "settings_install_cli_description": "आपके टर्मिनल में {command} जोड़ता है, जो इसी ऐप की ओर इशारा करता है, ताकि CLI और ऐप हमेशा एक ही वर्शन के रहें।",

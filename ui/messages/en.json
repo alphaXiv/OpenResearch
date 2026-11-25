@@ -927,6 +927,7 @@
   "settings_hf_namespace_personal": "{name} (personal)",
   "settings_hf_namespace_org_plan": "{name} · {plan} plan",
   "settings_hf_namespace_env_override": "ORX_HF_NAMESPACE is set in the process environment. Remove it there to choose here.",
+  "settings_hf_namespace_use_personal": "Launch in {name}",
   "settings_restart_version": "Version {installed} is installed. This window is still running {current}.",
   "settings_install_cli_title": "Install the {command} command",
   "settings_install_cli_description": "Adds {command} to your terminal, pointing at this app, so the CLI and app are always the same version.",

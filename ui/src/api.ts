@@ -586,12 +586,13 @@ export interface HfSettings {
   jobsWrite: boolean | null;
   sourceStaging: boolean | null;
   sourceStagingError: string | null;
-  /** Where jobs launch and are billed; the account itself unless an organization was chosen. */
-  namespace: string | null;
+  /** Where jobs launch and are billed; the account itself unless an organization was chosen.
+   * Absent from servers older than the namespace choice, like the three fields after it. */
+  namespace?: string | null;
   /** "env" when orx's own process environment chooses it, which overrides anything saved here. */
-  namespaceSource: "env" | "syncedEnv" | null;
-  namespaceError: string | null;
-  orgs: { name: string; plan: string | null; canPay: boolean | null; role: string | null }[];
+  namespaceSource?: "env" | "syncedEnv" | null;
+  namespaceError?: string | null;
+  orgs?: { name: string; plan: string | null; canPay: boolean | null; role: string | null }[];
 }
 
 export interface TinkerSettings {
