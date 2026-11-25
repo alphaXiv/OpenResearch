@@ -1,3 +1,6 @@
+// The update tests fake the agent CLI with shell scripts, so most helpers serve only Unix.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
+
 use super::*;
 use crate::local::chat::WirePart;
 use crate::store::{StoredChatMessage, NOTES_KEPT};
