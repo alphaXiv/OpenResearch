@@ -8369,6 +8369,7 @@ impl ChatHost {
     /// turn itself would have shown them.
     fn record_read_steers(&self, session_id: &str, message_id: &str, steers: &[SteerMessage]) {
         let recorded = Store::open().and_then(|store| {
+            let _write = self.msg_write.lock().unwrap();
             let stored = store
                 .get_chat_message(message_id)?
                 .ok_or_else(|| anyhow!("the stopped reply {message_id} is gone"))?;
