@@ -9829,7 +9829,7 @@ export function ChatPanel({
             />
           )}
           {queued.length > 0 && (
-            <div className="composer-queued flex flex-col gap-1 mb-1.5">
+            <div className="composer-queued flex flex-col gap-1 mb-2.5">
               {queued.map((q, index) => (
                 <div
                   key={q.id}
