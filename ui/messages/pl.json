@@ -1081,6 +1081,7 @@
   "chat_pasted_image": "Wklejony obraz",
   "chat_type_custom_answer": "Wpisz własną odpowiedź…",
   "chat_steering": "Kierowanie…",
+  "chat_sends_after_compacting": "Wyśle się po skróceniu kontekstu…",
   "chat_new_chat_placeholder": "Opisz, co wypróbować dalej, dodaj publikacje i pliki przez @ albo wpisz /, aby użyć poleceń i umiejętności.",
   "chat_followup_placeholder": "Zadaj pytanie uzupełniające, daj wskazówki albo dodaj publikacje i pliki przez @.",
   "chat_harness_unavailable": "{harness} jest niedostępny — otwórz wybór modelu",

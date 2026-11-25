@@ -1107,6 +1107,7 @@
   "chat_pasted_image": "Yapıştırılan görsel",
   "chat_type_custom_answer": "Özel bir yanıt yazın…",
   "chat_steering": "Yönlendiriliyor…",
+  "chat_sends_after_compacting": "Sıkıştırmadan sonra gönderilecek…",
   "chat_new_chat_placeholder": "Sırada neyi denemek istediğini anlat, @ ile makale ve dosya ekle ya da komutlar ve skill'ler için / yaz.",
   "chat_followup_placeholder": "Bir takip sorusu sor, geri bildirim ver ya da @ ile makale ve dosya ekle.",
   "chat_harness_unavailable": "{harness} kullanılamıyor — model seçiciyi açın",

@@ -1081,6 +1081,7 @@
   "chat_pasted_image": "貼り付けた画像",
   "chat_type_custom_answer": "回答を入力…",
   "chat_steering": "指示を送信中…",
+  "chat_sends_after_compacting": "圧縮後に送信…",
   "chat_new_chat_placeholder": "次に試したいことを書く、@ で論文やファイルを追加する、または / でコマンドとスキルを使えます。",
   "chat_followup_placeholder": "続けて質問する、フィードバックを送る、または @ で論文やファイルを追加できます。",
   "chat_harness_unavailable": "{harness} は利用できません — モデル選択を開いてください",

@@ -1075,6 +1075,7 @@
   "chat_pasted_image": "粘贴的图片",
   "chat_type_custom_answer": "输入自定义回答…",
   "chat_steering": "正在补充指示…",
+  "chat_sends_after_compacting": "压缩后发送…",
   "chat_new_chat_placeholder": "描述接下来要尝试什么，用 @ 添加论文和文件，或输入 / 使用命令和技能。",
   "chat_followup_placeholder": "继续提问、给出反馈，或用 @ 添加论文和文件。",
   "chat_harness_unavailable": "{harness} 不可用 — 请打开模型选择器",

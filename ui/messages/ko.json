@@ -1081,6 +1081,7 @@
   "chat_pasted_image": "붙여넣은 이미지",
   "chat_type_custom_answer": "직접 답변 입력…",
   "chat_steering": "지시 전달 중…",
+  "chat_sends_after_compacting": "압축 후 전송…",
   "chat_new_chat_placeholder": "다음에 시도할 일을 설명하거나, @로 논문과 파일을 추가하거나, /로 명령과 스킬을 사용하세요.",
   "chat_followup_placeholder": "후속 질문을 하거나, 피드백을 주거나, @로 논문과 파일을 추가하세요.",
   "chat_harness_unavailable": "{harness} 사용 불가 — 모델 선택기 열기",

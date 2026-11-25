@@ -1080,6 +1080,7 @@
   "chat_pasted_image": "صورة ملصقة",
   "chat_type_custom_answer": "اكتب إجابة مخصصة…",
   "chat_steering": "جارٍ التوجيه…",
+  "chat_sends_after_compacting": "يُرسل بعد الضغط…",
   "chat_new_chat_placeholder": "صِف ما تريد تجربته تاليًا، أو أضف أوراقًا وملفات بـ @، أو اكتب / للأوامر والمهارات.",
   "chat_followup_placeholder": "اطرح سؤال متابعة، أو قدّم ملاحظاتك، أو أضف أوراقًا وملفات بـ @.",
   "chat_harness_unavailable": "{harness} غير متاح — افتح مُنتقي النماذج",
