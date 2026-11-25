@@ -55,6 +55,20 @@ test("a save that loses to an outside edit keeps the draft and shows the newer f
   assert.equal(onDisk.content, "", "an empty editor saves, clearing the instructions");
 });
 
+test("an unsaved draft survives leaving and coming back to Settings", async () => {
+  serve((url) => {
+    if (url === "/api/user-skills") return { skills: [] };
+    if (url === "/api/latex-templates") return { templates: [] };
+    if (url === "/api/settings/instructions") return file("Saved.", "v1");
+  });
+  const first = await render(createElement(SkillsTab));
+  await settle();
+  await type(first.container.querySelector("textarea"), "Unsaved.");
+  const again = await render(createElement(SkillsTab), first.workspace);
+  await settle();
+  assert.equal(again.container.querySelector("textarea").value, "Unsaved.");
+});
+
 const proposal = (instructionsVersion) => ({
   id: "instructions_1",
   type: "prompt",

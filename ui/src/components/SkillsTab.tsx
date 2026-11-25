@@ -6,7 +6,7 @@ import { m } from "../paraglide/messages.js";
 import { mutDeleteLatexTemplate, mutDeleteUserSkill, mutUpdateUserSkill, mutUploadLatexTemplate, mutUploadUserSkill } from "../queries/settings";
 import { fmtBytes, ltr } from "../i18n";
 import { Pencil, RefreshCw, Trash2, Upload, X } from "lucide-react";
-import { useCallback, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { FileChangedError, fmtNumber, timeAgo, type LatexTemplate, type UserSkill, type SkillDiscovery } from "../api";
 import { Badge, Button, DialogContent, DialogTitle, IconButton, Spinner, Textarea, showAlert } from "./ui";
 import { copyToClipboard } from "../clipboard";
@@ -544,7 +544,8 @@ function InstructionsCard() {
   const workspace = useWorkspace();
   const query = useQuery(workspace.queries.getInstructionsQuery());
   const saved = query.data;
-  const [draft, setDraft] = useState<{ content: string; base: string } | null>(null);
+  const [draft, setDraft] = useState(() => workspace.instructionsDraft.current);
+  useEffect(() => { workspace.instructionsDraft.current = draft; }, [workspace, draft]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const headingId = useId();

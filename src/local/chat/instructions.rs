@@ -67,6 +67,10 @@ pub fn write(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let current = read(path)?;
+    // Already saved, as when an approval is answered again after the agent couldn't be told.
+    if current.exists && current.content == content {
+        return Ok(Ok(current));
+    }
     if current.version != base_version {
         return Ok(Err(current));
     }
@@ -184,7 +188,7 @@ impl ChatHost {
         } else {
             "The user declined your proposed change to their OpenResearch instructions, so they stay as they were."
         };
-        self.resolve_prompt_card(&req);
+        // The card stays open until the agent is told, so a failed send can be answered again.
         self.send_message(
             &session.id,
             format!("{ORX_MESSAGE_PREFIX}{told}"),
@@ -202,7 +206,8 @@ impl ChatHost {
             }),
         )
         .await
-        .context("Your answer is saved, but the agent couldn't be told")?;
+        .context("The agent couldn't be told your answer. Answer the card again to retry")?;
+        self.resolve_prompt_card(&req);
         Ok(())
     }
 }
@@ -273,6 +278,11 @@ mod tests {
         let stale = write(&path, "second", &base.version).unwrap().unwrap_err();
         assert_eq!(stale.content, "first");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+        // Answering an approval again after it was saved succeeds without a second write.
+        assert_eq!(
+            write(&path, "first", &base.version).unwrap().unwrap(),
+            saved
+        );
 
         assert!(write(&path, "", &saved.version).unwrap().is_ok());
         assert_eq!(turn_context(&path).unwrap(), None);
