@@ -150,3 +150,22 @@ test("a slow save doesn't erase edits made after it", async () => {
   await settle();
   assert.equal(first.workspace.instructionsDraft.current, newer);
 });
+
+test("a conflict whose reload fails says the file couldn't be read", async () => {
+  let reads = 0;
+  serve((url, init) => {
+    if (url === "/api/user-skills") return { skills: [] };
+    if (url === "/api/latex-templates") return { templates: [] };
+    if (url !== "/api/settings/instructions") return;
+    if (init.method === "PUT") return Response.json({ error: "changed", code: "fileChanged", currentVersion: "v2", exists: true }, { status: 409 });
+    reads += 1;
+    return reads === 1 ? file("Saved.", "v1") : Response.json({ error: "Couldn't read the instructions." }, { status: 500 });
+  });
+  const { container } = await render(createElement(SkillsTab));
+  await settle();
+  await type(container.querySelector("textarea"), "Mine.");
+  await act(async () => find("button", m.common_save()).click());
+  await settle();
+  assert.ok(find('[role="alert"]', "Couldn't read the instructions."));
+  assert.equal(container.querySelector("textarea").value, "Mine.");
+});

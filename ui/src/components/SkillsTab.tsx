@@ -563,8 +563,12 @@ function InstructionsCard() {
       if (workspace.instructionsDraft.current === edited) workspace.instructionsDraft.current = null;
       setDraft((current) => (current === edited ? null : current));
     } catch (e) {
-      if (e instanceof FileChangedError) await query.refetch();
-      else setError(e instanceof Error ? e.message : String(e));
+      if (e instanceof FileChangedError) {
+        const reloaded = await query.refetch();
+        if (reloaded.error) setError(m.common_failed_to_load({ error: reloaded.error.message }));
+      } else {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
       setSaving(false);
     }

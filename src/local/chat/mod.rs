@@ -4596,8 +4596,10 @@ impl ChatHost {
         prompt_id: String,
         prompt: WirePrompt,
     ) -> Result<HeldPermission> {
+        // Held before the card shows, so an answer can't arrive with no one waiting for it.
+        let held = self.hold_card(session_id, prompt_id.clone());
         self.post_card(session_id, &prompt_id, prompt).await?;
-        Ok(self.hold_card(session_id, prompt_id))
+        Ok(held)
     }
 
     async fn post_card(
