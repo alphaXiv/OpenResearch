@@ -367,10 +367,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     : null;
   const projectSettingsQuery = useQuery(getProjectSettingsQuery(projectId));
   const projectSettings = projectSettingsQuery.data;
-  // "New chat with…" names the agent its draft starts with, over the project's.
-  const [draftAgent, setDraftAgent] = useState<{ projectId: string; agent: AgentSelection } | null>(null);
-  useEffect(() => { if (activeSessionId) setDraftAgent(null); }, [activeSessionId]);
-  const chosenDraftAgent = draftAgent?.projectId === projectId ? draftAgent.agent : null;
   const experimentsQuery = useQuery(listExperimentsQuery(projectId));
   const experiments = experimentsQuery.data ?? [];
   const experimentDataReady = !experimentsQuery.isPending;
@@ -2036,9 +2032,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             runtime={runtime}
             activeSessionId={activeSessionId}
             onActiveSessionChange={(...args) => { setMobileRailOpen(false); onActiveSessionChange(...args); }}
-            preferredAgent={chosenDraftAgent ?? (projectSettingsQuery.isSuccess ? projectSettings?.agent ?? uiState.preferredAgent : null)}
+            preferredAgent={projectSettingsQuery.isSuccess ? projectSettings?.agent ?? uiState.preferredAgent : null}
             onPreferredAgentChange={persistPreferredAgent}
-            onStartHarnessDraft={(agent) => { setDraftAgent({ projectId, agent }); onActiveSessionChange(null, { projectId }); }}
           >
             {mainView !== "chat" ? (
               <SettingsView
@@ -2509,7 +2504,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                         if (sessionId === null && deleted) forgetSideTab(sideTab);
                         else onActiveSessionChange(sessionId, options);
                       }}
-                      onStartHarnessDraft={(agent) => { setDraftAgent({ projectId, agent }); onActiveSessionChange(null, { projectId }); }}
                       preferredAgent={sideTab.sessionId === null ? sideDraftAgent : uiState.preferredAgent}
                       onPreferredAgentChange={persistPreferredAgent}
                     />

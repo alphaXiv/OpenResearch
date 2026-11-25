@@ -44,7 +44,7 @@ function titleOf(block: ViewBlock, monitor: RunMonitor): string | null {
 }
 
 /** A block that throws says so in its place and the rest of the view keeps drawing. A newer revision tries it again. */
-class Boundary extends Component<{ title: string; rev: number; children: ReactNode }, { failed: boolean }> {
+export class Boundary extends Component<{ title: string; rev: number; children: ReactNode }, { failed: boolean }> {
   state = { failed: false };
   static getDerivedStateFromError() {
     return { failed: true };

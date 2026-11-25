@@ -401,6 +401,28 @@ impl Store {
         Ok(())
     }
 
+    /// The model the user picked to watch the chat with: None for no pick, `Some(None)` for the
+    /// chat's own model, else a route's id.
+    pub(crate) fn chat_watch_route(&self, chat: &str) -> Result<Option<Option<String>>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT route FROM chat_watch_models WHERE chat_session_id = ?1",
+                [chat],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub(crate) fn set_chat_watch_route(&self, chat: &str, route: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO chat_watch_models (chat_session_id, route) VALUES (?1, ?2)
+             ON CONFLICT(chat_session_id) DO UPDATE SET route = excluded.route",
+            params![chat, route],
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn last_chat_watch_at(&self, chat: &str) -> Result<Option<i64>> {
         Ok(self.conn.query_row(
             "SELECT MAX(created_at) FROM watch_looks WHERE chat_session_id = ?1",

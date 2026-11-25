@@ -1,5 +1,5 @@
 import type { WorkspaceEvents } from "../workspace";
-import type { AgentSelection, Api, ChatSession, ChatSessionPatch, HarnessId, NativeChat, PromptAnswer, SidebarCard, SidebarChatPage, SidebarChatTotals, TurnOptions } from "../api";
+import type { AgentSelection, Api, ChatReportChoice, ChatSession, ChatSessionPatch, HarnessId, NativeChat, PromptAnswer, SidebarCard, SidebarChatPage, SidebarChatTotals, TurnOptions } from "../api";
 import type { ChatEvent } from "../events";
 import type { WorkspaceClient } from "./client";
 
@@ -194,6 +194,20 @@ export function createChatQueries(
     staleTime: Infinity,
   });
 
+  /** Kept current by `chat.report` events. */
+  const getChatReportQuery = (sessionId: string) => queryOptions({
+    queryKey: workspaceKey("getChatReport", sessionId),
+    queryFn: ({ signal, client, queryKey }) => readLiveSnapshot(client, queryKey, () => api.getChatReport(sessionId, signal)),
+    staleTime: Infinity,
+  });
+
+  /** Read again each time the offer shows, since setting up an agent adds models. */
+  const listChatReportModelsQuery = (sessionId: string) => queryOptions({
+    queryKey: workspaceKey("listChatReportModels", sessionId),
+    queryFn: ({ signal }) => api.listChatReportModels(sessionId, signal),
+    staleTime: 0,
+  });
+
   return {
     citedMessageQuery,
     listChatSessionsQuery,
@@ -206,6 +220,8 @@ export function createChatQueries(
     readSidebarChatPage,
     listSidebarChatSessionsQuery,
     listChatShownRunsQuery,
+    getChatReportQuery,
+    listChatReportModelsQuery,
   };
 }
 
@@ -643,5 +659,43 @@ export const mutRespondChat = mutations.define({
   },
   key: ({ args: [ws, session] }) => [ws.identity, session.id],
   describe: "send the answer",
+  describeResult: null,
+});
+
+/** The server clears the failure at once and updates once the gap since the last update passes. */
+export const mutRefreshChatReport = mutations.define({
+  id: "chat/report/refresh",
+  mutate: (ws: Workspace, sessionId: string) => ws.api.refreshChatReport(sessionId),
+  optimistic({ helpers, args: [ws, sessionId] }) {
+    helpers(ws.queryClient).updateExisting(ws.queries.getChatReportQuery(sessionId), (report) => report && { ...report, error: null });
+  },
+  key: ({ args: [ws, sessionId] }) => [ws.identity, sessionId],
+  describe: "update the status",
+  describeResult: null,
+});
+
+/** Turning it off hides the card at once; turning it on shows it when the server's reply or event lands. */
+export const mutSetChatReportEnabled = mutations.define({
+  id: "chat/report/enabled",
+  mutate: (ws: Workspace, sessionId: string, enabled: boolean) => ws.api.setChatReportEnabled(sessionId, enabled),
+  optimistic({ helpers, args: [ws, sessionId, enabled] }) {
+    const query = ws.queries.getChatReportQuery(sessionId);
+    helpers(ws.queryClient).updateExisting(query, (report) => report && { ...report, enabled });
+    helpers(ws.queryClient).refetchOnSettled(query);
+  },
+  key: ({ args: [ws, sessionId] }) => [ws.identity, sessionId],
+  describe: "change the chat's status",
+  describeResult: null,
+});
+
+/** The status starts writing as soon as a model is picked; the server's event fills it. */
+export const mutChooseChatReportModel = mutations.define({
+  id: "chat/report/model",
+  mutate: (ws: Workspace, sessionId: string, choice: ChatReportChoice) => ws.api.chooseChatReportModel(sessionId, choice),
+  optimistic({ helpers, args: [ws, sessionId] }) {
+    helpers(ws.queryClient).updateExisting(ws.queries.getChatReportQuery(sessionId), (report) => report && { ...report, needsModel: null, writing: true, error: null });
+  },
+  key: ({ args: [ws, sessionId] }) => [ws.identity, sessionId],
+  describe: "choose the status's model",
   describeResult: null,
 });

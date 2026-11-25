@@ -4,6 +4,7 @@
 
 mod digest;
 pub(super) mod reply;
+pub(crate) mod report;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -18,7 +19,8 @@ use crate::local::harness::{
     sign_in_revision, OneShot, OneShotAuthError, OneShotQuality, OneShotUsage,
 };
 use crate::store::{
-    LookResult, Store, StoredChatSession, StoredRun, WatchCount, WatchLook, WatchLookRun,
+    LookResult, Store, StoredChatSession, StoredRun, StoredUiState, WatchCount, WatchLook,
+    WatchLookRun,
 };
 
 /// Ceilings on silence after a stage starts, in seconds: a look at least this often while the run
@@ -63,8 +65,10 @@ pub(crate) enum Watching {
         model: Option<String>,
         label: String,
     },
-    /// The chat's agent has no cheap model of its own; one has to be picked.
+    /// No model follows from the chat's own; the user has to pick one.
     NeedsPick,
+    /// orx has not yet read which models the user's agents offer, which the answer turns on.
+    ReadingRoutes,
     /// It has one that cannot be used now, for this reason.
     Unavailable(String),
     NeedsSignIn(String),
@@ -79,7 +83,7 @@ impl Watching {
         match self {
             Self::Selected { .. } => "on",
             Self::NeedsPick => "needs_pick",
-            Self::Unavailable(_) | Self::NeedsSignIn(_) => "no_model",
+            Self::ReadingRoutes | Self::Unavailable(_) | Self::NeedsSignIn(_) => "no_model",
             Self::Off => "off",
             Self::Unfollowed => "none",
         }
@@ -111,28 +115,301 @@ fn luna() -> &'static Mutex<HashMap<Option<String>, CatalogRead>> {
 }
 
 const CATALOG_TTL: Duration = Duration::from_secs(600);
+const READING_ROUTES: &str = "Reading which models your agents offer";
 /// The wait after a first failed read of Codex's catalog, doubling up to [`CATALOG_TTL`].
 const CATALOG_RETRY: Duration = Duration::from_secs(30);
 
-/// The one answer to "which model watches this chat": Claude Code's cheap one-shot (Haiku) on
-/// Claude Code, GPT Luna from Codex's own catalog on Codex, and a pick on every other agent,
-/// which this orx does not offer yet. `ORX_WATCH_WITH=<agent>` stands in for that pick.
+/// A model a chat can be watched with: an agent that promises a look no tools, its sign-in, and
+/// the model as the agent's catalog lists it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WatchRoute {
+    pub(crate) harness: String,
+    pub(crate) profile: Option<String>,
+    pub(crate) model: String,
+    pub(crate) label: String,
+}
+
+/// What a pick of a route keeps.
+pub(crate) fn route_id(harness: &str, profile: Option<&str>, model: &str) -> String {
+    json!([harness, profile, model]).to_string()
+}
+
+impl WatchRoute {
+    fn id(&self) -> String {
+        route_id(&self.harness, self.profile.as_deref(), &self.model)
+    }
+
+    fn watching(&self) -> Watching {
+        Watching::Selected {
+            harness: self.harness.clone(),
+            profile: self.profile.clone(),
+            model: Some(self.model.clone()),
+            label: self.label.clone(),
+        }
+    }
+}
+
+/// `haiku` for a Claude model and `luna` for a GPT one: the vendor's cheap model's name.
+fn cheap_name(model: &str) -> Option<&'static str> {
+    let canonical = crate::local::model_routes::canonical(model);
+    if canonical.starts_with("claude-") {
+        Some("haiku")
+    } else if canonical.starts_with("gpt-") {
+        Some("luna")
+    } else {
+        None
+    }
+}
+
+/// `haiku` or `luna` when `model` is that vendor's cheap model, Claude Code's `haiku` alias too.
+fn cheap_kind(model: &str) -> Option<&'static str> {
+    let canonical = crate::local::model_routes::canonical(model);
+    if canonical == "haiku" {
+        return Some("haiku");
+    }
+    cheap_name(model).filter(|name| canonical.split('-').any(|part| part == *name))
+}
+
+/// Every route `catalog`, an `/api/harnesses` answer, offers this user, less what Settings turns
+/// off: Haiku and GPT Luna first, then free models, then the rest. None while a catalog is still
+/// being read.
+pub(crate) fn watch_routes(catalog: &Value, ui: &StoredUiState) -> Result<Option<Vec<WatchRoute>>> {
+    use crate::local::model_routes;
+
+    let mut catalog = catalog.clone();
+    model_routes::filter_agents(&mut catalog, &ui.hidden_agents, None).map_err(|e| anyhow!(e))?;
+    let mut routes = Vec::new();
+    for entry in catalog["harnesses"].as_array().into_iter().flatten() {
+        let Some(harness) = entry["id"].as_str() else {
+            continue;
+        };
+        if !crate::local::harness::chat_harness(harness)
+            .is_some_and(|agent| agent.runs_without_tools())
+        {
+            continue;
+        }
+        if entry["catalogPending"] == true {
+            return Ok(None);
+        }
+        if entry["agentReady"] != true {
+            continue;
+        }
+        let profile = entry
+            .pointer("/profile/id")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        for model in entry["models"].as_array().into_iter().flatten() {
+            let Some(id) = model["id"]
+                .as_str()
+                .filter(|id| crate::local::harness::concrete_model(id))
+            else {
+                continue;
+            };
+            // Claude Code's one-shot runs Haiku whatever model it is given.
+            if harness == "claude-code" && cheap_kind(id) != Some("haiku") {
+                continue;
+            }
+            let name = model_routes::parse(
+                harness,
+                id,
+                model["displayName"].as_str(),
+                model["resolvedModel"].as_str(),
+            );
+            if ui.hidden_models.contains(&name.key) {
+                continue;
+            }
+            routes.push(WatchRoute {
+                harness: harness.into(),
+                profile: profile.clone(),
+                model: id.into(),
+                label: name.label,
+            });
+        }
+    }
+    routes.sort_by_key(|route| match route.model.as_str() {
+        model if cheap_kind(model).is_some() => 0,
+        model if model_routes::free(model) => 1,
+        _ => 2,
+    });
+    Ok(Some(routes))
+}
+
+/// The routes as the watcher last read them from `orx up`'s detected agents; None until it
+/// first reads a complete catalog.
+fn known_routes() -> &'static Mutex<Option<Vec<WatchRoute>>> {
+    static ROUTES: OnceLock<Mutex<Option<Vec<WatchRoute>>>> = OnceLock::new();
+    ROUTES.get_or_init(Default::default)
+}
+
+/// Keeps the routes `catalog` offers for [`watching_model`], and the last ones while a catalog is
+/// still being read.
+pub(crate) fn remember_routes(catalog: &Value) {
+    let routes = Store::open()
+        .and_then(|store| store.ui_state())
+        .and_then(|ui| watch_routes(catalog, &ui));
+    match routes {
+        Ok(Some(routes)) => {
+            *known_routes()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(routes)
+        }
+        Ok(None) => {}
+        Err(error) => eprintln!("orx up: watcher: reading which models can watch: {error:#}"),
+    }
+}
+
+/// The chat's own model as a route, where its agent can run that model without tools; otherwise
+/// why not, in the user's words.
+fn own_route(
+    chat: &StoredChatSession,
+    routes: Option<&[WatchRoute]>,
+) -> std::result::Result<WatchRoute, String> {
+    let agent = crate::local::harness::chat_harness(&chat.harness)
+        .ok_or_else(|| format!("{} is not an agent this orx knows", chat.harness))?;
+    let model = chat
+        .model
+        .as_deref()
+        .filter(|model| crate::local::harness::concrete_model(model));
+    let (Some(model), true) = (
+        model,
+        agent.runs_without_tools() && agent.one_shot_honours_model(),
+    ) else {
+        return Err(format!(
+            "{} can't run this chat's own model without tools",
+            agent.name()
+        ));
+    };
+    let listed = routes.into_iter().flatten().find(|route| {
+        route.harness == chat.harness && route.profile == chat.profile_id && route.model == model
+    });
+    Ok(listed.cloned().unwrap_or_else(|| WatchRoute {
+        harness: chat.harness.clone(),
+        profile: chat.profile_id.clone(),
+        model: model.into(),
+        label: crate::local::model_routes::parse(&chat.harness, model, None, None).label,
+    }))
+}
+
+/// Claude Code's Haiku, or GPT Luna from Codex's own catalog.
+fn own_cheap(harness: &str, profile: Option<String>) -> Watching {
+    match harness {
+        "claude-code" => Watching::Selected {
+            harness: harness.into(),
+            profile,
+            model: None,
+            label: "Claude Haiku".into(),
+        },
+        "codex" => {
+            let known = luna()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&profile)
+                .map(|read| read.luna.clone());
+            match known {
+                None => Watching::ReadingRoutes,
+                Some(Err(cause)) => Watching::Unavailable(format!(
+                    "Couldn't read which models Codex offers: {cause}"
+                )),
+                Some(Ok(None)) => {
+                    Watching::Unavailable("Codex offers no GPT Luna to watch with".into())
+                }
+                Some(Ok(Some((model, label)))) => Watching::Selected {
+                    harness: harness.into(),
+                    profile,
+                    model: Some(model),
+                    label,
+                },
+            }
+        }
+        _ => Watching::Unavailable(format!("{harness} has no watching model")),
+    }
+}
+
+/// The watching model of a chat the user picked none for.
+fn unpicked(chat: &StoredChatSession, routes: Option<&[WatchRoute]>) -> Watching {
+    if matches!(chat.harness.as_str(), "claude-code" | "codex") {
+        return own_cheap(&chat.harness, chat.profile_id.clone());
+    }
+    if let Some(agent) = std::env::var("ORX_WATCH_WITH")
+        .ok()
+        .filter(|id| !id.is_empty())
+    {
+        return own_cheap(&agent, None);
+    }
+    let model = chat.model.as_deref().unwrap_or_default();
+    if chat.harness == "opencode" && crate::local::model_routes::free(model) {
+        return own_route(chat, routes)
+            .map_or_else(Watching::Unavailable, |route| route.watching());
+    }
+    let Some(cheap) = cheap_name(model) else {
+        return Watching::NeedsPick;
+    };
+    let Some(routes) = routes else {
+        return Watching::ReadingRoutes;
+    };
+    let provider = model.split_once('/').map(|(provider, _)| provider);
+    let same_provider = |route: &WatchRoute| {
+        chat.harness == "opencode"
+            && route.harness == "opencode"
+            && route.model.split_once('/').map(|(provider, _)| provider) == provider
+    };
+    let own_agent = if cheap == "haiku" {
+        "claude-code"
+    } else {
+        "codex"
+    };
+    routes
+        .iter()
+        .filter(|route| cheap_kind(&route.model) == Some(cheap))
+        .filter(|route| same_provider(route) || route.harness == own_agent)
+        .min_by_key(|route| {
+            let newest = std::cmp::Reverse(crate::local::model_routes::canonical(&route.model));
+            (!same_provider(route), route.profile.is_some(), newest)
+        })
+        .map_or(Watching::NeedsPick, WatchRoute::watching)
+}
+
+/// The one answer to "which model watches this chat": the model the user picked for it; else
+/// Haiku on Claude Code and GPT Luna on Codex; else the chat's own model when it is a free one;
+/// else, for a Claude or GPT model on another agent, Haiku or GPT Luna through the chat's own
+/// provider or the user's own Claude Code or Codex; else a pick. `ORX_WATCH_WITH=<agent>` stands
+/// in for a pick of that agent's cheap model on every chat with none of its own.
 pub(crate) fn watching_model(store: &Store, chat: &StoredChatSession) -> Result<Watching> {
     if !store.ui_state()?.run_watching {
         return Ok(Watching::Off);
     }
-    let picked = std::env::var("ORX_WATCH_WITH")
-        .ok()
-        .filter(|id| !id.is_empty());
-    let harness = match chat.harness.as_str() {
-        "claude-code" | "codex" => chat.harness.clone(),
-        _ => match picked {
-            Some(id) => id,
-            None => return Ok(Watching::NeedsPick),
-        },
+    let pick = store.chat_watch_route(&chat.id)?;
+    let watching = {
+        let routes = known_routes()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let routes = routes.as_deref();
+        match pick {
+            None => unpicked(chat, routes),
+            Some(None) => {
+                own_route(chat, routes).map_or_else(Watching::Unavailable, |route| route.watching())
+            }
+            Some(Some(id)) => match routes {
+                None => Watching::ReadingRoutes,
+                Some(routes) => routes.iter().find(|route| route.id() == id).map_or_else(
+                    || {
+                        Watching::Unavailable(
+                            "the model picked for this chat is no longer offered. Pick another one"
+                                .into(),
+                        )
+                    },
+                    WatchRoute::watching,
+                ),
+            },
+        }
     };
-    let profile = chat.profile_id.clone().filter(|_| harness == chat.harness);
-    let Some(agent) = crate::local::harness::chat_harness(&harness) else {
+    let Watching::Selected {
+        harness, profile, ..
+    } = &watching
+    else {
+        return Ok(watching);
+    };
+    let Some(agent) = crate::local::harness::chat_harness(harness) else {
         return Ok(Watching::Unavailable(format!(
             "{harness} is not an agent this orx knows"
         )));
@@ -144,45 +421,43 @@ pub(crate) fn watching_model(store: &Store, chat: &StoredChatSession) -> Result<
         )));
     }
     if matches!(harness.as_str(), "claude-code" | "codex") {
-        if let Some(rejected) = store.watch_auth_refusal(&harness, profile.as_deref())? {
-            if rejected == sign_in_revision(&harness, profile.as_deref())? {
+        if let Some(rejected) = store.watch_auth_refusal(harness, profile.as_deref())? {
+            if rejected == sign_in_revision(harness, profile.as_deref())? {
                 return Ok(Watching::NeedsSignIn(agent.name().into()));
             }
         }
     }
-    match harness.as_str() {
-        "claude-code" => Ok(Watching::Selected {
-            harness,
-            profile,
-            model: None,
-            label: "Claude Haiku".into(),
-        }),
-        "codex" => {
-            let known = luna()
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .get(&profile)
-                .map(|read| read.luna.clone());
-            Ok(match known {
-                None => Watching::Unavailable("Reading which models Codex offers".into()),
-                Some(Err(cause)) => Watching::Unavailable(format!(
-                    "Couldn't read which models Codex offers: {cause}"
-                )),
-                Some(Ok(None)) => {
-                    Watching::Unavailable("Codex offers no GPT Luna to watch with".into())
-                }
-                Some(Ok(Some((model, label)))) => Watching::Selected {
-                    harness,
-                    profile,
-                    model: Some(model),
-                    label,
-                },
-            })
-        }
-        _ => Ok(Watching::Unavailable(format!(
-            "{} has no watching model",
-            agent.name()
-        ))),
+    Ok(watching)
+}
+
+/// What the page offers a chat whose model can't watch and report, its own or a pick that no
+/// longer resolves, null otherwise: using the chat's own model where that can run without tools.
+pub(crate) fn needs_model(store: &Store, chat: &StoredChatSession) -> Result<Value> {
+    if !matches!(
+        watching_model(store, chat)?,
+        Watching::NeedsPick | Watching::Unavailable(_)
+    ) {
+        return Ok(Value::Null);
+    }
+    let routes = known_routes()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    Ok(json!({"same": own_route(chat, routes.as_deref()).is_ok()}))
+}
+
+/// Checks the user's pick for the chat, `None` for its own model, against `routes`; why it can't
+/// run otherwise, in the user's words.
+pub(crate) fn check_pick(
+    chat: &StoredChatSession,
+    pick: Option<&str>,
+    routes: &[WatchRoute],
+) -> std::result::Result<(), String> {
+    match pick {
+        None => own_route(chat, Some(routes))
+            .map(drop)
+            .map_err(|why| format!("{why}.")),
+        Some(id) if routes.iter().any(|route| route.id() == id) => Ok(()),
+        Some(_) => Err("That model is no longer offered. Pick another one.".into()),
     }
 }
 
@@ -623,8 +898,15 @@ fn wake() -> &'static tokio::sync::Notify {
     WAKE.get_or_init(tokio::sync::Notify::new)
 }
 
-/// Keeps every watched chat's runs looked at, from `orx up`.
-pub(crate) async fn keep_watching(mut stop: tokio::sync::watch::Receiver<()>) {
+/// Keeps every watched chat's runs looked at, from `orx up`, reading before each pass which
+/// models can watch from `agents`, `orx up`'s detected agents.
+pub(crate) async fn keep_watching<Agents, Detected>(
+    agents: Agents,
+    mut stop: tokio::sync::watch::Receiver<()>,
+) where
+    Agents: Fn() -> Detected,
+    Detected: std::future::Future<Output = Value>,
+{
     let now = crate::store::now_ms();
     let prepared = match Store::open().and_then(|store| store.recover_watch_looks(now)) {
         Ok(prepared) => prepared,
@@ -658,7 +940,10 @@ pub(crate) async fn keep_watching(mut stop: tokio::sync::watch::Receiver<()>) {
         tokio::select! {
             biased;
             _ = stop.changed() => break,
-            result = pass(&mut state) => if let Err(error) = result {
+            result = async {
+                remember_routes(&agents().await);
+                pass(&mut state).await
+            } => if let Err(error) = result {
                 eprintln!("orx up: watcher: {error:#}");
             },
         }
@@ -1973,6 +2258,7 @@ fn not_watched(watching: &Watching) -> String {
         Watching::NeedsPick => {
             "This chat's agent has no watching model, so its runs are not watched.".into()
         }
+        Watching::ReadingRoutes => format!("This run is not watched: {READING_ROUTES}."),
         Watching::Unavailable(why) => format!("This run is not watched: {why}."),
         Watching::NeedsSignIn(agent) => {
             format!("Sign in to {agent} on this workspace to resume watching.")
@@ -3100,6 +3386,7 @@ fn read_facts(
         Watching::Selected { label, .. } => (Some(label.clone()), "on", None),
         Watching::Unfollowed => (None, "none", None),
         Watching::Unavailable(why) => (None, watching.state(), Some(why.clone())),
+        Watching::ReadingRoutes => (None, watching.state(), Some(READING_ROUTES.into())),
         Watching::NeedsSignIn(agent) => (
             None,
             watching.state(),

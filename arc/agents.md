@@ -40,7 +40,7 @@ An agent either ends its turn on a question and takes the answer as the next mes
 
 ## Switching agents
 
-**A switch is a settings change and a transcript row, with no model call.** Only an idle chat with no queued messages can switch. A returning harness resumes its last session on the active branch and gets only the conversation since its last reply; a new harness gets the active conversation.
+**A switch is a settings change and a transcript row, with no model call.** An idle chat switches when the user picks the agent. During a turn the pick waits for the next message, which takes the chat over: the turn stops, and that message runs first on the new agent, with the queued messages after it on the new agent's settings. A returning harness resumes its last session on the active branch and gets only the conversation since its last reply; a new harness gets the active conversation.
 
 One builder (`src/local/chat/handoff.rs`) renders this handoff and also feeds native-session recovery, compaction's fallback, branch reseeding and side chats:
 

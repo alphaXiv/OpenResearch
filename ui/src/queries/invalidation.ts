@@ -27,7 +27,7 @@ export function isImmutableQuery(query: Query) {
 const fileBodies = ["resolvedFile", "getProjectFile", "getArtifactFileText", "getArtifactFileMetadata"];
 
 export const artifactFamilies = ["getArtifacts", "getArtifactFileText", "getArtifactFileMetadata"];
-export const liveFamilies = ["getSessionExperiments", "getSubagentTranscript", "listChatShownRuns", "getRunMonitor", "listProjects", "listProjectActivity", "listSidebarChatSessions", "listExperiments", "listRuns", "listChatSessions", "getChatMessages", "getHarnesses", "getUpdateStatus", "getUsage", ...artifactFamilies, ...fileBodies, "getAbsoluteFile", "fileVersion", "getCodeTree", "getSessionWorktree", "getRunDiff", "getExperimentDiff", "listEngineHosts"];
+export const liveFamilies = ["getSessionExperiments", "getSubagentTranscript", "listChatShownRuns", "getChatReport", "getRunMonitor", "listProjects", "listProjectActivity", "listSidebarChatSessions", "listExperiments", "listRuns", "listChatSessions", "getChatMessages", "getHarnesses", "getUpdateStatus", "getUsage", ...artifactFamilies, ...fileBodies, "getAbsoluteFile", "fileVersion", "getCodeTree", "getSessionWorktree", "getRunDiff", "getExperimentDiff", "listEngineHosts"];
 
 const settingsFamilies: Record<string, readonly string[]> = {
   hf: ["getHfSettings", "getComputeSettings", "getEnvVars", "getTrackioRuns"],
@@ -129,7 +129,7 @@ export function createInvalidation(client: WorkspaceClient) {
     deletedSessionIds.add(sessionId);
     markLiveUpdate(queryClient, [...scope, "listChatSessions"], sessionId);
     queryClient.setQueriesData<ChatSession[]>({ queryKey: [...scope, "listChatSessions"] }, (rows) => rows?.filter((row) => row.id !== sessionId));
-    for (const family of ["getChatMessages", "getSessionWorktree", "getSessionExperiments"]) void cancelAndRemove({ queryKey: [...scope, family, sessionId] });
+    for (const family of ["getChatMessages", "getChatReport", "getSessionWorktree", "getSessionExperiments"]) void cancelAndRemove({ queryKey: [...scope, family, sessionId] });
   }
 
   function removeProject(projectId: string) {
@@ -158,6 +158,7 @@ export function createInvalidation(client: WorkspaceClient) {
       invalidate(["listRemoteSessions", "getRuntime"], scope);
       return;
     }
+    if (/^\/api\/chat\/sessions\/[^/]+\/report\//.test(path)) return;
     if (path.startsWith("/api/chat/")) {
       if (!streamsSidebarRows(queryClient, scope)) invalidate(["listSidebarChatSessions"], scope);
       // An env card's answer saves variables.

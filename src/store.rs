@@ -11,6 +11,7 @@ mod acp;
 mod costs;
 mod env;
 mod flags;
+mod report;
 pub(crate) mod search;
 mod telemetry;
 mod watch;
@@ -20,6 +21,9 @@ pub(crate) use flags::{
     flag_ask_dedupe, Chosen, FlagChoice, FlagEvent, FlagNotice, NewFlag, Raise,
     FLAG_DELIVERY_UNCONFIRMED, WATCH_FLAG,
 };
+#[cfg(test)]
+pub(crate) use report::NOTES_KEPT;
+pub(crate) use report::{ChatReport, ReportOutcome, ReportTaken};
 pub(crate) use telemetry::{Cost, InvocationIdentity, SampleCost, TokenUsage};
 pub(crate) use watch::{LookResult, WatchCount, WatchLook, WatchLookRun};
 
@@ -1646,6 +1650,10 @@ impl Store {
                 revision TEXT NOT NULL,
                 PRIMARY KEY (harness, profile)
             );
+            CREATE TABLE IF NOT EXISTS chat_watch_models (
+                chat_session_id TEXT PRIMARY KEY,
+                route           TEXT
+            );
             CREATE TABLE IF NOT EXISTS watch_counts (
                 run_id TEXT NOT NULL,
                 pattern TEXT NOT NULL,
@@ -1694,6 +1702,30 @@ impl Store {
                 key         TEXT PRIMARY KEY,
                 description TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS chat_report_versions (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_session_id TEXT NOT NULL,
+                written_at      INTEGER NOT NULL,
+                body            TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_report_versions_chat
+                ON chat_report_versions(chat_session_id, id);
+            CREATE TABLE IF NOT EXISTS chat_reports (
+                chat_session_id TEXT PRIMARY KEY,
+                enabled         INTEGER,
+                confirmed_at    INTEGER,
+                error           TEXT,
+                error_at        INTEGER,
+                due_at          INTEGER,
+                turn_due_at     INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS chat_report_notes (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_session_id TEXT NOT NULL,
+                note            TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_report_notes_chat
+                ON chat_report_notes(chat_session_id, id);
             CREATE TABLE IF NOT EXISTS ui_state (
                 id                       INTEGER PRIMARY KEY CHECK (id = 1),
                 onboarding_completed     INTEGER NOT NULL DEFAULT 0,
@@ -1794,6 +1826,7 @@ impl Store {
             "ALTER TABLE ui_state ADD COLUMN seen_nudges TEXT",
             "ALTER TABLE ui_state ADD COLUMN created_at INTEGER",
             "ALTER TABLE chat_turns ADD COLUMN restart_retried INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE ui_state ADD COLUMN status_for_new_chats INTEGER NOT NULL DEFAULT 1",
         ] {
             if let Err(error) = schema.execute(ddl, []) {
                 if !matches!(
@@ -1831,6 +1864,14 @@ impl Store {
              END;
              CREATE TRIGGER IF NOT EXISTS delete_chat_run_dismissals AFTER DELETE ON chat_sessions BEGIN
                  DELETE FROM run_dismissals WHERE chat_session_id = OLD.id;
+             END;
+             CREATE TRIGGER IF NOT EXISTS delete_chat_report AFTER DELETE ON chat_sessions BEGIN
+                 DELETE FROM chat_reports WHERE chat_session_id = OLD.id;
+                 DELETE FROM chat_report_versions WHERE chat_session_id = OLD.id;
+                 DELETE FROM chat_report_notes WHERE chat_session_id = OLD.id;
+             END;
+             CREATE TRIGGER IF NOT EXISTS delete_chat_watch_model AFTER DELETE ON chat_sessions BEGIN
+                 DELETE FROM chat_watch_models WHERE chat_session_id = OLD.id;
              END;",
         )?;
         // Covers the periodic native-id scan so it never reads the large parts_json.
@@ -2158,7 +2199,7 @@ impl Store {
                     favorite_models, hidden_models, model_section_order,
                     collapsed_model_sections, model_sightings, hidden_agents,
                     run_banner, run_watching, seen_nudges,
-                    opencode_review_model, created_at
+                    opencode_review_model, created_at, status_for_new_chats
              FROM ui_state WHERE id = 1",
             [],
             |row| {
@@ -2205,6 +2246,7 @@ impl Store {
                     run_watching: row.get(18)?,
                     seen_nudges: list(19)?,
                     created_at: row.get(21)?,
+                    status_for_new_chats: row.get(22)?,
                 })
             },
         )?)
@@ -2221,6 +2263,14 @@ impl Store {
     pub fn set_run_watching(&self, on: bool) -> Result<()> {
         self.conn
             .execute("UPDATE ui_state SET run_watching = ?1 WHERE id = 1", [on])?;
+        Ok(())
+    }
+
+    pub fn set_status_for_new_chats(&self, on: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE ui_state SET status_for_new_chats = ?1 WHERE id = 1",
+            [on],
+        )?;
         Ok(())
     }
 
@@ -6730,12 +6780,15 @@ pub struct StoredUiState {
     /// The picker's own record of models it has seen, opaque to the server.
     pub model_sightings: Option<serde_json::Value>,
     pub run_banner: RunBannerLevel,
-    /// Whether the watcher looks at runs; off, nothing is sent to a model.
+    /// Whether the watcher looks at runs and keeps chats' status reports; off, nothing is sent
+    /// to a model.
     pub run_watching: bool,
     /// The ids of model feed nudges the user dismissed.
     pub seen_nudges: Vec<String>,
     /// When this copy first opened its store, in ms; empty for a store older than the field.
     pub created_at: Option<i64>,
+    /// Whether a chat's status report opens on its own; off, only the user opens one.
+    pub status_for_new_chats: bool,
 }
 
 /// Normalized transcript entry; `parts_json` is the wire-format parts array
@@ -13784,6 +13837,7 @@ pub(crate) mod tests {
                 run_watching: true,
                 seen_nudges: Vec::new(),
                 created_at,
+                status_for_new_chats: true,
             }
         );
 
@@ -13824,6 +13878,7 @@ pub(crate) mod tests {
         store
             .set_ui_json("seen_nudges", &["2026-11-12-c081d9e1"])
             .unwrap();
+        store.set_status_for_new_chats(false).unwrap();
 
         assert_eq!(
             store.ui_state().unwrap(),
@@ -13845,6 +13900,7 @@ pub(crate) mod tests {
                 run_watching: true,
                 seen_nudges: vec!["2026-11-12-c081d9e1".into()],
                 created_at,
+                status_for_new_chats: false,
             }
         );
         let _ = std::fs::remove_dir_all(&dir);

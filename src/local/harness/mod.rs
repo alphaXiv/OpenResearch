@@ -761,6 +761,8 @@ pub struct OneShotUsage {
     pub cost_usd: Option<f64>,
 }
 
+/// What a refused sign-in is recorded against, which changes when the user signs in again. A
+/// harness whose one-shot never reports a refused sign-in has a single revision.
 pub(crate) fn sign_in_revision(harness: &str, profile: Option<&str>) -> Result<String> {
     use crate::local::native_store::{claude_config_file, claude_home, codex_home, NativeStore};
 
@@ -769,7 +771,7 @@ pub(crate) fn sign_in_revision(harness: &str, profile: Option<&str>) -> Result<S
     let mut vars: Vec<&str> = match harness {
         "claude-code" => claude::CLAUDE_CREDENTIAL_VARS.into(),
         "codex" => vec!["OPENAI_API_KEY", "CODEX_API_KEY"],
-        _ => unreachable!("only Claude Code and Codex take looks"),
+        _ => Vec::new(),
     };
     let custom_key;
     let files = match (harness, profile) {
@@ -791,7 +793,7 @@ pub(crate) fn sign_in_revision(harness: &str, profile: Option<&str>) -> Result<S
             vars.extend(custom_key.as_deref());
             vec![home.join("auth.json"), config]
         }
-        _ => unreachable!("only Claude Code and Codex take looks"),
+        _ => Vec::new(),
     };
     let mut times = Vec::new();
     for file in files {

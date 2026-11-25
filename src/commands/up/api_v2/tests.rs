@@ -123,7 +123,7 @@ impl Commands for Services {
             command: "train",
             created_at: 1,
             commit_sha: None,
-            chat_session_id: None,
+            chat_session_id: args.launching_chat_session().as_deref(),
             spec_digest: "digest",
             monitor_config: None,
             launch: &LaunchSpec {
@@ -1010,6 +1010,137 @@ async fn cli_launch_and_cancel_use_the_server_and_kept_pages_span_file_boundarie
     f.api.store().finish_log_collection("run").unwrap();
     f.backend.offline.store(true, Ordering::SeqCst);
     f.client.logs("run", true).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_chats_launch_makes_its_report_due_once_the_launching_turn_ends() {
+    use clap::Parser;
+    let f = Fixture::new().await;
+    f.api.store().put_chat_session("chat", "claude-code");
+    f.api.store().put_chat_turn("chat", "turn", "running", 1);
+    f.api
+        .store()
+        .set_chat_report_enabled("chat", true, 1)
+        .unwrap();
+    let cli =
+        crate::Cli::try_parse_from(["orx", "exp", "run", "exp", "--backend", "local"]).unwrap();
+    let Some(crate::Command::Exp(crate::ExpArgs {
+        command: crate::ExpCommand::Run(mut args),
+    })) = cli.command
+    else {
+        panic!("run command")
+    };
+    args.chat_session_id = Some("chat".into());
+
+    f.api.launch(*args).await.unwrap();
+
+    let store = f.api.store();
+    let report = store.chat_report("chat").unwrap().unwrap();
+    let due = report.turn_due_at.unwrap();
+    assert!(store.chat_turn_running_from("chat", due).unwrap());
+    store.complete_chat_turn("turn").unwrap();
+    assert!(!store.chat_turn_running_from("chat", due).unwrap());
+}
+
+#[tokio::test]
+async fn orx_milestone_notes_what_changed_and_says_why_when_it_cannot() {
+    use crate::local::chat::{CHAT_SESSION_ENV, UP_AUTH_TOKEN_ENV, UP_PORT_ENV};
+    use clap::Parser;
+    if !crate::config::in_test_child(&[CHAT_SESSION_ENV, UP_AUTH_TOKEN_ENV, UP_PORT_ENV]) {
+        return;
+    }
+    let f = Fixture::new().await;
+    f.api.store().put_chat_session("chat", "claude-code");
+    f.api.store().put_chat_session("delegate", "claude-code");
+    f.api
+        .store()
+        .record_chat_delegate("delegate", "chat", false)
+        .unwrap();
+    let serve = |app: Router| async move {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        port
+    };
+    let older = serve(Router::new().fallback(super::super::spa)).await;
+    let unreadable = serve(Router::new().fallback(|| async { "Noted" })).await;
+    let busy = serve(
+        Router::new()
+            .fallback(|| async { (StatusCode::SERVICE_UNAVAILABLE, "The database is busy.") }),
+    )
+    .await;
+    let note = |port: u16, chat: Option<&str>, text: &str| {
+        std::env::set_var(UP_PORT_ENV, port.to_string());
+        match chat {
+            Some(chat) => std::env::set_var(CHAT_SESSION_ENV, chat),
+            None => std::env::remove_var(CHAT_SESSION_ENV),
+        }
+        let text = text.to_owned();
+        async move { crate::commands::milestone::noted(&text).await }
+    };
+    let ours = f.descriptor.port;
+    std::env::set_var(UP_AUTH_TOKEN_ENV, &f.descriptor.token);
+
+    assert_eq!(
+        note(ours, Some("chat"), "Width 512 beat\n  the baseline")
+            .await
+            .unwrap(),
+        "Noted. The status report updates in the background; carry on."
+    );
+    let report = f.api.store().chat_report("chat").unwrap().unwrap();
+    assert_eq!(
+        report.notes[0].1, "Width 512 beat the baseline",
+        "whitespace collapses to one line"
+    );
+    assert!(
+        report.enabled.is_none() && report.due_at.is_none(),
+        "noted for the first write, which waits for a result"
+    );
+
+    let skipped = |said: String, why: &str| {
+        assert!(
+            said.contains(why) && said.ends_with("Nothing was noted; carry on."),
+            "{said}"
+        )
+    };
+    skipped(
+        note(ours, Some("delegate"), "x").await.unwrap(),
+        "Delegates and side chats",
+    );
+    f.api
+        .store()
+        .set_chat_report_enabled("chat", false, 1)
+        .unwrap();
+    skipped(
+        note(ours, Some("chat"), "Depth 8 is next").await.unwrap(),
+        "turned the status report off",
+    );
+    let report = f.api.store().chat_report("chat").unwrap().unwrap();
+    assert!(report.notes.is_empty(), "an off chat notes nothing");
+    f.api.store().set_run_watching(false).unwrap();
+    skipped(
+        note(ours, Some("chat"), "x").await.unwrap(),
+        "Run watching is off",
+    );
+    assert!(note(older, Some("chat"), "x")
+        .await
+        .unwrap()
+        .contains("predates status reports"));
+
+    let refusal = |result: Result<String>| result.unwrap_err().to_string();
+    assert!(
+        refusal(note(ours, Some("chat"), " ").await).contains("orx milestone \"<what changed>\"")
+    );
+    assert!(refusal(note(ours, Some("gone"), "x").await).contains("Chat gone no longer exists"));
+    assert!(refusal(note(ours, None, "x").await).contains("OpenResearch chat"));
+    assert!(refusal(note(busy, Some("chat"), "x").await).contains("retry `orx milestone`"));
+    assert!(refusal(note(unreadable, Some("chat"), "x").await).contains("may not have been noted"));
+
+    let cli = crate::Cli::try_parse_from(["orx", "milestone", "-0.3 BLEU against the baseline"]);
+    let Some(crate::Command::Milestone(args)) = cli.unwrap().command else {
+        panic!("milestone command")
+    };
+    assert_eq!(args.note, "-0.3 BLEU against the baseline");
 }
 
 #[tokio::test]
