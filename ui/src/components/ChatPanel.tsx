@@ -7552,14 +7552,7 @@ export function ChatPanel({
     ];
   }, [queueItems]);
 
-  // A compaction holds the turn slot, so the message sent during it waits only on that and reads like a steer.
-  const compacting = messages.at(-1)?.parts.some((part) => part.tool === "compacted" && part.state?.status !== "error");
-  const sentBehindCompaction = compacting && queued[0] && (queued[0].dispatchState ?? "queued") === "queued" ? queued[0] : null;
-  const parked = sentBehindCompaction ? queued.slice(1) : queued;
-  const pendingSent = sentBehindCompaction ? [sentBehindCompaction, ...unreadSteers] : unreadSteers;
-
   const hasRetryingQueue = queued.some((item) => item.dispatchState === "retrying");
-  const firstBlockedQueueIndex = parked.findIndex((item) => item.dispatchState === "blocked");
   const nextQueueRetryAt = queued.reduce<number | null>((latest, item) => {
     if (item.dispatchState !== "retrying" || typeof item.nextRetryAt !== "number") return latest;
     return latest === null ? item.nextRetryAt : Math.min(latest, item.nextRetryAt);
@@ -8432,6 +8425,16 @@ export function ChatPanel({
     activeHarness && entry.harness === activeHarness.id && (entry.profile ?? null) === (activeHarness.profile?.id ?? null);
   const usageLimit = usage?.limits?.find(accountOf);
   const limitTimerStopped = openSession?.limitTimerStopped ?? false;
+
+  // A compaction holds the turn slot, so the message sent during it waits only on that and reads like a steer.
+  // A finished one still counts until the queue drains, unless a usage limit holds the queue.
+  const compaction = messages.at(-1)?.parts.find((part) => part.tool === "compacted")?.state?.status;
+  const compacting = compaction === "running" || (compaction === "completed" && !usageLimit && !limitTimerStopped);
+  const sentBehindCompaction = compacting && queued[0] && (queued[0].dispatchState ?? "queued") === "queued" ? queued[0] : null;
+  const parked = sentBehindCompaction ? queued.slice(1) : queued;
+  const pendingSent = sentBehindCompaction ? [sentBehindCompaction, ...unreadSteers] : unreadSteers;
+  const firstBlockedQueueIndex = parked.findIndex((item) => item.dispatchState === "blocked");
+
   const composerSignedOut = activeHarness?.authState === "needsLogin" && (activeHarness.id !== "claude-code" || Boolean(activeHarness.profile) || activeHarness.loginEligible);
   const signedOutTurn = composerSignedOut && messages.at(-1)?.parts.find((part) => part.id === "turn-recovery" && isSignInFailure(part));
   const signInTurn = signedOutTurn ? signedOutTurn.state?.input : undefined;
@@ -9735,7 +9738,20 @@ export function ChatPanel({
                       {item.text}
                     </div>
                   ))}
-                  <span role="status" className="tool-running-shimmer -mt-3 ms-auto px-1 text-xs">{unreadSteers.length > 0 ? m.chat_steering() : m.chat_sends_after_compacting()}</span>
+                  {unreadSteers.length > 0 || !sentBehindCompaction ? (
+                    <span role="status" className="tool-running-shimmer -mt-3 ms-auto px-1 text-xs">{m.chat_steering()}</span>
+                  ) : (
+                    <div className="-mt-3 ms-auto flex items-center gap-2 px-1 text-xs">
+                      <span role="status" className="tool-running-shimmer">{m.chat_sends_after_compacting()}</span>
+                      <button
+                        onClick={() => cancelQueued(sentBehindCompaction.id)}
+                        aria-label={m.a11y_remove_queued_message({ text: sentBehindCompaction.text })}
+                        className="p-0 border-0 text-muted bg-transparent cursor-pointer [&:hover]:text-text"
+                      >
+                        {m.chat_panel_remove()}
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
               </ChatImageScope>
