@@ -4,6 +4,7 @@ import test from "node:test";
 import { act, createElement } from "react";
 import { ExperimentOverview } from "../src/components/ExperimentOverview.tsx";
 import { renderChat, session } from "./chat.mjs";
+import { fmtClock } from "../src/i18n.ts";
 import { m } from "../src/paraglide/messages.js";
 import { capitalized } from "../src/runMonitor/words.ts";
 import { createWorkspace } from "../src/workspace.tsx";
@@ -32,11 +33,11 @@ const experiment = { id: "e1", projectId: "p", slug: "distil-glue-6l", branchNam
 const project = { id: "p", name: "glue", slug: "glue", githubOwner: "", githubRepo: "", baselineBranch: "main", repoPath: "/r", path: "/r", githubEnabled: false, artifactsDir: "/a" };
 
 /** The experiment's overview over `runs`, newest first; `monitor(id)` answers each monitor read. */
-async function overview(runs, monitor = () => pipeline(), { chat = null, sessions = [], selectedRunId = null } = {}) {
+async function overview(runs, monitor = () => pipeline(), { chat = null, sessions = [], selectedRunId = null, hosts = [] } = {}) {
   const requests = [];
   const shown = { ...experiment, chatSessionId: chat };
   serveApp({
-    "GET /api/compute/hosts": () => [],
+    "GET /api/compute/hosts": () => hosts,
     "GET /api/chat/sessions": () => ({ sessions }),
     "GET /api/projects/p/experiments": () => ({ experiments: [shown] }),
     "GET /api/projects/p/trackio/runs": () => ({ runs: [] }),
@@ -303,12 +304,15 @@ test("a finished run's page shows its blocks during quiet final collection", asy
   assert.ok(!find("button", m.app_retry()));
 });
 
-test("a run that can't be reached says so once, where its sentence goes", async () => {
+test("a run that can't be reached says so once with its next retry, where its sentence goes", async () => {
   const monitor = pipeline();
   const contact = { type: "unreachable", since: now - 60_000, cause: "ssh: connect timed out" };
-  const { container } = await overview([run("r2", { host: "lab-a40", contact, monitor: summary(monitor) })], () => monitor);
+  const nextRetryMs = now + 60_000;
+  const hosts = [{ alias: "lab-a40", status: "backoff", class: "key", sinceMs: contact.since, nextRetryMs }];
+  const { container } = await overview([run("r2", { host: "lab-a40", contact, monitor: summary(monitor) })], () => monitor, { hosts });
   const latest = [...container.querySelectorAll("section")].find((section) => section.querySelector("h2")?.textContent === m.experiment_latest_run());
   assert.equal(text(latest).split("Can't reach lab-a40").length - 1, 1);
+  assert.equal(text(latest).split(m.run_notice_retry_at({ time: fmtClock(nextRetryMs) })).length - 1, 1);
 });
 
 test("run history says what each run finished with or where it stopped", async () => {

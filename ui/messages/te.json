@@ -1978,6 +1978,7 @@
   "run_notice_abandoned_no_host": "వదిలివేయబడింది. జాబ్ కనిపిస్తే, OpenResearch దాన్ని ఆపుతుంది.",
   "run_notice_the_host": "హోస్ట్",
   "run_stop_again": "మళ్లీ ఆపండి",
+  "run_more_actions": "ఈ రన్ కోసం మరిన్ని చర్యలు",
   "run_abandon": "వదిలివేయండి…",
   "run_abandon_title": "ఈ రన్‌ను వదిలివేయాలా?",
   "run_abandon_effect": "రన్ ఇప్పుడే వదిలివేయబడినట్లు గుర్తించబడుతుంది. జాబ్ తర్వాత కనిపిస్తే, OpenResearch దాన్ని ఆపుతుంది.",

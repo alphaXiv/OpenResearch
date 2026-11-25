@@ -1964,6 +1964,7 @@
   "run_notice_abandoned_no_host": "Takip bırakıldı. İş bulunursa OpenResearch işi durdurur.",
   "run_notice_the_host": "sunucu",
   "run_stop_again": "Yeniden durdur",
+  "run_more_actions": "Bu çalıştırma için diğer işlemler",
   "run_abandon": "Takibi bırak…",
   "run_abandon_title": "Bu çalıştırmanın takibi bırakılsın mı?",
   "run_abandon_effect": "Çalıştırma şimdi bırakıldı olarak işaretlenir. İş daha sonra bulunursa OpenResearch işi durdurur.",

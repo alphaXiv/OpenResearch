@@ -1978,6 +1978,7 @@
   "run_notice_abandoned_no_host": "已放弃。如果作业出现，OpenResearch 会将其停止。",
   "run_notice_the_host": "主机",
   "run_stop_again": "再次停止",
+  "run_more_actions": "此运行的更多操作",
   "run_abandon": "放弃…",
   "run_abandon_title": "放弃此运行？",
   "run_abandon_effect": "此运行将立即标记为已放弃。如果作业之后出现，OpenResearch 会将其停止。",

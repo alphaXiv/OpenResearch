@@ -1978,6 +1978,7 @@
   "run_notice_abandoned_no_host": "Abandonada. Si el trabajo aparece, OpenResearch lo detiene.",
   "run_notice_the_host": "el host",
   "run_stop_again": "Detener de nuevo",
+  "run_more_actions": "Más acciones para esta ejecución",
   "run_abandon": "Abandonar…",
   "run_abandon_title": "¿Abandonar esta ejecución?",
   "run_abandon_effect": "La ejecución se marca ahora como abandonada. Si el trabajo aparece más tarde, OpenResearch lo detiene.",

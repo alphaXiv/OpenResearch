@@ -1978,6 +1978,7 @@
   "run_notice_abandoned_no_host": "رهاشده. اگر کار پیدا شود، OpenResearch آن را متوقف می‌کند.",
   "run_notice_the_host": "میزبان",
   "run_stop_again": "توقف دوباره",
+  "run_more_actions": "اقدامات بیشتر برای این اجرا",
   "run_abandon": "رها کردن…",
   "run_abandon_title": "این اجرا رها شود؟",
   "run_abandon_effect": "اجرا اکنون رهاشده علامت‌گذاری می‌شود. اگر کار بعداً پیدا شود، OpenResearch آن را متوقف می‌کند.",

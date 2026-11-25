@@ -1978,6 +1978,7 @@
   "run_notice_abandoned_no_host": "Abandoned. If the job turns up, OpenResearch stops it.",
   "run_notice_the_host": "the host",
   "run_stop_again": "Stop again",
+  "run_more_actions": "More actions for this run",
   "run_abandon": "Abandon…",
   "run_abandon_title": "Abandon this run?",
   "run_abandon_effect": "The run is marked Abandoned now. If the job turns up later, OpenResearch stops it.",

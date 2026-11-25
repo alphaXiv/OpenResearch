@@ -1978,6 +1978,7 @@
   "run_notice_abandoned_no_host": "Запуск оставлен. Если задание обнаружится, OpenResearch остановит его.",
   "run_notice_the_host": "хост",
   "run_stop_again": "Остановить снова",
+  "run_more_actions": "Другие действия для этого запуска",
   "run_abandon": "Оставить…",
   "run_abandon_title": "Оставить этот запуск?",
   "run_abandon_effect": "Запуск сразу будет помечен как оставленный. Если задание обнаружится позже, OpenResearch остановит его.",

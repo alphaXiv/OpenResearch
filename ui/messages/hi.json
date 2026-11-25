@@ -1978,6 +1978,7 @@
   "run_notice_abandoned_no_host": "छोड़ा गया। अगर जॉब मिलता है, तो OpenResearch उसे रोक देगा।",
   "run_notice_the_host": "होस्ट",
   "run_stop_again": "फिर से रोकें",
+  "run_more_actions": "इस रन के लिए और कार्रवाइयाँ",
   "run_abandon": "छोड़ें…",
   "run_abandon_title": "इस रन को छोड़ें?",
   "run_abandon_effect": "रन को अभी छोड़ा गया चिह्नित किया जाएगा। अगर जॉब बाद में मिलता है, तो OpenResearch उसे रोक देगा।",

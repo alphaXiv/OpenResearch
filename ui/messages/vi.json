@@ -1978,6 +1978,7 @@
   "run_notice_abandoned_no_host": "Đã từ bỏ. Nếu công việc xuất hiện, OpenResearch sẽ dừng nó.",
   "run_notice_the_host": "máy chủ",
   "run_stop_again": "Dừng lần nữa",
+  "run_more_actions": "Thêm thao tác cho lần chạy này",
   "run_abandon": "Từ bỏ…",
   "run_abandon_title": "Từ bỏ lượt chạy này?",
   "run_abandon_effect": "Lượt chạy được đánh dấu là Đã từ bỏ ngay bây giờ. Nếu công việc xuất hiện sau đó, OpenResearch sẽ dừng nó.",

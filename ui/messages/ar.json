@@ -1978,6 +1978,7 @@
   "run_notice_abandoned_no_host": "متروك. إذا ظهرت المهمة، فسيوقفها OpenResearch.",
   "run_notice_the_host": "المضيف",
   "run_stop_again": "إيقاف مرة أخرى",
+  "run_more_actions": "إجراءات أخرى لهذا التشغيل",
   "run_abandon": "ترك…",
   "run_abandon_title": "ترك هذا التشغيل؟",
   "run_abandon_effect": "يُعلَّم التشغيل الآن على أنه متروك. إذا ظهرت المهمة لاحقًا، فسيوقفها OpenResearch.",

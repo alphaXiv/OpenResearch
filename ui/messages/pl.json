@@ -1978,6 +1978,7 @@
   "run_notice_abandoned_no_host": "Porzucone. Jeśli zadanie się pojawi, OpenResearch je zatrzyma.",
   "run_notice_the_host": "host",
   "run_stop_again": "Zatrzymaj ponownie",
+  "run_more_actions": "Więcej działań dla tego uruchomienia",
   "run_abandon": "Porzuć…",
   "run_abandon_title": "Porzucić to uruchomienie?",
   "run_abandon_effect": "Uruchomienie zostanie teraz oznaczone jako porzucone. Jeśli zadanie pojawi się później, OpenResearch je zatrzyma.",

@@ -1978,6 +1978,7 @@
   "run_notice_abandoned_no_host": "放棄済み。ジョブが見つかれば OpenResearch が停止します。",
   "run_notice_the_host": "ホスト",
   "run_stop_again": "もう一度停止",
+  "run_more_actions": "この実行のその他の操作",
   "run_abandon": "放棄…",
   "run_abandon_title": "この実行を放棄しますか？",
   "run_abandon_effect": "この実行はただちに放棄済みになります。後でジョブが見つかれば OpenResearch が停止します。",
