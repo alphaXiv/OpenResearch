@@ -573,6 +573,7 @@ async fn prepare_database_waiting(
         }
     };
     if !lease.requires_migration() {
+        copy_user_credentials(&lease).await;
         return Ok(lease);
     }
     progress("Backing up and preparing the OpenCode database");
@@ -617,7 +618,37 @@ async fn prepare_database_waiting(
         }
         return Err(error);
     }
+    copy_user_credentials(&lease).await;
     Ok(lease)
+}
+
+/// Brings the user's OpenCode sign-ins into orx's own database. Best effort: orx's own sign-ins
+/// still work without them.
+async fn copy_user_credentials(lease: &DatabaseLease) {
+    use crate::local::native_store::{opencode_database, opencode_db, NativeStore};
+    let user = match crate::paths::canonicalize(opencode_db(NativeStore::Legacy)) {
+        Ok(user) => user,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            let path = opencode_db(NativeStore::Legacy);
+            eprintln!(
+                "orx up: could not read OpenCode database {}: {error}",
+                path.display()
+            );
+            return;
+        }
+    };
+    let orx = lease.path().to_path_buf();
+    if user == orx {
+        return;
+    }
+    let copied =
+        tokio::task::spawn_blocking(move || opencode_database::copy_credentials(&user, &orx)).await;
+    match copied {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => eprintln!("orx up: could not copy OpenCode sign-ins: {error:#}"),
+        Err(error) => eprintln!("orx up: OpenCode sign-in copy task failed: {error}"),
+    }
 }
 
 async fn wait_migration(

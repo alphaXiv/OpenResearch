@@ -11,7 +11,8 @@ use super::*;
 use crate::error::Context;
 use crate::keep::KeptHandle;
 use crate::local::chat::Resume;
-use crate::local::opencode::AgentEndpoint;
+use crate::local::harness::{next_steer, SteerMessage};
+use crate::local::opencode::{steer_inbox_id, AgentEndpoint};
 
 async fn get(endpoint: &AgentEndpoint, path: &str) -> Result<Value> {
     Ok(endpoint
@@ -32,6 +33,19 @@ async fn post(endpoint: &AgentEndpoint, path: &str, body: &Value) -> Result<()> 
         .send()
         .await?
         .error_for_status()?;
+    Ok(())
+}
+
+/// Deletes what `path` names; one already gone counts as deleted.
+async fn delete(endpoint: &AgentEndpoint, path: &str) -> Result<()> {
+    let response = endpoint
+        .client
+        .delete(format!("{}{path}", endpoint.base_url))
+        .send()
+        .await?;
+    if response.status() != reqwest::StatusCode::NOT_FOUND {
+        response.error_for_status()?;
+    }
     Ok(())
 }
 
@@ -165,6 +179,7 @@ pub(super) async fn run_turn(
         native_id: &native_id,
         path: &path,
         delivered: false,
+        steers: Vec::new(),
         steps: Vec::new(),
         recorded: HashSet::new(),
         surfaced: HashSet::new(),
@@ -220,6 +235,7 @@ pub(super) async fn resume_turn(ctx: &mut TurnCtx, resume: Resume) -> Result<()>
         native_id: &native_id,
         path: &path,
         delivered: false,
+        steers: Vec::new(),
         steps: Vec::new(),
         recorded: HashSet::new(),
         surfaced,
@@ -359,6 +375,13 @@ fn fold<'a>(steps: &mut Vec<Value>, native_id: &str, event: &'a Value) -> Option
 
 type Events = futures::stream::Peekable<BoxStream<'static, Result<Value>>>;
 
+enum Waited {
+    Event(Option<Result<Value>>),
+    Flush,
+    Answer(std::result::Result<String, tokio::sync::broadcast::error::RecvError>),
+    Steer(SteerMessage),
+}
+
 /// One prompt's view of its session: the export for finished steps, `steps` for those in flight.
 struct Turn<'a> {
     endpoint: &'a AgentEndpoint,
@@ -369,6 +392,8 @@ struct Turn<'a> {
     path: &'a str,
     /// Whether the event stream has said OpenCode took the prompt out of its inbox to run it.
     delivered: bool,
+    /// Steers posted to the session's inbox, recorded once OpenCode delivers them.
+    steers: Vec<SteerMessage>,
     steps: Vec<Value>,
     recorded: HashSet<String>,
     surfaced: HashSet<String>,
@@ -396,19 +421,33 @@ impl Turn<'_> {
         let mut stopped = false;
         let mut stale = false;
         while !ended {
-            let event = tokio::select! {
-                event = events.next() => event,
-                _ = ctx.flush_due() => {
+            let waited = {
+                let flush_due = ctx.flush_due();
+                let steering = &mut ctx.steering;
+                tokio::select! {
+                    event = events.next() => Waited::Event(event),
+                    _ = flush_due => Waited::Flush,
+                    answer = answered.recv() => Waited::Answer(answer),
+                    steer = next_steer(steering) => Waited::Steer(steer),
+                }
+            };
+            let event = match waited {
+                Waited::Event(event) => event,
+                Waited::Flush => {
                     self.commit(ctx)?;
                     continue;
                 }
-                answer = answered.recv() => {
+                Waited::Answer(answer) => {
                     // A local answer can activate a conditional form field; the card is resolved
                     // only after the harness replies, so adopt it before looking again.
                     if !matches!(&answer, Ok(session) if *session != ctx.session_id) {
                         self.commit(ctx)?;
                         self.reconcile(ctx).await?;
                     }
+                    continue;
+                }
+                Waited::Steer(steer) => {
+                    self.steer(ctx, steer).await;
                     continue;
                 }
             };
@@ -418,7 +457,7 @@ impl Turn<'_> {
                 })?;
                 let (projection, _) = self.reconcile(ctx).await?;
                 self.delivered |= self.holds_prompt(&projection)?;
-                ended = self.idle().await?;
+                ended = self.idle().await? && !self.settle_steers(ctx).await?;
                 continue;
             };
             let kind = event["type"].as_str().unwrap_or_default();
@@ -430,11 +469,20 @@ impl Turn<'_> {
                         ctx.upsert_part(part);
                     }
                 }
-                None if kind == "session.inbox.delivered"
-                    && data["inboxID"].as_str() == Some(prompt_id) =>
-                {
-                    self.delivered = true;
-                    stale = true;
+                None if kind == "session.inbox.delivered" => {
+                    let inbox = data["inboxID"].as_str();
+                    if inbox == Some(prompt_id) {
+                        self.delivered = true;
+                        stale = true;
+                    } else if let Some(index) = self
+                        .steers
+                        .iter()
+                        .position(|steer| inbox == Some(steer_inbox_id(&steer.id).as_str()))
+                    {
+                        let steer = self.steers.remove(index);
+                        ctx.record_steer(&steer);
+                        stale = true;
+                    }
                 }
                 None if data["sessionID"].as_str() == Some(self.native_id)
                     && matches!(
@@ -444,7 +492,7 @@ impl Turn<'_> {
                             | "session.execution.interrupted"
                     ) =>
                 {
-                    ended = self.finished(ctx).await?;
+                    ended = self.finished(ctx).await? && !self.settle_steers(ctx).await?;
                     if ended {
                         failure = data.get("error").map(error_text);
                         failure_retry_after = data.get("error").and_then(error_retry_after_ms);
@@ -500,6 +548,66 @@ impl Turn<'_> {
         Err(anyhow!(
             "OpenCode V2 became idle without completing this prompt"
         ))
+    }
+
+    /// Hands `steer` to the running execution, which reads it at its next step. An inbox
+    /// OpenCode refuses sends it back to orx's queue.
+    async fn steer(&mut self, ctx: &mut TurnCtx, steer: SteerMessage) {
+        if !ctx.host.steer_pending(&ctx.session_id, &steer.id) {
+            return;
+        }
+        if self.endpoint.legacy_v2_api {
+            ctx.host.release_steer(&ctx.session_id, &steer.id);
+            return;
+        }
+        let inbox_id = steer_inbox_id(&steer.id);
+        let body = json!({"id":inbox_id,"text":steer.text});
+        // A failed reply may still have admitted it, so the turn settles it like any other.
+        if let Err(error) = post(self.endpoint, &format!("{}/prompt", self.path), &body).await {
+            eprintln!(
+                "orx up: OpenCode may not have taken a steer for chat {}: {error:#}",
+                ctx.session_id
+            );
+        }
+        self.steers.push(steer);
+    }
+
+    /// Settles the steers posted to an execution that ended: one OpenCode delivered joins the
+    /// turn, one it never read goes back to orx's queue. Returns whether a delivered steer
+    /// still runs, so the turn goes on with it.
+    async fn settle_steers(&mut self, ctx: &mut TurnCtx) -> Result<bool> {
+        if self.steers.is_empty() {
+            return Ok(false);
+        }
+        // Cancelled first, so the transcript read after says which ones OpenCode read.
+        let mut cancelled = Vec::new();
+        for steer in &self.steers {
+            let path = format!("{}/inbox/{}", self.path, steer_inbox_id(&steer.id));
+            cancelled.push(delete(self.endpoint, &path).await);
+        }
+        let projection = get(self.endpoint, &self.endpoint.v2_export_path(self.native_id)).await?;
+        let mut delivered = false;
+        for (steer, cancelled) in std::mem::take(&mut self.steers).into_iter().zip(cancelled) {
+            let inbox_id = steer_inbox_id(&steer.id);
+            let exported = messages(&projection)?
+                .iter()
+                .any(|message| message["id"].as_str() == Some(inbox_id.as_str()));
+            if !exported && cancelled.is_ok() {
+                ctx.host.release_steer(&ctx.session_id, &steer.id);
+                continue;
+            }
+            // One still in the inbox reaches the agent with its next prompt; queueing it again
+            // would send it twice.
+            if let (false, Err(error)) = (exported, cancelled) {
+                eprintln!(
+                    "orx up: OpenCode kept steer {inbox_id} for chat {}: {error:#}",
+                    ctx.session_id
+                );
+            }
+            ctx.record_steer(&steer);
+            delivered = true;
+        }
+        Ok(delivered && !self.idle().await?)
     }
 
     /// Merges the export and the steps it does not hold yet, then surfaces pending requests.
@@ -1300,13 +1408,16 @@ pub(super) async fn detect(
                     .ok_or_else(|| anyhow!("OpenCode database has no parent"))?,
             );
         let (mut child, endpoint) = crate::local::opencode::start_server(&binary, cmd).await?;
+        // A legacy V2 server can't steer, so its steers wait in orx's queue.
+        let steers = !endpoint.legacy_v2_api;
         let result = discover_models(&endpoint).await;
         let _ = child.kill().await;
-        result
+        result.map(|catalog| (catalog, steers))
     })
     .await;
     match &catalog {
-        Ok(Ok((models, integrations))) => {
+        Ok(Ok(((models, integrations), steers))) => {
+            info.supports_steering = *steers;
             let connected: HashSet<&str> = integrations["data"]
                 .as_array()
                 .into_iter()
@@ -1371,7 +1482,7 @@ pub(super) async fn detect(
     }
 
     let integrations = match &catalog {
-        Ok(Ok((_, integrations))) => integrations,
+        Ok(Ok(((_, integrations), _))) => integrations,
         _ => &Value::Null,
     };
     let catalog = info
@@ -2384,6 +2495,8 @@ mod catalog_tests {
 mod restart_tests {
     use super::*;
     use axum::{
+        http::StatusCode,
+        response::IntoResponse,
         routing::{get, post},
         Json, Router,
     };
@@ -2520,6 +2633,258 @@ mod restart_tests {
             assert_eq!(checkpoint.keep_id, keeper.id());
             let state: Value = serde_json::from_str(&checkpoint.state_json).unwrap();
             assert_eq!(state["harness"]["promptId"], "msg_prompt");
+        });
+    }
+
+    #[test]
+    fn a_steer_joins_the_running_execution_or_goes_back_to_the_queue_once() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            // Delivered as the stream says, delivered while the stream missed it, never read, or
+            // refused with an error.
+            for case in ["event", "export", "unread", "refused"] {
+                let delivered = matches!(case, "event" | "export");
+                let steer_id = format!("q_{}", uuid::Uuid::new_v4().simple());
+                let (posted_tx, mut posted) = tokio::sync::mpsc::unbounded_channel::<String>();
+                let cancelled = Arc::new(Mutex::new(Vec::<String>::new()));
+                let running = Arc::new(Mutex::new(true));
+                let listed = Arc::new(tokio::sync::Notify::new());
+                let (send, events) = tokio::sync::mpsc::unbounded_channel::<String>();
+                let events = Arc::new(Mutex::new(Some(events)));
+                let mut export = json!({"data":{"info":{"outcome":"succeeded"},"messages":[
+                    {"id":"msg_prompt","type":"user"},
+                    {"id":"msg_reply","type":"assistant","time":{"completed":2},
+                        "content":[{"type":"text","text":"the answer"}]}
+                ]}});
+                if case == "export" {
+                    export["data"]["messages"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"id": steer_inbox_id(&steer_id), "type": "user"}));
+                }
+                let empty = || async { Json(json!({"data":[]})) };
+                let app = Router::new()
+                    .route(
+                        "/api/event",
+                        get(move || {
+                            let rx = events.lock().unwrap().take().expect("one subscription");
+                            let connected = r#"{"type":"server.connected"}"#.to_owned();
+                            let stream = futures::stream::once(async move { connected })
+                                .chain(futures::stream::unfold(rx, |mut rx| async move {
+                                    Some((rx.recv().await?, rx))
+                                }))
+                                .map(|line| Ok::<_, std::io::Error>(format!("data: {line}\n\n")));
+                            async move { axum::body::Body::from_stream(stream) }
+                        }),
+                    )
+                    .route(
+                        "/api/experimental/session/native/export",
+                        get(move || {
+                            let body = export.clone();
+                            async move { Json(body) }
+                        }),
+                    )
+                    .route("/api/session/native/inbox", get(empty))
+                    .route(
+                        "/api/session/native/inbox/{id}",
+                        axum::routing::delete({
+                            let cancelled = cancelled.clone();
+                            move |axum::extract::Path(id): axum::extract::Path<String>| {
+                                cancelled.lock().unwrap().push(id);
+                                async {}
+                            }
+                        }),
+                    )
+                    .route(
+                        "/api/session/native/permission",
+                        get({
+                            let listed = listed.clone();
+                            move || {
+                                listed.notify_one();
+                                async { Json(json!({"data":[]})) }
+                            }
+                        }),
+                    )
+                    .route("/api/session/native/form", get(empty))
+                    .route(
+                        "/api/session/active",
+                        get({
+                            let running = running.clone();
+                            move || {
+                                let running = *running.lock().unwrap();
+                                async move {
+                                    Json(if running {
+                                        json!({"data":{"native":{}}})
+                                    } else {
+                                        json!({"data":{}})
+                                    })
+                                }
+                            }
+                        }),
+                    )
+                    .route(
+                        "/api/session/native/prompt",
+                        post(move |Json(body): Json<Value>| {
+                            posted_tx.send(body["id"].as_str().unwrap().to_owned()).unwrap();
+                            async move {
+                                if case == "refused" {
+                                    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                                } else {
+                                    Json(json!({})).into_response()
+                                }
+                            }
+                        }),
+                    );
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let port = listener.local_addr().unwrap().port();
+                tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+                let root = crate::local::git::TemporaryDirectory::new("orx-opencode-steer").unwrap();
+                let mut ctx = TurnCtx::test_stub();
+                ctx.session_id = format!("steer-{case}");
+                let store = crate::store::Store::open().unwrap();
+                crate::local::chat::steering_tests::add_chat_session(&store, &ctx.session_id);
+                ctx.host
+                    .opencode
+                    .serve_for_test(&ctx.session_id, port, root.path())
+                    .await;
+                let (_, keeper) = ctx.host.opencode.server_for(&ctx.session_id).await.unwrap();
+                ctx.native_session_id = Some("native".into());
+                ctx.resume = Some(Resume {
+                    keep_id: keeper.id().into(),
+                    offset: keeper.start(),
+                    state: json!({"promptId": "msg_prompt"}),
+                });
+                let (steer_tx, steering) =
+                    crate::local::chat::SteerReceiver::for_test(ctx.host.clone(), &ctx.session_id);
+                ctx.steering = Some(steering);
+                let steer = SteerMessage {
+                    id: steer_id.clone(),
+                    display: "use the smaller model".into(),
+                    text: "use the smaller model".into(),
+                    client_turn_id: None,
+                    orx: None,
+                    sent_at: 1,
+                };
+                ctx.host.queue_steer(&ctx.session_id, &steer, &store).unwrap();
+                let host = ctx.host.clone();
+                let session_id = ctx.session_id.clone();
+
+                let driver = async {
+                    listed.notified().await;
+                    steer_tx.send(steer.clone()).unwrap();
+                    let inbox_id = posted.recv().await.unwrap();
+                    if case == "event" {
+                        send.send(
+                            json!({"type":"session.inbox.delivered","data":{"sessionID":"native","inboxID":inbox_id}})
+                                .to_string(),
+                        )
+                        .unwrap();
+                    }
+                    *running.lock().unwrap() = false;
+                    send.send(
+                        json!({"type":"session.execution.succeeded","data":{"sessionID":"native"}})
+                            .to_string(),
+                    )
+                    .unwrap();
+                    inbox_id
+                };
+                let (result, inbox_id) = tokio::join!(super::super::run_turn(&mut ctx), driver);
+                result.unwrap();
+
+                let read = ctx
+                    .assistant
+                    .parts
+                    .iter()
+                    .any(|part| part.kind == "steer" && part.text.as_deref() == Some("use the smaller model"));
+                assert_eq!(read, delivered, "only a delivered steer is part of the turn");
+                let withdrawn = cancelled.lock().unwrap().clone();
+                let still_steering = host.steer_pending(&session_id, &steer_id);
+                let queued = !store
+                    .list_queued_chat_messages_for_session(&session_id)
+                    .unwrap()
+                    .is_empty();
+                if case == "event" {
+                    assert!(withdrawn.is_empty(), "a steer read in the stream needs no settling");
+                } else if !delivered {
+                    assert_eq!(withdrawn, [inbox_id]);
+                    assert!(
+                        !still_steering && queued,
+                        "a steer the execution never read runs next from orx's queue"
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn stopping_reports_the_steers_opencode_already_read() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let read = format!("q_{}", uuid::Uuid::new_v4());
+            let waiting = format!("q_{}", uuid::Uuid::new_v4());
+            let cancelled = Arc::new(Mutex::new(Vec::<String>::new()));
+            let export = json!({"data":{"messages":[
+                {"id":"msg_prompt","type":"user"},
+                {"id": steer_inbox_id(&read), "type":"user"}
+            ]}});
+            let inbox = json!({"data":[{"id": steer_inbox_id(&waiting)}]});
+            let app = Router::new()
+                .route(
+                    "/api/session/native/interrupt",
+                    post(|| async { Json(json!({})) }),
+                )
+                .route(
+                    "/api/session/native/inbox",
+                    get(move || {
+                        let body = inbox.clone();
+                        async move { Json(body) }
+                    }),
+                )
+                .route(
+                    "/api/session/native/inbox/{id}",
+                    axum::routing::delete({
+                        let cancelled = cancelled.clone();
+                        move |axum::extract::Path(id): axum::extract::Path<String>| {
+                            cancelled.lock().unwrap().push(id);
+                            // A failed cancel must not hide which steers were read.
+                            async { StatusCode::INTERNAL_SERVER_ERROR }
+                        }
+                    }),
+                )
+                .route(
+                    "/api/experimental/session/native/export",
+                    get(move || {
+                        let body = export.clone();
+                        async move { Json(body) }
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let root = crate::local::git::TemporaryDirectory::new("orx-opencode-stop").unwrap();
+            let ctx = TurnCtx::test_stub();
+            ctx.host
+                .opencode
+                .serve_for_test(&ctx.session_id, port, root.path())
+                .await;
+
+            let delivered = ctx
+                .host
+                .opencode
+                .interrupt(&ctx.session_id, "native", &[read.clone(), waiting.clone()])
+                .await
+                .unwrap();
+
+            assert_eq!(
+                delivered,
+                [read],
+                "only the steer OpenCode read is reported"
+            );
+            assert_eq!(*cancelled.lock().unwrap(), [steer_inbox_id(&waiting)]);
         });
     }
 
