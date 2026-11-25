@@ -171,7 +171,7 @@ function Readout({ at, width, outside, onDismiss, children }: { at: number; widt
       ref={ref}
       popover="manual"
       aria-hidden="true"
-      className="pointer-events-none fixed inset-auto m-0 flex min-w-36 flex-col gap-1 overflow-visible rounded-md border border-border bg-background px-2.5 py-2 text-xs text-ink-subtext shadow-popover"
+      className="pointer-events-none fixed inset-auto m-0 flex min-w-36 max-w-[calc(100vw-1rem)] flex-col gap-1 overflow-visible rounded-md border border-border bg-background px-2.5 py-2 text-xs text-ink-subtext shadow-popover"
     >
       {children}
     </div>
@@ -277,7 +277,7 @@ export function Chart({ monitor, block, title, size, live, height = 160 }: { mon
   /** A strip with room for its axes in a line under the plot, the two ranges at full length. */
   const rangeWidth = (xRange + yRange).replace(/[\u2066-\u2069]/g, "").length * CHAR_WIDTH + 12;
   const ranged = !page && boxHeight >= 44 && !blank && rangeWidth <= width;
-  const margin = page ? { start: 38, end: categories ? 6 : 48, top: yCaption ? 22 : 8, bottom: 22 } : { start: 1, end: 5, top: 5, bottom: ranged ? 17 : 3 };
+  const margin = page ? { start: 38, end: categories ? 6 : 48, top: yCaption ? 22 : 8, bottom: 22 } : { start: 5, end: 5, top: 5, bottom: ranged ? 17 : 5 };
   const innerWidth = Math.max(1, width - margin.start - margin.end);
   const innerHeight = Math.max(1, boxHeight - margin.top - margin.bottom);
   let y0 = Math.min(...ys);
@@ -301,18 +301,35 @@ export function Chart({ monitor, block, title, size, live, height = 160 }: { mon
   const label = table || categories ? describeRows(monitor, data) : [describe(monitor, series, live), ...notes].filter(Boolean).join(". ");
 
   const slot = innerWidth / Math.max(1, categories?.length ?? 1);
-  const barWidth = (slot * 0.7) / Math.max(1, owned.length);
-  /** A bar of each own line per category, side by side; the parent's value as a dashed level over its bar, reaching past it. */
+  const groupWidth = slot * 0.7;
+  const seriesWidth = groupWidth / Math.max(1, owned.length);
+  const barsBySeries = new Map((categories ? series : []).map((line) => {
+    const groups = new Map<number, [number, number][]>();
+    for (const point of known(line.points)) {
+      const at = point[0];
+      const group = groups.get(at);
+      if (group) group.push(point);
+      else groups.set(at, [point]);
+    }
+    return [line, groups];
+  }));
+  /** Each category gives a series its own band, divided among its reported rows. */
   const bars = (strip: boolean) => [...owned, ...series.filter((line) => line.ghost)].map((line) => {
-    const index = line.ghost ? series.filter((one) => one.ghost).indexOf(line) : owned.indexOf(line);
-    const left = (at: number) => x(at) - (slot * 0.7) / 2 + index * barWidth;
+    const index = line.ghost ? owned.findIndex((one) => `parent ${one.name}` === line.name) : owned.indexOf(line);
     return (
       <g key={line.name}>
-        {line.points.map(([at, value]) => {
-          if (value === null) return null;
-          const top = y(value);
-          if (line.ghost) return <line key={at} x1={left(at) - 3} x2={left(at) + barWidth + 3} y1={top} y2={top} stroke={line.color} strokeWidth="1.5" strokeDasharray="3 2" />;
-          return <rect key={at} x={left(at) + (strip ? 0.5 : 1)} width={Math.max(1, barWidth - (strip ? 1 : 2))} y={Math.min(top, base)} height={Math.max(1, Math.abs(base - top))} rx="1.5" fill={line.color} />;
+        {[...(barsBySeries.get(line) ?? [])].flatMap(([at, values]) => {
+          const start = x(at) - groupWidth / 2 + index * seriesWidth;
+          const width = seriesWidth / values.length;
+          const gap = Math.min(strip ? 0.5 : 1, width / 4);
+          const overhang = values.length === 1 ? Math.min(3, (slot - groupWidth) / 2) : 0;
+          return values.map(([, value], row) => {
+            const key = `${at}:${row}`;
+            const left = start + row * width + gap;
+            const top = y(value);
+            if (line.ghost) return <line key={key} x1={left - overhang} x2={left + width - 2 * gap + overhang} y1={top} y2={top} stroke={line.color} strokeWidth="1.5" strokeDasharray="3 2" />;
+            return <rect key={key} x={left} width={width - 2 * gap} y={Math.min(top, base)} height={Math.max(1, Math.abs(base - top))} rx="1.5" fill={line.color} />;
+          });
         })}
       </g>
     );
@@ -350,7 +367,7 @@ export function Chart({ monitor, block, title, size, live, height = 160 }: { mon
     const landmark = near.sort((a, b) => Math.hypot(...reach(a)) - Math.hypot(...reach(b)))[0];
     const target = landmark?.point[0] ?? at ?? (xLog ? Math.exp(Math.log(x0) + position * (Math.log(x1) - Math.log(x0))) : x0 + position * (x1 - x0));
     const hits = samples.flatMap((line, index) => {
-      const point = landmark?.line === line ? landmark.point : at === null ? nearest(line.points, target) : line.points.find(([px]) => px === at);
+      const point = landmark?.line === line ? landmark.point : at === null ? nearest(line.points, target) : barsBySeries.get(line)?.get(at)?.[0];
       const within = line.points.length > 0 && target >= line.points[0][0] && target <= line.points[line.points.length - 1][0];
       if (!point || point[1] === null || !(at !== null || within || (pointer?.keyboard && !line.ghost) || Math.abs(x(point[0]) - hover) <= 40)) return [];
       const levels = series[index].points;
@@ -374,8 +391,11 @@ export function Chart({ monitor, block, title, size, live, height = 160 }: { mon
     return m.run_chart_at({ value: new Intl.ListFormat(getLocale(), { type: "conjunction" }).format(named.map((one) => one.name)), x: where });
   };
   const readoutValue = (line: Series, point: Point, anchor: Point) => {
-    const value = table ? withUnit(signals[line.y], point[1]) : fmtSignal(signals[line.y], point[1]);
-    if (categories || point[0] === anchor[0]) return value;
+    const format = (value: Point[1]) => table ? withUnit(signals[line.y], value) : fmtSignal(signals[line.y], value);
+    const group = barsBySeries.get(line)?.get(point[0]);
+    if (group) return new Intl.ListFormat(getLocale(), { type: "unit" }).format(group.map(([, value]) => format(value)));
+    const value = format(point[1]);
+    if (point[0] === anchor[0]) return value;
     return m.run_chart_at({ value, x: table ? withUnit(signals[line.x], point[0]) : xLabel(point[0]) });
   };
 
@@ -445,7 +465,7 @@ export function Chart({ monitor, block, title, size, live, height = 160 }: { mon
           <span className="flex items-center gap-1.5">
             <svg width="12" height="2" className="shrink-0"><line x1="0" x2="12" y1="1" y2="1" stroke={line.color} strokeWidth="2" strokeDasharray={line.ghost ? "3 2" : undefined} /></svg>
             {name}
-            <b className="ms-auto ps-3 font-medium tabular-nums text-text">{measure && <span className="font-normal text-ink-subtext">{measure} </span>}{value}</b>
+            <b className="ms-auto ps-3 text-end font-medium tabular-nums text-text">{measure && <span className="font-normal text-ink-subtext">{measure} </span>}{value}</b>
           </span>
           {smoothed && <span className="text-end tabular-nums">{smoothed}</span>}
         </span>

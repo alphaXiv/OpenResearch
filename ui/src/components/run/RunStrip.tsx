@@ -1,14 +1,16 @@
 import type { Run } from "../../api";
-import { RefreshCw } from "lucide-react";
-import { useMemo } from "react";
+import { Menu } from "@base-ui/react/menu";
+import { ChevronDown, RefreshCw } from "lucide-react";
+import { useContext, useMemo } from "react";
 import { autoDir } from "../../i18n";
 import { m } from "../../paraglide/messages.js";
 import type { LogSeek } from "../../logWindow";
 import type { RunModel } from "../../runMonitor/model";
 import type { ChartBlock, RunMonitor } from "../../runMonitor/types";
 import type { TabOpenIntent } from "../../tabPreview";
-import { RunContactNotice } from "../RunContactNotice";
-import { Button } from "../ui";
+import { RunContactDetails, useRunContact, type ContactAction } from "../RunContactNotice";
+import { Button, MenuItem } from "../ui";
+import { WorkspaceDomContext } from "../../WorkspaceDom";
 import { cn } from "../ui/cn";
 import { Block } from "./blocks/Block";
 import { Legend } from "./blocks/Legend";
@@ -49,6 +51,40 @@ function Hero({ model, monitor, block }: { model: RunModel; monitor: RunMonitor 
   );
 }
 
+/** A contact notice's first action as a compact button, the rest in its menu. */
+function ContactActions({ actions }: { actions: ContactAction[] }) {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+  const [main, ...more] = actions;
+  if (!main) return null;
+
+  const Icon = main.icon;
+  return (
+    <div className="flex">
+      <Button size="compact" variant={main.tone === "danger" ? "danger" : "default"} className={cn(more.length > 0 && "rounded-e-none")}
+        disabled={main.disabled} aria-haspopup={main.dialog ? "dialog" : undefined} onClick={main.run}>
+        {Icon && <Icon size={13} />}{main.label}
+      </Button>
+      {more.length > 0 && <Menu.Root modal={false}>
+        <Menu.Trigger render={<Button size="compact" className="rounded-s-none border-s-0 px-1" aria-label={m.run_more_actions()} />}>
+          <ChevronDown size={13} aria-hidden="true" />
+        </Menu.Trigger>
+        <Menu.Portal container={portalContainer}>
+          <Menu.Positioner className="z-70" positionMethod="fixed" side="bottom" align="end" sideOffset={4} collisionPadding={8}>
+            <Menu.Popup className="min-w-36 rounded-md border border-border bg-background p-1 shadow-menu outline-none">
+              {more.map(({ key, label, icon: ItemIcon, tone, disabled, run }) => (
+                <Menu.Item key={key} nativeButton disabled={disabled} onClick={run}
+                  render={<MenuItem size="compact" danger={tone === "danger"} className="justify-start data-highlighted:bg-surface" />}>
+                  {ItemIcon && <ItemIcon size={13} aria-hidden="true" />}{label}
+                </Menu.Item>
+              ))}
+            </Menu.Popup>
+          </Menu.Positioner>
+        </Menu.Portal>
+      </Menu.Root>}
+    </div>
+  );
+}
+
 export function RunStrip({ model, monitor, agent, label, open, onToggle, onOpenRun, onOpenRunPage }: {
   model: RunModel;
   open: boolean;
@@ -62,7 +98,11 @@ export function RunStrip({ model, monitor, agent, label, open, onToggle, onOpenR
   const data = monitor && monitor.status !== "loading" ? monitor.data : null;
   const chart = useMemo(() => liveChart(model, data), [data, model.live]);
   const flag = model.flag?.record;
-  const notice = model.notice && model.notice.kind !== "cancelling";
+  const contact = useRunContact(model.run);
+  const shownContact = model.notice ? contact : null;
+  // The header's sentence and buttons already say a host is down or needs signing in to.
+  const cause = model.notice?.kind !== "unreachable" && model.notice?.kind !== "needs_auth";
+  const notice = shownContact && Boolean(shownContact.rentalBilling || cause && shownContact.detail || shownContact.next);
   const hero = !flag && (chart || model.headline?.known);
   const content = Boolean(hero || flag || model.note || notice || model.stale && !model.live || monitor?.status === "error");
   const mayHaveContent = monitor?.status === "loading"
@@ -71,9 +111,9 @@ export function RunStrip({ model, monitor, agent, label, open, onToggle, onOpenR
   const stale = model.stale && [model.stale.why, model.stale.age].filter(Boolean).join(" · ");
 
   return (
-    <RunLine model={model} agent={agent} label={label} onToggle={onToggle} onOpenRunPage={onOpenRunPage} expanded={expanded} expandable={content || mayHaveContent}>
+    <RunLine model={model} agent={agent} label={label} actions={shownContact?.actions.length ? <ContactActions actions={shownContact.actions} /> : null} error={shownContact?.error} onToggle={onToggle} onOpenRunPage={onOpenRunPage} expanded={expanded} expandable={content || mayHaveContent}>
       {expanded && content && <div className="px-3 pb-3">
-        {notice && <RunContactNotice run={model.run} className="mt-1.5" />}
+        {notice && <div role="status" className="mt-1.5 min-w-0 text-sm"><RunContactDetails contact={shownContact} cause={cause} /></div>}
         {stale && monitor?.status !== "error" && <p className="m-0 mt-1.5 text-xs text-ink-subtext">{stale}</p>}
         {model.note && <p className={cn("m-0 text-xs text-ink-subtext", !notice && !model.stale ? "-mt-0.5" : "mt-1.5")}>{model.note}</p>}
         {flag && !model.sentence.watcher && model.flagDetail && <p className="m-0 mt-1.5 text-sm"><Sentence text={model.flagDetail} tone={model.tone} /></p>}

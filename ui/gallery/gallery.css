@@ -1,0 +1,148 @@
+html {
+  height: auto;
+  color-scheme: light;
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+body, #root {
+  height: auto;
+  min-height: 100vh;
+}
+
+body {
+  overflow: visible;
+}
+
+.gallery-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.gallery-toolbar, .gallery-main {
+  max-inline-size: 1504px;
+  margin-inline: auto;
+  padding-inline: clamp(12px, 2vw, 32px);
+}
+
+.gallery-toolbar, .gallery-controls, .gallery-specimen-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+}
+
+.gallery-toolbar {
+  justify-content: space-between;
+  padding-block: 12px;
+}
+
+.gallery-toolbar h1 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.gallery-controls label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: .8125rem;
+}
+
+.gallery-controls select {
+  min-block-size: 32px;
+  padding-block: 3px;
+}
+
+.gallery-controls select:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.gallery-intro {
+  margin-block: 20px 28px;
+  color: var(--color-ink-subtext);
+  font-size: .875rem;
+}
+
+.gallery-column {
+  max-inline-size: 100%;
+  margin-inline: auto;
+}
+
+.gallery-group {
+  margin-block: 0 36px;
+}
+
+.gallery-group h2 {
+  margin-block: 0 12px;
+  font-size: 1.125rem;
+}
+
+.gallery-specimen {
+  min-inline-size: 0;
+  border-block-start: 1px solid var(--border-variant);
+  padding-block: 12px 8px;
+}
+
+.gallery-specimen-heading {
+  justify-content: space-between;
+  margin-block-end: 8px;
+}
+
+.gallery-specimen-heading h3 {
+  margin: 0;
+  font-size: .8125rem;
+  font-weight: 500;
+  color: var(--color-ink-subtext);
+}
+
+.gallery-action {
+  margin-block: 0 8px;
+  font-size: .8125rem;
+}
+
+.gallery-specimen-heading button[aria-pressed="true"] {
+  background: var(--panel);
+}
+
+[data-pin="stage"] > .gallery-portals > [data-base-ui-portal] > [data-side] {
+  position: static !important;
+  transform: none !important;
+  margin-block: 0 12px;
+}
+
+[data-pin="stage"] > .gallery-portals [role="dialog"] {
+  max-inline-size: 100%;
+  max-block-size: none;
+}
+
+/* Make room for pinned tooltips outside the strip's clipping frame. */
+[data-pin="eta"], [data-pin="stop"] {
+  padding-block-end: 72px;
+}
+
+:is([data-pin="eta"], [data-pin="stop"]) [data-run-frame] {
+  overflow: visible;
+}
+
+[data-pin="eta"] [role="img"] > [role="tooltip"]:not(:popover-open),
+[data-pin="stop"] button[aria-haspopup="dialog"] + [role="tooltip"]:not(:popover-open) {
+  position: absolute;
+  display: block;
+  inset: auto;
+  inset-block-start: calc(100% + 8px);
+  inset-inline-end: 0;
+  z-index: 1;
+}
+
+@container (max-width: 30rem) {
+  [data-pin="eta"] [role="img"] > [role="tooltip"]:not(:popover-open) {
+    inset-inline: 0 auto;
+  }
+}

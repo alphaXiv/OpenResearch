@@ -145,18 +145,24 @@ test("an ended run leads with how it ended and offers Dismiss", () => {
   assert.equal(model(run({ status: "done" }), { shown: false }).canDismiss, false);
 });
 
+test("a reporting error takes the lost tone, like lost contact", () => {
+  const failing = model(run({ backend: { kind: "ssh_job", monitoringError: "The run's log directory cannot be read." } }), { monitor: running });
+  assert.equal(failing.tone, "lost");
+  assert.equal(failing.eta, "");
+});
+
 test("lost contact speaks in the contact notice's words and freezes the bar", () => {
   const since = now - 60_000;
   const away = model(run({ host: "lab-a40", contact: { type: "unreachable", since, cause: "timed out" } }), { monitor: { ...running, cost: { soFar: 1.06, projected: 4, spend: null, budget: null, at: now, uncertain: false } }, retry: now + 180_000 });
   assert.equal(away.tone, "lost");
   assert.ok(away.text.startsWith(bare(m.run_notice_unreachable({ host: "lab-a40", time: `**${fmtClock(since)}**` }))), away.text);
   assert.ok(away.text.includes(bare(m.run_progress_last_seen({ progress: bare(m.run_progress_steps({ done: "1,240", of: "5,000" })) }))));
-  assert.equal(away.eta, m.run_notice_retry_at({ time: fmtClock(now + 180_000) }));
+  assert.ok(away.text.includes(m.run_notice_retry_at({ time: fmtClock(now + 180_000) })));
+  assert.equal(away.eta, "");
   assert.ok(away.bar.frozen);
   assert.equal(away.cost, m.run_cost_last_seen({ cost: "$1.06" }));
 
   const auth = model(run({ host: "lab-a40", backend: { kind: "slurm_job" }, contact: { type: "needs_auth", since, cause: "key" } }));
-  assert.equal(auth.connectHost, "lab-a40");
   assert.ok(auth.text.includes("**"), "the host is the bold figure");
 
   assert.equal(model(run({ cancelling: true })).text, m.status_cancelling());
