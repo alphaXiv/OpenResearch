@@ -559,6 +559,8 @@ function InstructionsCard() {
     try {
       const next = await workspace.api.saveInstructions(edited.content, edited.base);
       workspace.setScopedQueryData(workspace.queries.getInstructionsQuery().queryKey, () => next);
+      // Cleared here too: the editor may have unmounted before the save finished.
+      workspace.instructionsDraft.current = null;
       setDraft(null);
     } catch (e) {
       if (e instanceof FileChangedError) await query.refetch();

@@ -110,3 +110,22 @@ test("an instructions card made against an older file offers only Decline", asyn
   await click(view.button(m.chat_instructions_decline()));
   assert.deepEqual(view.answers(), [{ promptId: "instructions_1", approve: false }]);
 });
+
+test("a save that finishes after leaving Settings leaves no stale draft behind", async () => {
+  let finish;
+  serve((url, init) => {
+    if (url === "/api/user-skills") return { skills: [] };
+    if (url === "/api/latex-templates") return { templates: [] };
+    if (url !== "/api/settings/instructions") return;
+    if (init.method !== "PUT") return file("Saved.", "v1");
+    return new Promise((resolve) => { finish = () => resolve(file("Mine.", "v2")); });
+  });
+  const first = await render(createElement(SkillsTab));
+  await settle();
+  await type(first.container.querySelector("textarea"), "Mine.");
+  await act(async () => find("button", m.common_save()).click());
+  first.unmount();
+  await act(async () => finish());
+  await settle();
+  assert.equal(first.workspace.instructionsDraft.current, null);
+});
