@@ -49,7 +49,7 @@ test("the Windows menu preserves its originating pane", () => {
 
 /** A project with chats `s` and `side` and an experiment `exp` on branch `b`, open at `path`. */
 async function project(path) {
-  const chat = (id) => ({ id, projectId: "p", harness: "claude", title: id, model: null, serviceTier: null, permissionMode: null, planMode: false, autonomy: "default", reasoningLevel: null, archived: false, createdAt: 1, updatedAt: 1, busy: false, activeLeafId: null });
+  const chat = (id) => ({ id, projectId: "p", harness: "claude", title: id, model: null, serviceTier: null, permissionMode: null, planMode: false, reasoningLevel: null, archived: false, createdAt: 1, updatedAt: 1, busy: false, activeLeafId: null });
   serveApp({
     "GET /api/projects": () => ({ projects: [{ id: "p", name: "Project" }] }),
     "GET /api/projects/p/experiments": () => ({ experiments: [{ id: "exp", projectId: "p", slug: "exp", branchName: "b", runCommand: "", agentStatus: "", createdAt: 1, updatedAt: 1, archived: false }] }),

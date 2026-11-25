@@ -499,6 +499,7 @@ struct AgentChild {
     /// Held from adoption until the turn it resumes starts, so no update replaces OpenCode
     /// under that turn in between.
     resuming: Option<tokio::sync::RwLockReadGuard<'static, ()>>,
+    last_used: std::time::Instant,
 }
 
 impl AgentChild {
@@ -519,6 +520,23 @@ impl AgentChild {
     async fn stop(&self) -> Result<()> {
         runtime::stop_kept(&self.keeper).await
     }
+}
+
+/// Whether any session on the server is working, by OpenCode's own account.
+async fn sessions_at_work(endpoint: &AgentEndpoint) -> std::result::Result<bool, ()> {
+    let active: Value = endpoint
+        .client
+        .get(format!("{}/api/session/active", endpoint.base_url))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|_| ())?
+        .json()
+        .await
+        .map_err(|_| ())?;
+    let sessions = active["data"].as_object().ok_or(())?;
+    Ok(!sessions.is_empty())
 }
 
 /// Spawn `opencode serve` in the session's worktree and wait for it to come
@@ -608,6 +626,7 @@ async fn spawn_agent(
         endpoint,
         database,
         resuming: None,
+        last_used: std::time::Instant::now(),
     })
 }
 
@@ -839,8 +858,9 @@ impl AgentHost {
     /// The session's live server and its keeper, which a turn checkpoints against.
     pub(crate) async fn server_for(&self, session_id: &str) -> Option<(AgentEndpoint, KeptHandle)> {
         let mut guard = self.inner.lock().await;
-        let agent = guard.get(session_id)?;
+        let agent = guard.get_mut(session_id)?;
         if agent.alive() {
+            agent.last_used = std::time::Instant::now();
             Some((agent.endpoint.clone(), agent.keeper.clone()))
         } else {
             guard.remove(session_id);
@@ -964,6 +984,74 @@ impl AgentHost {
             })
             .cloned()
             .collect())
+    }
+
+    pub fn start_reaper(self: &std::sync::Arc<Self>) {
+        let host = std::sync::Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(crate::local::agent_lifecycle::REAPER_INTERVAL).await;
+                let Some(host) = host.upgrade() else {
+                    break;
+                };
+                host.reap_idle_at(
+                    std::time::Instant::now(),
+                    crate::local::agent_lifecycle::IdlePolicy::current(),
+                )
+                .await;
+            }
+        });
+    }
+
+    /// Stops servers unused past `policy` while OpenCode reports no session at work, which
+    /// includes one paused on a prompt. The next message respawns and resumes the chat.
+    async fn reap_idle_at(
+        &self,
+        now: std::time::Instant,
+        policy: crate::local::agent_lifecycle::IdlePolicy,
+    ) {
+        let candidates: Vec<_> = self
+            .inner
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, agent)| agent.resuming.is_none() && agent.alive())
+            .map(|(id, agent)| {
+                let age = now.saturating_duration_since(agent.last_used);
+                (id.clone(), agent.last_used, age, agent.endpoint.clone())
+            })
+            .filter(|(.., age, _)| *age >= crate::local::agent_lifecycle::MIN_IDLE_BEFORE_LIMIT)
+            .collect();
+        let mut idle = Vec::new();
+        for (id, used, age, endpoint) in candidates {
+            // An unanswered check keeps the server; the next tick asks again.
+            let turn = store::Store::open().and_then(|store| store.chat_turn_leased(&id));
+            if matches!(turn, Ok(false)) && sessions_at_work(&endpoint).await == Ok(false) {
+                idle.push((id, used, age));
+            }
+        }
+        let over_limit = policy.over_limit(&idle.iter().map(|(.., age)| *age).collect::<Vec<_>>());
+        for (index, (id, used, age)) in idle.into_iter().enumerate() {
+            if age < policy.idle_timeout && !over_limit.contains(&index) {
+                continue;
+            }
+            let agent = {
+                let mut inner = self.inner.lock().await;
+                if inner.get(&id).is_none_or(|agent| agent.last_used != used) {
+                    continue;
+                }
+                inner.remove(&id)
+            };
+            if let Some(agent) = agent {
+                eprintln!(
+                    "orx up: stopping idle OpenCode server session={id} idle_s={}",
+                    age.as_secs()
+                );
+                if let Err(error) = agent.stop().await {
+                    eprintln!("orx up: failed to stop idle OpenCode for {id}: {error}");
+                }
+            }
+        }
     }
 
     pub(crate) async fn retire_idle_children(&self) -> Result<()> {
@@ -1126,7 +1214,8 @@ impl AgentHost {
         let config = launch_config(&current);
         {
             let mut guard = self.inner.lock().await;
-            if let Some(agent) = guard.get(session_id) {
+            if let Some(agent) = guard.get_mut(session_id) {
+                agent.last_used = std::time::Instant::now();
                 let resident = &agent.resident;
                 if resident.project_id == project.id
                     && resident.alphaxiv_signed_in == crate::alphaxiv::signed_in()
@@ -1258,6 +1347,7 @@ impl AgentHost {
                 endpoint,
                 database,
                 resuming,
+                last_used: std::time::Instant::now(),
             },
         );
         Ok(())
@@ -1348,6 +1438,7 @@ impl AgentHost {
                 resident,
                 database,
                 resuming: None,
+                last_used: std::time::Instant::now(),
             },
         );
         keeper
@@ -1780,6 +1871,62 @@ mod tests {
             }
             server.abort();
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn idle_servers_are_released_only_once_opencode_is_quiet() {
+        use crate::local::agent_lifecycle::IdlePolicy;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let working = std::sync::Arc::new(AtomicBool::new(true));
+        let active = working.clone();
+        let app = axum::Router::new().route(
+            "/api/session/active",
+            axum::routing::get(move || {
+                let busy = active.load(Ordering::SeqCst);
+                async move {
+                    axum::Json(if busy {
+                        json!({"data": {"native": {}}})
+                    } else {
+                        json!({"data": {}})
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let unreachable = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let roots = [(); 2].map(|()| git::TemporaryDirectory::new("orx-opencode-idle").unwrap());
+        let host = AgentHost::new(None);
+        host.serve_for_test("chat", port, roots[0].path()).await;
+        host.serve_for_test("gone", unreachable, roots[1].path())
+            .await;
+        let sessions = || async {
+            let mut ids: Vec<_> = host
+                .status()
+                .await
+                .into_iter()
+                .filter_map(|s| s.session_id)
+                .collect();
+            ids.sort();
+            ids
+        };
+        let long_after = std::time::Instant::now() + IdlePolicy::DEFAULT.idle_timeout * 2;
+        // A server still at work, or one that cannot say, stays however long it went unused.
+        host.reap_idle_at(long_after, IdlePolicy::DEFAULT).await;
+        assert_eq!(sessions().await, ["chat", "gone"]);
+        working.store(false, Ordering::SeqCst);
+        let soon = std::time::Instant::now() + Duration::from_secs(60);
+        host.reap_idle_at(soon, IdlePolicy::DEFAULT).await;
+        assert_eq!(sessions().await, ["chat", "gone"]);
+        host.reap_idle_at(long_after, IdlePolicy::DEFAULT).await;
+        assert_eq!(sessions().await, ["gone"]);
+        host.shutdown().await;
     }
 
     #[tokio::test]

@@ -11,7 +11,7 @@ for (const size of ["clientHeight", "clientWidth", "offsetHeight", "offsetWidth"
 
 const chat = (id, updatedAt, archived = false) => ({
   id, projectId: "p", harness: "codex", title: `Chat ${id}`, model: null, serviceTier: null, permissionMode: null, planMode: false,
-  autonomy: "ask", reasoningLevel: null, archived, busy: false, createdAt: updatedAt, updatedAt,
+  reasoningLevel: null, archived, busy: false, createdAt: updatedAt, updatedAt,
 });
 
 /**

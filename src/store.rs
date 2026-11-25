@@ -36,7 +36,6 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{anyhow, Context, Result};
-use crate::local::autonomy::Autonomy;
 use crate::local::model::{LocalExperiment, LocalProject};
 use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
 
@@ -2209,7 +2208,7 @@ impl Store {
             "SELECT onboarding_completed, tour_completed, preferred_harness,
                     preferred_model, preferred_service_tier,
                     preferred_permission_mode, preferred_reasoning_level, workspace_state_json,
-                    preferred_autonomy, nested_delegation, opencode_free_models, preferred_profile,
+                    nested_delegation, opencode_free_models, preferred_profile,
                     favorite_models, hidden_models, model_section_order,
                     collapsed_model_sections, model_sightings, hidden_agents,
                     run_banner, run_watching, seen_nudges,
@@ -2217,7 +2216,7 @@ impl Store {
              FROM ui_state WHERE id = 1",
             [],
             |row| {
-                let profile: Option<String> = row.get(11)?;
+                let profile: Option<String> = row.get(10)?;
                 let harness = row.get::<_, Option<String>>(2)?;
                 let model = row.get::<_, Option<String>>(3)?;
                 let service_tier = row.get::<_, Option<String>>(4)?;
@@ -2244,27 +2243,23 @@ impl Store {
                     workspace: workspace_json
                         .as_deref()
                         .and_then(GlobalWorkspaceState::from_stored),
-                    preferred_autonomy: row
-                        .get::<_, Option<String>>(8)?
-                        .as_deref()
-                        .and_then(Autonomy::from_id),
-                    nested_delegation: row.get(9)?,
-                    opencode_free_models: row.get(10)?,
-                    opencode_review_model: row.get(21)?,
-                    favorite_models: list(12)?,
-                    hidden_models: list(13)?,
-                    hidden_agents: list(17)?,
-                    model_section_order: list(14)?,
-                    collapsed_model_sections: list(15)?,
+                    nested_delegation: row.get(8)?,
+                    opencode_free_models: row.get(9)?,
+                    opencode_review_model: row.get(20)?,
+                    favorite_models: list(11)?,
+                    hidden_models: list(12)?,
+                    hidden_agents: list(16)?,
+                    model_section_order: list(13)?,
+                    collapsed_model_sections: list(14)?,
                     model_sightings: row
-                        .get::<_, Option<String>>(16)?
+                        .get::<_, Option<String>>(15)?
                         .and_then(|json| serde_json::from_str(&json).ok()),
-                    run_banner: RunBannerLevel::parse(&row.get::<_, String>(18)?)
+                    run_banner: RunBannerLevel::parse(&row.get::<_, String>(17)?)
                         .unwrap_or(RunBannerLevel::Strip),
-                    run_watching: row.get(19)?,
-                    seen_nudges: list(20)?,
-                    created_at: row.get(22)?,
-                    status_for_new_chats: row.get(23)?,
+                    run_watching: row.get(18)?,
+                    seen_nudges: list(19)?,
+                    created_at: row.get(21)?,
+                    status_for_new_chats: row.get(22)?,
                 })
             },
         )?)
@@ -2433,14 +2428,6 @@ impl Store {
         self.conn.execute(
             "UPDATE ui_state SET opencode_free_models = ?1 WHERE id = 1",
             params![offered],
-        )?;
-        Ok(())
-    }
-
-    pub fn set_preferred_autonomy(&self, autonomy: Autonomy) -> Result<()> {
-        self.conn.execute(
-            "UPDATE ui_state SET preferred_autonomy = ?1 WHERE id = 1",
-            params![autonomy.id()],
         )?;
         Ok(())
     }
@@ -4667,9 +4654,9 @@ impl Store {
         self.conn.execute(
             "INSERT INTO chat_sessions (id, project_id, harness, native_session_id, title, title_source, model,
                                         service_tier, permission_mode, plan_mode, plan_reset_pending, reasoning_level, archived, bootstrap_context,
-                                        active_leaf_id, created_at, updated_at, autonomy,
+                                        active_leaf_id, created_at, updated_at,
                                         side_parent_session_id, side_parent_leaf_id, profile_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 s.id,
                 s.project_id,
@@ -4688,7 +4675,6 @@ impl Store {
                 s.active_leaf_id,
                 s.created_at,
                 s.updated_at,
-                s.autonomy,
                 s.side_parent_session_id,
                 s.side_parent_leaf_id,
                 s.profile_id,
@@ -5452,14 +5438,6 @@ impl Store {
         ))?;
         let mut rows = stmt.query_map(params![native_id], row_to_chat_session)?;
         Ok(rows.next().transpose()?)
-    }
-
-    pub fn set_chat_session_autonomy(&self, id: &str, autonomy: Autonomy) -> Result<()> {
-        self.conn.execute(
-            "UPDATE chat_sessions SET autonomy = ?2, updated_at = ?3 WHERE id = ?1",
-            params![id, autonomy.id(), now_ms()],
-        )?;
-        Ok(())
     }
 
     pub fn set_chat_session_goal(&self, id: &str, goal: Option<&str>) -> Result<()> {
@@ -6639,8 +6617,6 @@ pub struct StoredChatSession {
     /// What the user asked the agent to keep working toward (`/goal`), carried
     /// into every turn until they clear it.
     pub goal: Option<String>,
-    /// Research autonomy level id (`crate::local::autonomy`); `None` is the default.
-    pub autonomy: Option<String>,
     /// Tip of the branch the UI is currently showing. Forked turns make the
     /// transcript a tree; this picks which path through it is live.
     pub active_leaf_id: Option<String>,
@@ -6675,9 +6651,6 @@ pub struct ProjectSettings {
     pub agent: Option<StoredAgentSelection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled_lit_sources: Option<Vec<String>>,
-    /// The autonomy id new chats start with; an id this orx doesn't know is ignored.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub autonomy: Option<String>,
     #[serde(default, skip_serializing_if = "SlurmDefaults::is_empty")]
     pub slurm: SlurmDefaults,
     /// The Kubernetes namespace runs go to.
@@ -6786,7 +6759,6 @@ pub struct StoredUiState {
     pub tour_completed: bool,
     pub preferred_agent: Option<StoredAgentSelection>,
     pub workspace: Option<GlobalWorkspaceState>,
-    pub preferred_autonomy: Option<Autonomy>,
     /// Whether delegates may delegate in turn unless a `delegate` call says
     /// otherwise. Off: only chats the user started delegate.
     pub nested_delegation: bool,
@@ -7012,7 +6984,7 @@ const TOP_LEVEL_CHATS: &str = "side_parent_session_id IS NULL
 const CHAT_SESSION_COLS: &str = "id, project_id, harness, native_session_id, title, model, service_tier, \
      permission_mode, plan_mode, plan_reset_pending, reasoning_level, archived, context_usage_json, \
      created_at, updated_at, title_source, bootstrap_context, active_leaf_id, \
-     goal, autonomy, side_parent_session_id, side_parent_leaf_id, native_fork_at, profile_id";
+     goal, side_parent_session_id, side_parent_leaf_id, native_fork_at, profile_id";
 
 fn row_to_chat_session(
     row: &rusqlite::Row<'_>,
@@ -7037,11 +7009,10 @@ fn row_to_chat_session(
         bootstrap_context: row.get(16)?,
         active_leaf_id: row.get(17)?,
         goal: row.get(18)?,
-        autonomy: row.get(19)?,
-        side_parent_session_id: row.get(20)?,
-        side_parent_leaf_id: row.get(21)?,
-        native_fork_at: row.get(22)?,
-        profile_id: row.get(23)?,
+        side_parent_session_id: row.get(19)?,
+        side_parent_leaf_id: row.get(20)?,
+        native_fork_at: row.get(21)?,
+        profile_id: row.get(22)?,
     })
 }
 
@@ -8745,7 +8716,7 @@ pub(crate) mod tests {
     fn schema_setup_rolls_back_when_permission_migration_fails() {
         let dir = crate::local::git::TemporaryDirectory::new("orx-migration-rollback").unwrap();
         let store = Store::open_at(dir.path().to_path_buf()).unwrap();
-        store.put_chat_session("chat", "codex", None);
+        store.put_chat_session("chat", "codex");
         store
             .conn
             .execute_batch(
@@ -12150,7 +12121,7 @@ pub(crate) mod tests {
         store
             .create_local_project(&local_project_fixture("project"))
             .unwrap();
-        store.put_chat_session("chat", "claude-code", None);
+        store.put_chat_session("chat", "claude-code");
         store.put_chat_turn("chat", "reply", "running", 1);
         let writer = Store::open_at(dir.path().to_path_buf()).unwrap();
 
@@ -13661,8 +13632,8 @@ pub(crate) mod tests {
             self.conn.execute(sql, []).unwrap();
         }
 
-        /// A chat of `harness` at `autonomy`, the default when none.
-        pub(crate) fn put_chat_session(&self, id: &str, harness: &str, autonomy: Option<&str>) {
+        /// A chat of `harness`.
+        pub(crate) fn put_chat_session(&self, id: &str, harness: &str) {
             self.create_chat_session(&StoredChatSession {
                 profile_id: None,
                 id: id.into(),
@@ -13682,7 +13653,6 @@ pub(crate) mod tests {
                 context_usage_json: None,
                 bootstrap_context: None,
                 goal: None,
-                autonomy: autonomy.map(str::to_owned),
                 active_leaf_id: None,
                 side_parent_session_id: None,
                 side_parent_leaf_id: None,
@@ -13824,7 +13794,6 @@ pub(crate) mod tests {
                 tour_completed: false,
                 preferred_agent: None,
                 workspace: None,
-                preferred_autonomy: None,
                 nested_delegation: false,
                 opencode_free_models: true,
                 opencode_review_model: None,
@@ -13853,7 +13822,6 @@ pub(crate) mod tests {
         store.set_onboarding_completed(true).unwrap();
         store.set_tour_completed(true).unwrap();
         store.set_preferred_agent(&selection).unwrap();
-        store.set_preferred_autonomy(Autonomy::Copilot).unwrap();
         store
             .set_opencode_review_model(Some("openai/gpt-6-mini"))
             .unwrap();
@@ -13889,7 +13857,6 @@ pub(crate) mod tests {
                 tour_completed: true,
                 preferred_agent: Some(selection),
                 workspace: None,
-                preferred_autonomy: Some(Autonomy::Copilot),
                 nested_delegation: false,
                 opencode_free_models: true,
                 opencode_review_model: Some("openai/gpt-6-mini".into()),
@@ -15448,7 +15415,6 @@ pub(crate) mod tests {
             context_usage_json: None,
             bootstrap_context: None,
             goal: None,
-            autonomy: None,
             active_leaf_id: None,
             side_parent_session_id: None,
             side_parent_leaf_id: None,
@@ -15733,8 +15699,7 @@ pub(crate) mod tests {
     fn chat_session_setters_survive_a_reopen() {
         let dir = std::env::temp_dir().join(format!("orx-store-setters-{}", uuid::Uuid::new_v4()));
         const USAGE: &str = r#"{"usedTokens":27564,"contextWindow":200000}"#;
-        let mut session = chat_session_fixture("chat");
-        session.autonomy = Some("copilot".into());
+        let session = chat_session_fixture("chat");
         Store::open_at(dir.clone())
             .unwrap()
             .create_chat_session(&session)
@@ -15744,21 +15709,12 @@ pub(crate) mod tests {
             store.get_chat_session("chat").unwrap().unwrap()
         };
         let fresh = read();
-        assert_eq!(fresh.autonomy.as_deref(), Some("copilot"));
         assert_eq!(fresh.context_usage_json, None);
         assert_eq!((fresh.title, fresh.title_source), (None, None));
         assert!(!fresh.plan_reset_pending);
 
         type Case = (fn(&Store), fn(&StoredChatSession) -> bool);
-        let cases: [Case; 5] = [
-            (
-                |store| {
-                    store
-                        .set_chat_session_autonomy("chat", Autonomy::Agentic)
-                        .unwrap()
-                },
-                |chat| chat.autonomy.as_deref() == Some("agentic"),
-            ),
+        let cases: [Case; 4] = [
             (
                 |store| store.set_chat_session_context_usage("chat", USAGE).unwrap(),
                 |chat| chat.context_usage_json.as_deref() == Some(USAGE),

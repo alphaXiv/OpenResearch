@@ -18,7 +18,7 @@ it arrives, inspect `orx exp view show RUN`, `orx exp view check RUN` and
 
 The view, plan and patterns change with `orx exp view set` while the run goes;
 what the code reports does not. If the missing report requires a code change,
-weigh the work already done before relaunching. In Agentic mode you may cancel,
-fix and commit the code, then relaunch. In Copilot mode, ask the user before
-cancelling healthy compute or relaunching. Report actual progress through long
-validation stages on later launches so the run shows that work is advancing.
+weigh the work already done before relaunching. You may cancel, fix and commit
+the code, then relaunch, or ask the user first when healthy compute is at stake.
+Report actual progress through long validation stages on later launches so the
+run shows that work is advancing.
