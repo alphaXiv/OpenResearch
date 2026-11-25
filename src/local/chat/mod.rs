@@ -3599,9 +3599,14 @@ impl TurnSettings {
                 overrides.permission_mode.as_deref(),
                 self.permission_mode.as_deref(),
             )
+            // A turn with no level runs on the agent's default, which a send names.
             && matches(
                 overrides.reasoning_level.as_deref(),
-                self.reasoning_level.as_deref(),
+                Some(
+                    self.reasoning_level
+                        .as_deref()
+                        .unwrap_or(crate::local::harness::REASONING_DEFAULT_ID),
+                ),
             )
             && overrides
                 .plan_mode
@@ -8228,12 +8233,38 @@ impl ChatHost {
         let session_id = session_id.to_string();
         let settlement = tokio::spawn(async move {
             host.cancel_pending_permissions(&session_id);
+            let mut read_steers = Vec::new();
             let native_shutdown = async {
                 if let Ok(store) = Store::open() {
                     if let Ok(Some(session)) = store.get_chat_session(&session_id) {
                         if session.harness == "opencode" {
                             if let Some(nid) = &session.native_session_id {
-                                let _ = host.opencode.interrupt(&session_id, nid).await;
+                                let steers: Vec<String> = host
+                                    .pending_steers
+                                    .lock()
+                                    .unwrap()
+                                    .get(&session_id)
+                                    .into_iter()
+                                    .flatten()
+                                    .map(|steer| steer.id.clone())
+                                    .collect();
+                                match host.opencode.interrupt(&session_id, nid, &steers).await {
+                                    Ok(read) => {
+                                        read_steers = host
+                                            .pending_steers
+                                            .lock()
+                                            .unwrap()
+                                            .get(&session_id)
+                                            .into_iter()
+                                            .flatten()
+                                            .filter(|steer| read.contains(&steer.id))
+                                            .cloned()
+                                            .collect();
+                                    }
+                                    Err(error) => eprintln!(
+                                        "orx up: stopping OpenCode in chat {session_id}: {error:#}"
+                                    ),
+                                }
                             }
                         } else if session.harness == "codex" {
                             return host.codex.interrupt_session(&session_id).await;
@@ -8247,6 +8278,7 @@ impl ChatHost {
                 None
             };
             let interrupted_items = if mode == StopMode::Shutdown {
+                drop(native_shutdown);
                 None
             } else {
                 tokio::time::timeout(Duration::from_secs(10), native_shutdown)
@@ -8254,6 +8286,10 @@ impl ChatHost {
                     .ok()
                     .flatten()
             };
+            // Read before the stop, so the queue must not run them again.
+            for steer in &read_steers {
+                host.forget_steer(&session_id, &steer.id);
+            }
             if let Some(active) = active {
                 let _ = active.handle.await;
                 if mode == StopMode::Shutdown {
@@ -8286,6 +8322,9 @@ impl ChatHost {
                 }
                 if let Some(message) = message {
                     host.emit("chat.message", message_json(&message, &session_id));
+                }
+                if !read_steers.is_empty() {
+                    host.record_read_steers(&session_id, &active.message_id, &read_steers);
                 }
                 let _ = std::fs::remove_file(target_event_path(&session_id, &active.message_id));
                 remove_target_pointer_if_matches(&session_id, &active.message_id);
@@ -8343,6 +8382,33 @@ impl ChatHost {
                 eprintln!("orx up: delegates of {session_id} not stopped: {error}");
             }
         })
+    }
+
+    /// Adds steers the agent read just before a stop to the stopped turn's reply, where the
+    /// turn itself would have shown them.
+    fn record_read_steers(&self, session_id: &str, message_id: &str, steers: &[SteerMessage]) {
+        let recorded = Store::open().and_then(|store| {
+            let _write = self.msg_write.lock().unwrap();
+            let stored = store
+                .get_chat_message(message_id)?
+                .ok_or_else(|| anyhow!("the stopped reply {message_id} is gone"))?;
+            let mut message = stored_to_wire(&stored);
+            message.parts.extend(steers.iter().map(|steer| WirePart {
+                orx: steer.orx.clone(),
+                ..WirePart::steer(format!("steer-{}", uuid::Uuid::new_v4()), &steer.display)
+            }));
+            store.upsert_chat_message(&StoredChatMessage {
+                parts_json: serde_json::to_string(&message.parts)?,
+                ..stored
+            })?;
+            Ok(message)
+        });
+        match recorded {
+            Ok(message) => self.emit("chat.message", message_json(&message, session_id)),
+            Err(error) => eprintln!(
+                "orx up: could not show the steers read before chat {session_id} stopped: {error:#}"
+            ),
+        }
     }
 
     /// The marker a user Stop leaves in the transcript. The dashboard hides the
@@ -18811,6 +18877,47 @@ pub(crate) mod steering_tests {
     }
 
     #[tokio::test]
+    async fn a_steer_read_just_before_a_stop_stays_in_the_stopped_reply() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let host = test_host();
+        let store = Store::open().unwrap();
+        add_test_session(&store);
+        store
+            .upsert_chat_message_on_branch(&StoredChatMessage {
+                id: "answer".into(),
+                session_id: "owner".into(),
+                role: "assistant".into(),
+                parts_json: serde_json::to_string(&[WirePart::text("a", "Running the sweep.")])
+                    .unwrap(),
+                created_at: now_ms(),
+                completed_at: Some(now_ms()),
+                parent_id: None,
+                base_native_session_id: None,
+                result_native_session_id: None,
+                result_native_message_id: None,
+                native_harness: None,
+            })
+            .unwrap();
+
+        host.record_read_steers("owner", "answer", &[steer("use the smaller model")]);
+
+        let parts = stored_to_wire(&store.get_chat_message("answer").unwrap().unwrap()).parts;
+        let shown: Vec<_> = parts
+            .iter()
+            .map(|part| (part.kind.as_str(), part.text.as_deref().unwrap_or_default()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("text", "Running the sweep."),
+                ("steer", "use the smaller model")
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn a_pending_steer_waits_outside_the_queue_until_the_agent_reads_it() {
         if !crate::config::in_test_child(&[]) {
             return;
@@ -18869,6 +18976,11 @@ pub(crate) mod steering_tests {
         // An empty string is "unset", not a different model.
         assert!(running_settings().accept(&TurnOverrides {
             model: Some(String::new()),
+            ..TurnOverrides::default()
+        }));
+        // A turn that pinned no level runs on the agent's default, which the composer names.
+        assert!(running_settings().accept(&TurnOverrides {
+            reasoning_level: Some(crate::local::harness::REASONING_DEFAULT_ID.into()),
             ..TurnOverrides::default()
         }));
     }

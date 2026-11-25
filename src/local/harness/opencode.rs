@@ -217,6 +217,10 @@ impl Harness for OpenCode {
         true
     }
 
+    fn supports_steering(&self) -> bool {
+        true
+    }
+
     async fn adopt(
         &self,
         chat: &std::sync::Arc<crate::local::chat::ChatHost>,
