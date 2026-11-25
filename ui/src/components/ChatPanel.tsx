@@ -1615,7 +1615,7 @@ function toolFacet(part: ChatPart, activity: ToolActivity): ToolFacet {
     case "skill":
       return "guides";
     case "edit":
-      return reportPath(activity) ? "reports" : "code";
+      return reportPaths(activity).length > 0 ? "reports" : "code";
     case "read":
     case "search":
     case "command":
@@ -1625,10 +1625,10 @@ function toolFacet(part: ChatPart, activity: ToolActivity): ToolFacet {
   }
 }
 
-/** A Markdown file the agent wrote to the artifacts directory. */
-function reportPath(activity: ToolActivity): string | null {
-  if (activity.kind !== "edit") return null;
-  return activity.files?.find((file) => /(?:^|[\\/])artifacts[\\/].+\.md$/i.test(file.path))?.path ?? null;
+/** The Markdown files the agent wrote to the artifacts directory. */
+function reportPaths(activity: ToolActivity): string[] {
+  if (activity.kind !== "edit") return [];
+  return (activity.files ?? []).flatMap((file) => /(?:^|[\\/])artifacts[\\/].+\.md$/i.test(file.path) ? [file.path] : []);
 }
 
 /** The papers a call finished reading, which the shelf shows in place of its row. */
@@ -1722,7 +1722,8 @@ function ResearchToolRun({ parts, pendingTail, discovered, ...props }: ToolGroup
         const cards = new Map<string, ChatPart[]>();
         const rows: ChatPart[] = [];
         for (const part of facetParts) {
-          const runIds = part.state?.status === "error" ? [] : knownRunIds(toolActivity(part), props.runExperimentName);
+          // A card names one decision, so a call that made others stays a row that lists them.
+          const runIds = part.state?.status === "error" || toolActivity(part).more ? [] : knownRunIds(toolActivity(part), props.runExperimentName);
           for (const runId of runIds) cards.set(runId, [...(cards.get(runId) ?? []), part]);
           if (runIds.length === 0) rows.push(part);
         }
@@ -1764,9 +1765,12 @@ function ResearchToolRun({ parts, pendingTail, discovered, ...props }: ToolGroup
         const reports = new Set<string>();
         const rows: ChatPart[] = [];
         for (const part of facetParts) {
-          const path = reportPath(toolActivity(part));
-          if (path && part.state?.status === "completed") reports.add(path);
-          else rows.push(part);
+          const activity = toolActivity(part);
+          const paths = reportPaths(activity);
+          const completed = part.state?.status === "completed";
+          if (completed) for (const path of paths) reports.add(path);
+          // Cards stand in for the row only when they cover everything it did.
+          if (!completed || paths.length < (activity.files?.length ?? 0) || activity.more) rows.push(part);
         }
         return (
           <Fragment key={`reports-${facetParts[0].id}`}>
@@ -2477,8 +2481,7 @@ function turnReceipt(parts: ChatPart[], figures: number, runExperimentName?: (ru
     searches += literatureSearches(activity);
     if (literatureSearches(activity) > 0) searchSource ??= activity.litCall?.source ?? null;
     if (part.state?.status !== "error") for (const runId of knownRunIds(activity, runExperimentName)) runs.add(runId);
-    const report = reportPath(activity);
-    if (report && part.state?.status === "completed") reports.add(report);
+    if (part.state?.status === "completed") for (const report of reportPaths(activity)) reports.add(report);
   }
 
   const icon = (Icon: typeof FlaskConical) => <Icon size={16} strokeWidth={1.75} aria-hidden="true" className="shrink-0 text-muted" />;

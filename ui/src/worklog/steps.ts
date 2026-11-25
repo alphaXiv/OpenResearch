@@ -143,6 +143,7 @@ const phrases = {
   counted: { done: (target: string) => m.activity_counted_lines({ target }), doing: (target: string) => m.activity_counting_lines({ target }) },
   edited: { done: (target: string) => m.activity_edited_target({ target }), doing: (target: string) => m.activity_editing_target({ target }) },
   wrote: { done: (target: string) => m.activity_wrote_target({ target }), doing: (target: string) => m.activity_writing_target({ target }) },
+  wroteAndRan: { done: (target: string) => m.activity_wrote_and_ran({ target }), doing: (target: string) => m.activity_writing_and_running({ target }) },
   deleted: { done: (target: string) => m.activity_deleted_target({ target }), doing: (target: string) => m.activity_deleting_target({ target }) },
   createdFolder: { done: (target: string) => m.activity_created_folder({ target }), doing: (target: string) => m.activity_creating_folder({ target }) },
   moved: { done: (target: string) => m.activity_moved_target({ target }), doing: (target: string) => m.activity_moving_target({ target }) },
@@ -206,7 +207,8 @@ function segmentStep(segment: ShellSegment, at: number, context: StepContext): S
     return target ? { ...writeStep(target, at, context), rank: RANK.files } : null;
   }
   // A filter shapes the output of the command before it; it is not a step of its own.
-  if (segment.piped && !["xargs", "sh", "bash", "zsh", "sqlite3", "python", "python3"].includes(name)) return null;
+  // `xargs` hands the piped text to its command as arguments, so that command is a step.
+  if (segment.piped && !/^xargs\b/.test(segment.code.trimStart()) && !["sh", "bash", "zsh", "sqlite3", "python", "python3"].includes(name)) return null;
   if (segment.piped && (name === "python" || name === "python3") && !args.some((arg) => /\.py$/.test(arg))) return null;
   if (NOISE.has(name)) {
     // A wait with nothing else to show is the step.
@@ -1039,19 +1041,14 @@ function durationSeconds(value: string | undefined): number | null {
 
 /** The call as one row: steps with a shared phrase merged, a script written then run as one, the most telling step first. */
 export function summarizeSteps(input: Step[]): ShellSummary | null {
-  let steps = mergeSteps(input);
-  const runs = new Set(steps.flatMap((step) => step.runs ? [step.runs] : []));
-  const writtenAndRun = steps.filter((step) => step.writes && runs.has(step.writes));
-  if (writtenAndRun.length > 0) {
-    const paths = new Set(writtenAndRun.map((step) => step.writes));
-    steps = steps.flatMap((step): Step[] => {
-      if (step.writes && paths.has(step.writes)) return [];
-      if (step.runs && paths.has(step.runs)) {
-        return [{ ...step, rank: RANK.script, phrase: { done: (target) => m.activity_wrote_and_ran({ target }), doing: (target) => m.activity_writing_and_running({ target }) } }];
-      }
-      return [step];
-    });
-  }
+  // Pair each write with its run before merging, which keeps only the first write's path.
+  const runs = new Set(input.flatMap((step) => step.runs ? [step.runs] : []));
+  const ran = new Set(input.flatMap((step) => step.writes && runs.has(step.writes) ? [step.writes] : []));
+  const steps = mergeSteps(input.flatMap((step): Step[] => {
+    if (step.writes && ran.has(step.writes)) return [];
+    if (step.runs && ran.has(step.runs)) return [{ ...step, rank: RANK.script, phrase: phrases.wroteAndRan }];
+    return [step];
+  }));
 
   const described = steps.map((step) => ({ step, ...describe(step) }));
   const unique = described.filter((entry, index) => described.findIndex((other) => other.label === entry.label) === index);

@@ -37,7 +37,11 @@ export function extractHeredocs(script: string): { text: string; bodies: string[
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index];
     kept.push(line);
-    const marker = /(?:^|[^<])<<(-?)\s*(?:'([^'\n]+)'|"([^"\n]+)"|\\?([A-Za-z_][^\s;&|<>()'"]*))/.exec(line);
+    // `<<` inside quotes or a comment is text; a quoted delimiter right after `<<` stays.
+    const code = line
+      .replace(/(<<-?\s*)?('[^']*'|"(?:\\.|[^"\\])*")/g, (quoted, opener?: string) => opener ? quoted : '""')
+      .replace(/(^|\s)#.*$/, "$1");
+    const marker = /(?:^|[^<])<<(-?)\s*(?:'([^'\n]+)'|"([^"\n]+)"|\\?([A-Za-z_][^\s;&|<>()'"]*))/.exec(code);
     if (!marker) continue;
     const [, stripTabs] = marker;
     const delimiter = marker[2] ?? marker[3] ?? marker[4];

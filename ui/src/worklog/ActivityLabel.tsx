@@ -211,16 +211,21 @@ function RichLabel({
   const onlyRunName = onlyRunId && runExperimentName?.(onlyRunId);
   if (activity.runLabel && onlyRunId && onlyRunName) {
     const label = activity.runLabel(autoDir(onlyRunName));
-    return onOpenRun ? (
-      <button
-        type="button"
-        className="tool-target text-start"
-        title={m.a11y_open_logs_for_run({ run: ltr(onlyRunId) })}
-        {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpenRun(onlyRunId, intent), { stopPropagation: true })}
-      >
-        {label}
-      </button>
-    ) : label;
+    return (
+      <>
+        {onOpenRun ? (
+          <button
+            type="button"
+            className="tool-target text-start"
+            title={m.a11y_open_logs_for_run({ run: ltr(onlyRunId) })}
+            {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpenRun(onlyRunId, intent), { stopPropagation: true })}
+          >
+            {label}
+          </button>
+        ) : label}
+        {more}
+      </>
+    );
   }
   const linkedTargets = (
     ids: string[],
@@ -258,6 +263,7 @@ function RichLabel({
             <ToolTargetOverflow items={hidden} onOpen={onOpen} targetType={targetType} />
           </>
         )}
+        {more}
       </>
     );
   };

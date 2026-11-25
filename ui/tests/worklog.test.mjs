@@ -260,3 +260,29 @@ test("a row that fails to draw reads as its plain words, and the rows beside it 
   const read = rows.find((element) => plain(element.textContent) === words(m.activity_read_target({ target: "train.py" })));
   assert.ok(read?.querySelector(".tool-target"), rows.map((element) => plain(element.textContent)).join(" | "));
 });
+
+test("steps beside the headline stay on the row: piped edits, every script written, real here-documents", () => {
+  assert.match(row(bash("find . -name '*.ts' | xargs sed -i 's/a/b/g'")).label, /sed -i/);
+  const written = row(bash("cat > a.py <<'EOF'\nprint(1)\nEOF\ncat > b.py <<'EOF'\nprint(2)\nEOF\npython a.py", { cwd: "/r" }));
+  assert.equal(written.label, words(m.activity_wrote_target({ target: "b.py" })));
+  assert.deepEqual(written.more, [words(m.activity_wrote_and_ran({ target: "a.py" }))]);
+  const commented = row(bash("# write with <<EOF\ncat > report.md <<EOF\nhello\nEOF", { cwd: "/r" }));
+  assert.equal(commented.label, words(m.activity_wrote_target({ target: "report.md" })));
+});
+
+test("a call that settles several flags or writes several reports keeps each one", async () => {
+  const change = (path) => ({ path, kind: { type: "add" } });
+  const container = await renderTurn([
+    { id: "text-1", type: "text", text: "Settling the runs.", phase: "commentary" },
+    bash("orx exp flag 11111111 --flag slow --keep; orx exp flag 22222222 --flag slow --stop"),
+    call("edit", { changes: [change("/repo/artifacts/a.md"), change("/repo/artifacts/b.md")] }),
+    call("edit", { changes: [change("/repo/artifacts/c.md"), change("/repo/src/x.py")] }),
+    { id: "text-2", type: "text", text: "Done.", phase: "final_answer" },
+  ], () => {}, { runExperimentName: (id) => id === "11111111" ? "Warmup sweep" : "", onOpenRun: () => {} });
+
+  const rows = [...container.querySelectorAll(".tool-row")].map((element) => plain(element.textContent));
+  const flags = rows.find((text) => text.startsWith(words(m.activity_kept_experiment_going({ experiment: "Warmup sweep" }))));
+  assert.ok(flags?.includes(words(m.activity_more_steps({ count: "1" }))), rows.join(" | "));
+  assert.equal(container.querySelectorAll(".report-card").length, 3);
+  assert.ok(rows.some((text) => text.includes("x.py")), rows.join(" | "));
+});
