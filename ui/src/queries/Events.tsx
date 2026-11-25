@@ -54,6 +54,7 @@ export function QueryEvents() {
     listChatSessionsQuery,
     listChatShownRunsQuery,
     getRunMonitorQuery,
+    getChatReportQuery,
     refreshHarnesses,
     refreshHarness,
     getHarnessesQuery,
@@ -183,6 +184,11 @@ export function QueryEvents() {
           ? { type: "upsertMessage", sessionId: event.sessionId, message: event.message }
           : event.type === "queued" ? { type: "setQueued", sessionId: event.sessionId, items: event.items }
             : { type: "activeLeaf", sessionId: event.sessionId, leafId: event.activeLeafId }, true);
+      }
+      if (event.type === "report") {
+        const { queryKey } = getChatReportQuery(event.sessionId);
+        markLiveUpdate(queryClient, queryKey);
+        queryClient.setQueryData(queryKey, (report) => report === undefined ? undefined : event.report);
       }
       if (event.type === "session" && !deletedSessionIds.has(event.session.id)) {
         // A chat that moved into another project leaves its old project's list.

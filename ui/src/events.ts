@@ -3,6 +3,7 @@ import { useEffect, useRef } from "react";
 
 import type {
   ChatMessage,
+  ChatReport,
   ChatSession,
   ContextUsage,
   Experiment,
@@ -42,6 +43,8 @@ export type ChatEvent =
   | { type: "queued"; sessionId: string; items: QueuedMessage[] }
   /** A different fork of a turn is now the branch on screen. */
   | { type: "branch"; sessionId: string; activeLeafId: string | null }
+  /** Null while the chat has no status. */
+  | { type: "report"; sessionId: string; report: ChatReport | null }
   /** The EventSource re-connected after a drop. Chat events are edge-only (no
    * snapshot on connect), so frames emitted during the gap are lost for good —
    * subscribers must refetch whatever they render from chat events. */
@@ -441,6 +444,10 @@ export function createEvents(client: WorkspaceClient) {
           const d = parse<{ sessionId: string; activeLeafId: string | null }>(e as MessageEvent);
           if (d?.sessionId)
             emitChat({ type: "branch", sessionId: d.sessionId, activeLeafId: d.activeLeafId ?? null });
+        });
+        es.addEventListener("chat.report", (e) => {
+          const d = parse<{ sessionId: string; report: ChatReport | null }>(e as MessageEvent);
+          if (d?.sessionId && d.report !== undefined) emitChat({ type: "report", sessionId: d.sessionId, report: d.report });
         });
         es.addEventListener("harness.auth", (e) => {
           const d = parse<HarnessAuthEvent>(e as MessageEvent);

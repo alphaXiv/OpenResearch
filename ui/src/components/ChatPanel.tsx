@@ -61,6 +61,7 @@ import {
   mutRunShellCommand,
   mutSelectChatBranch,
   mutSetChatConfiguration,
+  mutSetChatReportEnabled,
 } from "../queries/chat";
 import { useMutate } from "@clo/react-mutation";
 
@@ -253,6 +254,7 @@ import { PlanStrip } from "./PlanStrip";
 import { useComposerFocus } from "./useComposerFocus";
 import { RunBanner } from "./run/RunBanner";
 import { BackgroundTaskBanner } from "./BackgroundTaskBanner";
+import { StatusReport } from "./StatusReport";
 import { cardSentence, runModel, sessionLeadRun, sessionRunMark } from "../runMonitor/model";
 import { Mark } from "./run/Mark";
 import { Sentence } from "./run/Sentence";
@@ -5567,6 +5569,11 @@ function SessionRow({
   /** Where the row's menu opens: the cursor for a right-click, the kebab for a click. */
   const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
   const open = menuAt !== null;
+  const report = useQuery({ ...workspace.queries.getChatReportQuery(session.id), enabled: open, subscribed: open });
+  const runWatching = useQuery(workspace.queries.getUiStateQuery()).data?.runWatching;
+  // The server keeps no status for a delegate or side chat.
+  const statusOff = (report.data === null || report.data && !report.data.enabled)
+    && runWatching !== false && !session.delegate && !session.sideParentSessionId;
   const runMark = sessionRunMark(runs, session.id);
   const runFlag = runMark === "waiting" || runMark === "flagged";
   const lead = inbox && leadRun && runModel({ item: leadRun, monitor: null, shown: false, agent: m.chat_the_agent(), now: Date.now(), nextRetryMs: null });
@@ -5763,6 +5770,8 @@ function SessionRow({
           const { queryClient, queries } = workspace;
           void queryClient.prefetchQuery(queries.getSessionExperimentsQuery(session.id));
           for (const { run } of runs) if (run.monitor) void queryClient.prefetchQuery(queries.getRunMonitorQuery(run.id));
+          // Read before the menu opens, so its status item can't appear under a click aimed at Delete.
+          void queryClient.prefetchQuery(queries.getChatReportQuery(session.id));
           // While the pointer crosses this row on its way to another's card, this one waits for it to settle.
           const settle = () => {
             const wait = (cardHover.current.aim?.until ?? 0) - Date.now();
@@ -5783,6 +5792,7 @@ function SessionRow({
         else scheduleClose();
       }}
       onFocus={(event) => {
+        void workspace.queryClient.prefetchQuery(workspace.queries.getChatReportQuery(session.id));
         // A click focuses the row too; only the keyboard's focus opens the card.
         if (event.target === event.currentTarget && event.currentTarget.matches(":focus-visible")) showCard();
       }}
@@ -5965,6 +5975,7 @@ function SessionRow({
           onMarkBelowDone={onMarkBelowDone}
           onMoveToProject={onMoveToProject}
           onProjectSettings={project.unnamed ? undefined : onProjectSettings}
+          onTurnOnStatus={statusOff ? () => mutSetChatReportEnabled.run(workspace, session.id, true) : undefined}
           onDelete={onDelete}
         />
       )}
@@ -5974,7 +5985,7 @@ function SessionRow({
 }
 
 /** A chat's actions, opened at a point: the cursor, or below the row's kebab. */
-function SessionMenu({ at, label, archiveLabel, onClose, onRename, onSetArchived, onMarkBelowDone, onMoveToProject, onProjectSettings, onDelete }: {
+function SessionMenu({ at, label, archiveLabel, onClose, onRename, onSetArchived, onMarkBelowDone, onMoveToProject, onProjectSettings, onTurnOnStatus, onDelete }: {
   at: { x: number; y: number };
   label: string;
   archiveLabel: string;
@@ -5985,6 +5996,8 @@ function SessionMenu({ at, label, archiveLabel, onClose, onRename, onSetArchived
   onMoveToProject?: { label: string; run: () => void };
   /** Absent for a chat without a project, which has no settings of its own. */
   onProjectSettings?: () => void;
+  /** Present while the chat's status is off, or not yet started, and the chat could keep one. */
+  onTurnOnStatus?: () => void;
   onDelete: () => void;
 }) {
   const { portalContainer } = useContext(WorkspaceDomContext);
@@ -6012,6 +6025,7 @@ function SessionMenu({ at, label, archiveLabel, onClose, onRename, onSetArchived
               {onMarkBelowDone && <Menu.Item nativeButton render={item} onClick={onMarkBelowDone}>{m.chat_inbox_mark_below_done()}</Menu.Item>}
               {onMoveToProject && <Menu.Item nativeButton render={item} onClick={onMoveToProject.run}>{onMoveToProject.label}</Menu.Item>}
               {onProjectSettings && <Menu.Item nativeButton render={item} onClick={onProjectSettings}>{m.sidebar_project_settings()}</Menu.Item>}
+              {onTurnOnStatus && <Menu.Item nativeButton render={item} onClick={onTurnOnStatus}>{m.status_report_turn_on()}</Menu.Item>}
               <Menu.Separator className="my-1 border-t border-border" />
               <Menu.Item nativeButton render={<MenuItem size="compact" danger className="data-highlighted:bg-surface" />} onClick={onDelete}>{m.chat_panel_delete()}</Menu.Item>
             </Menu.Popup>
@@ -9783,6 +9797,20 @@ export function ChatPanel({
               onOpenRun={onOpenRun}
               onOpenRunPage={onOpenRunPage}
             />
+          )}
+          {activeId && (
+            <ChatImageScope projectId={projectId} sessionId={activeId}>
+              <ChatLinksContext value={chatLinks}>
+                <StatusReport
+                  key={activeId}
+                  sessionId={activeId}
+                  onOpenFile={openFileInSession}
+                  onOpenRunPage={onOpenRunPage}
+                  onOpenSettings={() => onSelectMainView("agents")}
+                  onTurnOff={() => window.requestAnimationFrame(() => composerRef.current?.focus())}
+                />
+              </ChatLinksContext>
+            </ChatImageScope>
           )}
           {!busy && activeId && <BackgroundTaskBanner sessionId={activeId} background={activeSession?.background} />}
           {/* Inside the composer so the composer's popovers (mode/model pickers,

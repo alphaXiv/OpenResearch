@@ -1257,24 +1257,42 @@ function NestedDelegationRow() {
   );
 }
 
-/** Whether a cheap model watches runs; an older server has no watcher, and no row. */
-function RunWatchingRow() {
+/** Whether a cheap model watches runs and keeps chats' status, and whether new chats keep one; an older server has neither row. */
+export function RunWatchingRow() {
   const workspace = useWorkspace();
   const { data: uiState } = useQuery(workspace.queries.getUiStateQuery());
   if (uiState?.runWatching === undefined) return null;
+  const forNewChats = uiState.statusForNewChats;
   return (
-    <div className={cn(PROJECT_DEFAULT_ROW_CLASS_NAME, "mt-4")}>
-      <div>
-        <div className="project-default-title text-base font-medium">{m.settings_run_watching()}</div>
-        <p>{m.settings_run_watching_sends()}</p>
+    <>
+      <div className={cn(PROJECT_DEFAULT_ROW_CLASS_NAME, "mt-4")}>
+        <div>
+          <div className="project-default-title text-base font-medium">{m.settings_watch_runs()}</div>
+          <p>{m.settings_watch_runs_sends()}</p>
+        </div>
+        <Switch
+          type="button"
+          checked={uiState.runWatching}
+          aria-label={m.settings_watch_runs()}
+          onClick={() => mutUpdateUiState.run(workspace, { runWatching: !uiState.runWatching })}
+        />
       </div>
-      <Switch
-        type="button"
-        checked={uiState.runWatching}
-        aria-label={m.settings_run_watching()}
-        onClick={() => mutUpdateUiState.run(workspace, { runWatching: !uiState.runWatching })}
-      />
-    </div>
+      {forNewChats !== undefined && (
+        <div className={cn(PROJECT_DEFAULT_ROW_CLASS_NAME, "mt-4")}>
+          <div>
+            <div className="project-default-title text-base font-medium">{m.settings_status_new_chats()}</div>
+            <p>{uiState.runWatching ? m.settings_status_new_chats_description() : m.settings_status_new_chats_needs_watching({ setting: m.settings_watch_runs() })}</p>
+          </div>
+          <Switch
+            type="button"
+            checked={uiState.runWatching && forNewChats}
+            disabled={!uiState.runWatching}
+            aria-label={m.settings_status_new_chats()}
+            onClick={() => mutUpdateUiState.run(workspace, { statusForNewChats: !forNewChats })}
+          />
+        </div>
+      )}
+    </>
   );
 }
 

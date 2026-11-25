@@ -116,7 +116,14 @@ impl Api {
         )?;
         args.backend.get_or_insert_with(|| "local".into());
         super::require_caller_settings(&args, &super::absolute_config_dir()).await?;
-        self.commands.run(args, admission).await
+        let chat = args.launching_chat_session();
+        let id = self.commands.run(args, admission).await?;
+        if let Some(chat) = chat {
+            if let Err(error) = crate::engine::watch::report::after_turn(&self.store(), &chat) {
+                eprintln!("orx up: report: marking chat {chat}'s launch of run {id}: {error:#}");
+            }
+        }
+        Ok(id)
     }
 
     fn run(&self, id: &str) -> Result<StoredRun> {
@@ -478,6 +485,7 @@ fn routes(api: Arc<Api>) -> Router {
             "/api/v2/experiments/{id}/view",
             get(view).head(view_etag).put(set_view),
         )
+        .route("/api/v2/chats/{id}/milestone", post(milestone))
         .route("/api/v2/events", get(events))
         .route("/api/v2/compute/{action}", post(compute))
         .route_layer(middleware::from_fn_with_state(api.clone(), authenticate))
@@ -636,6 +644,57 @@ async fn cancel(
     api.commands.cancel(&run, &reason, Some(&stop)).await?;
     Ok(Json(api.view(&api.run(&id)?)?))
 }
+#[derive(Deserialize)]
+struct MilestoneRequest {
+    note: String,
+}
+
+/// `orx milestone`: what changed, for the chat's status report.
+async fn milestone(
+    State(api): State<Arc<Api>>,
+    Path(id): Path<String>,
+    Json(request): Json<MilestoneRequest>,
+) -> ApiResult<Json<Value>> {
+    use crate::engine::watch::report;
+    let refused = |status, why: String| Failure::Message(status, why);
+    // A busy store is worth a retry, which `orx milestone` says.
+    let busy = |error: crate::error::Error| {
+        if crate::store::is_db_locked(&error) {
+            refused(StatusCode::SERVICE_UNAVAILABLE, super::DB_BUSY.into())
+        } else {
+            error.into()
+        }
+    };
+    let note = request
+        .note
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if note.is_empty() || note.chars().count() > report::MAX_NOTE {
+        return Err(refused(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Say what changed in at most {} characters: `orx milestone \"<what changed>\"`.",
+                report::MAX_NOTE
+            ),
+        ));
+    }
+    let store = api.store();
+    // Not 404, which `orx milestone` reads as an `orx up` older than this route.
+    let chat = store.get_chat_session(&id).map_err(busy)?.ok_or_else(|| {
+        refused(
+            StatusCode::GONE,
+            format!("Chat {id} no longer exists, so it has no status report."),
+        )
+    })?;
+    Ok(Json(
+        match report::milestone(&store, &chat, &note).map_err(busy)? {
+            report::Milestone::Noted => json!({"noted": true}),
+            report::Milestone::Skipped(why) => json!({"noted": false, "why": why}),
+        },
+    ))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ReviseRequest {
