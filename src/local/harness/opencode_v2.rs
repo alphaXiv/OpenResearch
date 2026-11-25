@@ -1507,25 +1507,38 @@ pub(super) async fn generate(
             return Err(error);
         }
         let result = tokio::time::timeout(timeout, async {
-            let response = endpoint
-                .client
-                .post(format!(
-                    "{}{}",
-                    endpoint.base_url,
-                    endpoint.v2_generate_path()
-                ))
-                .json(&body)
-                .send()
-                .await?;
-            let status = response.status();
-            if !status.is_success() {
+            let mut cold = 0;
+            let response = loop {
+                let response = endpoint
+                    .client
+                    .post(format!(
+                        "{}{}",
+                        endpoint.base_url,
+                        endpoint.v2_generate_path()
+                    ))
+                    .json(&body)
+                    .send()
+                    .await?;
+                let status = response.status();
+                if status.is_success() {
+                    break response;
+                }
                 // The body carries the provider's reason; the URL is a throwaway local port.
                 let body = response.text().await.unwrap_or_default();
+                // A fresh server loads its models on its first generation, which finds none yet.
+                if status == reqwest::StatusCode::NOT_FOUND
+                    && body.contains("ModelNotFoundError")
+                    && cold < 5
+                {
+                    cold += 1;
+                    tokio::time::sleep(crate::config::paced(Duration::from_millis(500))).await;
+                    continue;
+                }
                 return Err(anyhow!(
                     "{status}: {}",
                     crate::local::harness::one_line(&body, 300)
                 ));
-            }
+            };
             let response: Value = response.json().await?;
             response
                 .pointer("/data/text")

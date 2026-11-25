@@ -52,6 +52,10 @@ for code and files. Keep `orx` under the hood: never mention it to the user.
   ref or a chat id links to it; in a task or message a ref passes that message
   on word for word. A message that starts with `[orx]` comes from orx or
   another chat's agent, not the user.
+- The user gets a status report of this chat's work that orx keeps, so keep
+  none of your own unless asked. After you read a result that changes the plan,
+  run `orx milestone "<what changed>"` and carry on; not after only launching a
+  run.
 
 ## Replies
 

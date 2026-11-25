@@ -164,12 +164,14 @@ A stopped run reads **Revising** while the chat's agent repairs its experiment (
 
 ### The watcher
 
-One cheap model per chat watches the chat's runs and writes each run's sentence (`src/engine/watch.rs`). Which model is one function's answer, and an agent with none watches only once the user picks one. **A look has no tools:** a harness that cannot promise that is not used.
+One cheap model per chat watches the chat's runs and writes each run's sentence (`src/engine/watch.rs`). Which model is one function's answer: the user's pick for the chat, else the agent's own cheap model, the chat's own model when it is free, or the vendor's cheap model through the chat's provider or the user's own Claude Code or Codex. A chat with none waits for a pick, which its status report offers once open. **A look has no tools:** a harness that cannot promise that is not used.
 
 - **A look happens when something changes** (a trend breaks, a stage starts or ends, the log prints a new kind of warning), at growing intervals while the run keeps printing, and once more when it ends. A quiet run costs nothing.
 - **A look sees a bounded digest, never the whole log or the chat** (`src/engine/watch/digest.rs`). Every field passes sharing's credential scan before it is sent ([storage](storage.md)).
 - **The model never writes a number.** Its reply is strict JSON whose figures are tokens orx fills from the run, and a reply that fails the checks keeps the run's last sentence (`src/engine/watch/reply.rs`).
 - **A restart never replays a sent look.** It is recorded before it is sent, and one cut short by a restart is marked interrupted. A look may make one extra call to correct a reply that failed its checks.
+
+**The status report reads the chat.** The same model keeps one Markdown report per chat for a person returning to a long effort, edited in place rather than appended to (`src/engine/watch/report.rs`). A chat's report opens once the chat goes on working after one of its runs ends, by launching another run or by working a minute past the end, and its first update waits for that turn to end; a literature review or a launch alone never opens one. The user can turn it on at once, off for that chat, or off for new chats, which stops it opening on its own. Once open it updates at milestones: the end of a turn that reacted to run results or launched a run, or the agent's `orx milestone`, which does not wait for the turn. The model edits the report rather than rewriting it, and writes it again shorter once it outgrows the open card. Every version is kept. Updates keep the watcher's least gap, and a milestone due when orx stops is still due when it starts. Unlike a look, an update sees the conversation since the last one beside the runs, notices and the agent's notes, each field through the same credential scan. Its words are the model's, but every number must appear in what it was shown: a reply that fails gets one correction, and otherwise the last report stands with the reason beside it.
 
 ### Flags
 
