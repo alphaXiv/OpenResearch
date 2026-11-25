@@ -28,6 +28,8 @@ export function createWorkspace(identity: string, basePath = "", queryClient = c
   const persistence = createGlobalPersistence(client, api, queries);
   const projects = createProjectPersistence(client, api, queries);
   const dialogs = createDialogs();
+  // Unsaved OpenResearch instructions, kept while Settings switches tabs.
+  const instructionsDraft: { current: { content: string; base: string } | null } = { current: null };
   return {
     ...client,
     api,
@@ -41,6 +43,7 @@ export function createWorkspace(identity: string, basePath = "", queryClient = c
     composers: createComposerState(),
     transcriptRowSizes: new Map<string, { size: number; width: number }>(),
     transcriptDisclosures: new Map<string, Map<string, boolean>>(),
+    instructionsDraft,
   };
 }
 

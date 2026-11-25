@@ -126,6 +126,9 @@ enum Command {
     /// Add reusable LaTeX templates to the local OpenResearch library.
     Templates(LibraryArgs),
 
+    /// Print the instructions every OpenResearch agent follows, or propose new ones from a chat.
+    Instructions(InstructionsArgs),
+
     /// Install the OpenResearch skill into local coding agents (Claude Code, Codex, OpenCode, Cursor, Antigravity).
     #[command(name = "install-skills")]
     InstallSkills(InstallSkillsArgs),
@@ -1023,6 +1026,20 @@ pub enum LibraryCommand {
 }
 
 #[derive(Args, Debug)]
+pub struct InstructionsArgs {
+    #[command(subcommand)]
+    pub command: Option<InstructionsCommand>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum InstructionsCommand {
+    /// Print them (the default).
+    Show,
+    /// Ask the user, on a card in this chat, to replace them with the file at <PATH>.
+    Propose { path: std::path::PathBuf },
+}
+
+#[derive(Args, Debug)]
 pub struct InstallSkillsArgs {
     /// Which agent(s) to install into: `claude`, `codex`, `opencode`, `cursor`,
     /// `antigravity`, or `all`. Defaults to every agent already set up on this machine.
@@ -1689,6 +1706,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Skill(_) => "skill",
         Command::Skills(_) => "skills",
         Command::Templates(_) => "templates",
+        Command::Instructions(_) => "instructions",
         Command::InstallSkills(_) => "install-skills",
         Command::Discover(_) => "discover",
         Command::Paper(_) => "paper",
@@ -1751,6 +1769,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Skill(args) => commands::skill::run(args).await,
         Command::Skills(args) => commands::library::skills(args),
         Command::Templates(args) => commands::library::templates(args),
+        Command::Instructions(args) => commands::instructions::run(args).await,
         Command::InstallSkills(args) => commands::install_skills::run(args).await,
         Command::Discover(args) => commands::discover::run(args).await,
         Command::Paper(args) => commands::paper::run(args).await,
@@ -1792,6 +1811,7 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
             | Command::Alphaxiv(_)
             | Command::Agents(_)
             | Command::InstallSkills(_)
+            | Command::Instructions(_)
             | Command::Discover(_)
             | Command::Paper(_)
             | Command::Version(_)

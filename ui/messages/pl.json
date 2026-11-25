@@ -2609,5 +2609,19 @@
   "lit_sources_save_title": "Zapisz jako domyślne",
   "lit_sources_save_project": "Zapisz dla tego projektu",
   "lit_sources_save_all": "Zapisz dla wszystkich projektów",
-  "lit_sources_revert": "Użyj źródeł projektu"
+  "lit_sources_revert": "Użyj źródeł projektu",
+  "instructions_title": "Instrukcje OpenResearch",
+  "instructions_description": "To, czego każdy agent przestrzega w każdym projekcie OpenResearch, np. jak nazywać uruchomienia lub raportować wyniki. Agenci mogą proponować zmiany do Twojej akceptacji.",
+  "instructions_placeholder": "Nazywaj uruchomienia od pomysłu, który testują. Raportuj wyniki w tabeli.",
+  "instructions_saved_in": "Zapisano w {path}",
+  "instructions_changed": "Te instrukcje zmieniły się poza tą stroną. Zapisana wersja jest poniżej, a Twoje zmiany nadal są w edytorze.",
+  "instructions_keep_mine": "Zachowaj moje zmiany",
+  "instructions_use_saved": "Użyj zapisanej wersji",
+  "chat_instructions_title": "Zmienić Twoje instrukcje OpenResearch?",
+  "chat_instructions_note": "Nowe czaty zaczynają z nimi. Otwarte czaty mogą zachować wcześniejsze instrukcje do ponownego uruchomienia agenta.",
+  "chat_instructions_stale": "Twoje instrukcje zmieniły się po tym, jak agent to zaproponował. Odrzuć to i poproś agenta o ponowną propozycję.",
+  "chat_instructions_approve": "Zatwierdź",
+  "chat_instructions_decline": "Odrzuć",
+  "chat_instructions_approved": "Zatwierdzono zmianę instrukcji",
+  "chat_instructions_declined": "Odrzucono zmianę instrukcji"
 }

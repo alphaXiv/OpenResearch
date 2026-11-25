@@ -2609,5 +2609,19 @@
   "lit_sources_save_title": "保存为默认",
   "lit_sources_save_project": "为此项目保存",
   "lit_sources_save_all": "为所有项目保存",
-  "lit_sources_revert": "使用项目的来源"
+  "lit_sources_revert": "使用项目的来源",
+  "instructions_title": "OpenResearch 指令",
+  "instructions_description": "每个 OpenResearch 项目中所有智能体都会遵循的内容，例如如何命名运行或汇报结果。智能体可以提出修改，由你批准。",
+  "instructions_placeholder": "按运行所验证的想法命名。用表格汇报结果。",
+  "instructions_saved_in": "保存在 {path}",
+  "instructions_changed": "这些指令在此页面之外被修改了。已保存的版本在下方，你的编辑仍保留在编辑器中。",
+  "instructions_keep_mine": "保留我的编辑",
+  "instructions_use_saved": "使用已保存的版本",
+  "chat_instructions_title": "要修改你的 OpenResearch 指令吗？",
+  "chat_instructions_note": "新对话会使用这些指令。已打开的对话可能会保留之前的指令，直到其智能体重新启动。",
+  "chat_instructions_stale": "智能体提出此修改后，你的指令已发生变化。请拒绝，并让智能体重新提出。",
+  "chat_instructions_approve": "批准",
+  "chat_instructions_decline": "拒绝",
+  "chat_instructions_approved": "已批准指令修改",
+  "chat_instructions_declined": "已拒绝指令修改"
 }

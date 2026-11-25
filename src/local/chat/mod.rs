@@ -12,6 +12,7 @@ mod adoption;
 pub mod delegation;
 pub mod env_request;
 pub(crate) mod handoff;
+pub mod instructions;
 pub mod news;
 pub mod project_move;
 pub(crate) mod subagent;
@@ -807,7 +808,7 @@ pub struct WireQuestionOption {
 pub struct WirePrompt {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub native_choices: Vec<NativePermissionChoice>,
-    /// `plan` | `permission` | `question` | `env`.
+    /// `plan` | `permission` | `question` | `env` | `instructions`.
     pub kind: String,
     /// Whether this prompt has been answered (resolved permission cards
     /// vanish; resolved plan/question cards collapse to a one-line row).
@@ -867,6 +868,15 @@ pub struct WirePrompt {
     /// env: the variables the agent asks the user to set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub variables: Vec<env_request::EnvRequestVar>,
+    /// instructions: the whole file the agent proposes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    /// instructions: the version of the file the proposal replaces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions_version: Option<String>,
+    /// instructions: the proposal as a unified diff against that version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -4562,13 +4572,25 @@ impl ChatHost {
         prompt_id: String,
         prompt: WirePrompt,
     ) -> Result<HeldPermission> {
+        // Held before the card shows, so an answer can't arrive with no one waiting for it.
+        let held = self.hold_card(session_id, prompt_id.clone());
+        self.post_card(session_id, &prompt_id, prompt).await?;
+        Ok(held)
+    }
+
+    async fn post_card(
+        self: &Arc<Self>,
+        session_id: &str,
+        prompt_id: &str,
+        prompt: WirePrompt,
+    ) -> Result<()> {
         // The card rides its own assistant message: the running turn owns its
         // in-flight message's parts (a foreign part appended there would be
         // clobbered by the turn's next flush).
         let mut msg = WireMessage {
             id: format!("msg_{prompt_id}"),
             role: "assistant".into(),
-            parts: vec![WirePart::prompt(prompt_id.clone(), prompt)],
+            parts: vec![WirePart::prompt(prompt_id.to_string(), prompt)],
             created_at: now_ms(),
             completed_at: None,
             parent_id: None,
@@ -4586,11 +4608,10 @@ impl ChatHost {
             result_native_message_id: None,
             native_harness: None,
         })?;
-        let held = self.hold_card(session_id, prompt_id);
         self.emit("chat.message", message_json(&msg, session_id));
         self.emit_session(Store::open()?.get_chat_session(session_id)?)
             .await;
-        Ok(held)
+        Ok(())
     }
 
     /// A request posted again finds the card it showed before: still open, it waits on it
@@ -8455,6 +8476,9 @@ impl ChatHost {
         };
         if prompt.kind == "env" {
             return self.answer_env_request(session, prompt, req).await;
+        }
+        if prompt.kind == "instructions" {
+            return self.answer_instructions(session, prompt, req).await;
         }
         if prompt.kind == "permission"
             && first_unresolved_permission_id(&req.session_id)?.as_deref()

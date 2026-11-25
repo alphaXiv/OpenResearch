@@ -40,6 +40,7 @@ import { CARD_FADE_MS, SessionHoverCard } from "./SessionHoverCard";
 import { AgentMessageCard } from "./AgentMessageCard";
 import { DelegateCard } from "./DelegateCard";
 import { EnvRequestCard } from "./EnvRequestCard";
+import { InstructionsProposalCard } from "./InstructionsProposalCard";
 import { delegateAncestors, delegateModelLabel, delegateStatus, delegatesOf, type DelegateStatus } from "../delegates";
 import { taskLocation } from "../workspaceState";
 import { DONE_PREVIEW_HEIGHT, UNNAMED_GROUP, fitSidebarRows, sidebarGroup, sidebarRowHeight, type RailSection, type SidebarRow } from "../sidebarLayout";
@@ -3501,6 +3502,7 @@ function PromptCard({
   };
 
   if (p.kind === "env") return <EnvRequestCard part={part} done={done} respond={respond} />;
+  if (p.kind === "instructions") return <InstructionsProposalCard part={part} done={done} respond={respond} />;
 
   // Resolved rendering, keyed off `resolved` alone (`done` also covers
   // read-only hosts, where an *unresolved* card must stay visible).

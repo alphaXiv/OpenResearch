@@ -170,6 +170,7 @@ pub(super) struct ProjectState {
     runs: usize,
     active_runs: usize,
     compute: Option<super::ComputeTarget>,
+    pub(super) instructions: String,
 }
 
 impl ProjectState {
@@ -186,6 +187,8 @@ impl ProjectState {
             runs: runs.len(),
             active_runs,
             compute: super::compute_default(&store, project_id)?,
+            instructions: super::chat::instructions::read(&super::chat::instructions::path())?
+                .content,
         })
     }
 }
@@ -295,7 +298,7 @@ pub(super) fn playbook_md(project: &LocalProject, state: &ProjectState) -> Strin
         .split_once("-->\n\n")
         .map(|(_, rest)| rest)
         .unwrap_or(SYSTEM_PROMPT);
-    template
+    let playbook = template
         .replace("{name}", name)
         .replace("{id}", id)
         .replace("{folder_line}", &folder_line)
@@ -304,7 +307,18 @@ pub(super) fn playbook_md(project: &LocalProject, state: &ProjectState) -> Strin
         .replace("{compute_bullet}", &compute_bullet)
         .replace("{artifacts}", &artifacts)
         .replace("{project_state}", &project_state)
-        .replace("{chat_format}", CHAT_FORMAT_REL)
+        .replace("{chat_format}", CHAT_FORMAT_REL);
+    let instructions = state.instructions.trim();
+    if instructions.is_empty() {
+        return playbook;
+    }
+    format!(
+        "{}\n\n## Your user's OpenResearch instructions\n\n\
+         They apply to every OpenResearch project. To change them, write the whole new file and run \
+         `orx instructions propose <file>` so the user can approve it; never edit the file yourself.\n\n\
+         {instructions}\n",
+        playbook.trim_end()
+    )
 }
 
 /// Keep the files we drop into the checkout out of `git status` / accidental
@@ -2131,6 +2145,19 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_instructions_file_fails_the_playbook_rather_than_dropping_it() {
+        let path = crate::local::chat::instructions::path();
+        std::fs::create_dir_all(&path).unwrap();
+        let error = ProjectState::load("proj_unreadable_instructions")
+            .err()
+            .unwrap()
+            .to_string();
+        std::fs::remove_dir_all(&path).unwrap();
+        assert!(error.contains(&path.display().to_string()), "{error}");
+    }
+
     #[test]
     fn project_state_summarizes_counts_and_the_run_command() {
         let mut project = sample_project();
@@ -2143,7 +2170,7 @@ mod tests {
             experiments: 12,
             runs: 18,
             active_runs: 1,
-            compute: None,
+            ..ProjectState::default()
         };
         let existing = project_state_md(&project, &state);
         assert!(existing.contains("**12 experiments**"));
