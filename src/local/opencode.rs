@@ -948,11 +948,14 @@ impl AgentHost {
             if age < policy.idle_timeout && !over_limit.contains(&index) {
                 continue;
             }
-            let mut inner = self.inner.lock().await;
-            if inner.get(&id).is_none_or(|agent| agent.last_used != used) {
-                continue;
-            }
-            if let Some(agent) = inner.remove(&id) {
+            let agent = {
+                let mut inner = self.inner.lock().await;
+                if inner.get(&id).is_none_or(|agent| agent.last_used != used) {
+                    continue;
+                }
+                inner.remove(&id)
+            };
+            if let Some(agent) = agent {
                 eprintln!(
                     "orx up: stopping idle OpenCode server session={id} idle_s={}",
                     age.as_secs()
