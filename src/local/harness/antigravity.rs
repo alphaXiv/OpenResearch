@@ -657,7 +657,9 @@ fn turn_model(session_id: &str, started: i64) -> Option<String> {
         })
         .ok()?;
     match models.as_slice() {
-        [model] => Some(model.clone()),
+        [model] => {
+            Some(crate::local::model_routes::without_variant("antigravity", model).to_string())
+        }
         _ => None,
     }
 }
