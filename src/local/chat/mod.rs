@@ -1486,16 +1486,13 @@ pub fn session_json_with(store: Option<&Store>, s: &StoredChatSession, busy: boo
                 "requestedAt": waiting.requested_at,
             })
         });
-    let limit_timer_stopped = store
-        .map(|store| {
-            store
-                .chat_limit_timer_stopped(&s.id)
-                .unwrap_or_else(|error| {
-                    eprintln!("orx up: limit timer of {}: {error}", s.id);
-                    false
-                })
-        })
-        .unwrap_or_default();
+    // Null when unknown.
+    let limit_timer_stopped = store.and_then(|store| {
+        store
+            .chat_limit_timer_stopped(&s.id)
+            .map_err(|error| eprintln!("orx up: limit timer of {}: {error}", s.id))
+            .ok()
+    });
     json!({
         "id": s.id,
         "projectId": s.project_id,
@@ -10114,13 +10111,18 @@ impl TurnCtx {
         self.clear_retry_status();
         let mut part = WirePart::tool("turn-recovery", "error", "error", Some(message));
         if let Some(state) = part.state.as_mut() {
-            state.input = Some(json!({
+            let mut input = json!({
                 "turnId": self.turn_id,
                 "errorKind": kind,
                 "recoveryAction": recovery_action,
                 "harness": self.harness,
                 "profile": self.profile,
-            }));
+            });
+            // Shipped apps count down to it beside Try again.
+            if let Some(reset_at) = self.usage_reset_at {
+                input["resetAt"] = json!(reset_at);
+            }
+            state.input = Some(input);
         }
         classify_turn_failure(&mut part);
         self.upsert_part_raw(part);

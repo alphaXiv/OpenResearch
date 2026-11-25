@@ -1914,7 +1914,7 @@ export interface ChatSession {
   goal?: string | null;
   autonomy: Autonomy;
   /** The user stopped this chat's wait for its account's usage reset: nothing it holds sends on its own. */
-  limitTimerStopped?: boolean;
+  limitTimerStopped?: boolean | null;
   reasoningLevel: string | null;
   /** Hidden from the default Recents list, but fully intact and resumable. */
   archived: boolean;

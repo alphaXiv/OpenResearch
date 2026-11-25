@@ -83,6 +83,10 @@ impl ChatHost {
                 let slice = Duration::from_millis(left.min(60_000) as u64);
                 tokio::time::sleep(crate::config::paced(slice)).await;
             }
+            // The next server sends what the limit held.
+            if host.exiting.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
             // A later refusal moved the reset and waits for it on its own.
             host.lift(
                 (limit.harness.as_str(), limit.profile.as_deref()),
@@ -172,8 +176,8 @@ impl ChatHost {
                 || store.chat_limit_timer_stopped(session_id)?)
         };
         held().unwrap_or_else(|error| {
-            eprintln!("orx up: could not tell whether chat {session_id} waits for a usage reset, so its queue goes on: {error:#}");
-            false
+            eprintln!("orx up: could not tell whether chat {session_id} waits for a usage reset, so its queue waits: {error:#}");
+            true
         })
     }
 
@@ -384,19 +388,31 @@ for line in sys.stdin:
             .await
             .unwrap();
         assert!(!sent.queued, "nothing holds the chat before the refusal");
+        assert!(
+            send(&host, &id).await,
+            "a message behind the refused turn waits"
+        );
         let continued = || {
             store
                 .get_chat_turn(&id, &sent.turn_id)
                 .unwrap()
                 .is_some_and(|turn| turn.recovered_by_turn_id.is_some())
         };
+        let done = || {
+            continued()
+                && host.queued_items(&id).is_empty()
+                && store
+                    .latest_chat_turn(&id)
+                    .unwrap()
+                    .is_some_and(|turn| turn.state == "completed")
+        };
         tokio::time::timeout(Duration::from_secs(60), async {
-            while !continued() {
+            while !done() {
                 let _ = events.recv().await;
             }
         })
         .await
-        .expect("the refused turn continued at the reset");
+        .expect("the refused turn continued at the reset, then its queue was sent");
     }
 
     #[tokio::test(flavor = "current_thread")]
