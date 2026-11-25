@@ -186,6 +186,7 @@ import { getLocale } from "../paraglide/runtime.js";
 import { activePath, forkPositions } from "../transcriptTree";
 import {
   groupResponseMessages,
+  questionsInPlace,
   isParentUpdate,
   parentUpdateText,
   splitResponseParts,
@@ -211,6 +212,7 @@ import {
   queuedRetryLabel,
   recoveryAction as parseRecoveryAction,
   recoveryTurnOptions,
+  usageResetCountdown,
   retryStatusLabel,
 } from "../chatRecovery";
 import {
@@ -2807,6 +2809,7 @@ function TurnStatusRow({
 }) {
   const input = part.state?.input;
   const nextRetryAt = input?.nextRetryAt ?? null;
+  const resetAt = input?.resetAt ?? null;
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     if (typeof nextRetryAt !== "number") return;
@@ -2819,6 +2822,17 @@ function TurnStatusRow({
     }, 1000);
     return () => window.clearInterval(timer);
   }, [nextRetryAt]);
+  useEffect(() => {
+    if (typeof resetAt !== "number") return;
+    setNow(Date.now());
+    if (resetAt <= Date.now()) return;
+    const timer = window.setInterval(() => {
+      const current = Date.now();
+      setNow(current);
+      if (current >= resetAt) window.clearInterval(timer);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [resetAt]);
   if (part.id === "turn-retry") {
     const label = retryStatusLabel(input ?? {}, now);
     return (
@@ -2843,9 +2857,13 @@ function TurnStatusRow({
   const quiet = cause === "network" || cause === "overloaded";
   const fixLabel = cause && FIX_LABEL[cause];
   const fix = fixLabel && input && failure?.fix(cause, input);
+  // A usage-limited turn waits out nothing the button enforces: the provider,
+  // not a stored timestamp, decides whether the quota is back, so the wait is
+  // shown beside the button as information and every press re-checks for real.
+  const resetCountdown = cause === "usage_limit" ? usageResetCountdown(resetAt, now) : null;
   // While the agent is signed out, only signing in, here or in the composer, sends the turn again.
   const waitsForSignIn = cause === "sign_in" && agent?.authState === "needsLogin";
-  const recover = onRecover && turnId && (action === "retry" || action === "continue") && cause !== "usage_limit" && !waitsForSignIn
+  const recover = onRecover && turnId && (action === "retry" || action === "continue") && !waitsForSignIn
     ? action
     : undefined;
   return (
@@ -2870,8 +2888,11 @@ function TurnStatusRow({
           )}
           {recover && turnId && (
             <Button type="button" size="small" disabled={busy || recovering} onClick={() => onRecover?.(turnId, recover)}>
-              {recovering ? m.chat_starting() : recover === "retry" ? m.app_retry() : m.chat_continue()}
+              {recovering ? m.chat_starting() : cause === "usage_limit" ? m.chat_try_again() : recover === "retry" ? m.app_retry() : m.chat_continue()}
             </Button>
+          )}
+          {recover && resetCountdown && (
+            <span className="text-sm text-subtext">{m.chat_usage_resets_in({ time: resetCountdown })}</span>
           )}
         </div>
       )}
@@ -4831,7 +4852,7 @@ let openedSearchNonce: number | undefined;
 let handedOffSearchNonce: number | undefined;
 
 const Transcript = memo(function Transcript({
-  messages,
+  messages: branch,
   scrollRef,
   scrollToEndRef,
   stickToBottom,
@@ -4913,6 +4934,13 @@ const Transcript = memo(function Transcript({
 }) {
   const { transcriptRowSizes, transcriptDisclosures: disclosures } = useWorkspace();
   useLocale();
+  const messages = useMemo(() => questionsInPlace(branch), [branch]);
+  // A search hit on a question card lands on the turn it folded into.
+  const focusedRowId = useMemo(() => {
+    if (messages.some((message) => message.id === focusedMessageId)) return focusedMessageId;
+    const card = branch.find((message) => message.id === focusedMessageId);
+    return card && messages.find((message) => message.parts.includes(card.parts[0]))?.id;
+  }, [branch, messages, focusedMessageId]);
   const replies = useMemo(() => questionReplies(messages), [messages]);
   const activePermissionId = firstPendingPermission(messages)?.id ?? null;
   const responseGroups = useRef<ChatMessage[][]>([]);
@@ -4960,7 +4988,7 @@ const Transcript = memo(function Transcript({
   const [jumping, setJumping] = useState(false);
   const feedRef = useRef<HTMLDivElement>(null);
   const rowIndexes = useMemo(() => new Map(visibleMessages.flatMap((group, index) => group.map((message) => [message.id, index] as const))), [visibleMessages]);
-  const targetIndex = focusedMessageId ? rowIndexes.get(focusedMessageId) : undefined;
+  const targetIndex = focusedRowId ? rowIndexes.get(focusedRowId) : undefined;
   const getItemKey = useCallback((index: number) => visibleMessages[index][0].id, [visibleMessages]);
   const rangeExtractor = useCallback((range: VirtualRange) => {
     const indexes = new Set(defaultRangeExtractor(range));
@@ -5133,17 +5161,17 @@ const Transcript = memo(function Transcript({
       scroll.removeEventListener("pointerdown", cancel);
       scroll.removeEventListener("keydown", cancel);
     };
-  }, [focusedMessageId, focusedPartId, focusNonce, targetIndex, searchQuery, scrollRef, virtualizer, stickToBottom]);
+  }, [focusedRowId, focusedPartId, focusNonce, targetIndex, searchQuery, scrollRef, virtualizer, stickToBottom]);
   const virtualItems = virtualizer.getVirtualItems();
   useLayoutEffect(() => {
     if (!("highlights" in CSS) || typeof Highlight === "undefined") return;
-    const row = focusedMessageId ? feedRef.current?.querySelector<HTMLElement>("[data-search-target=true]") : null;
+    const row = focusedRowId ? feedRef.current?.querySelector<HTMLElement>("[data-search-target=true]") : null;
     if (!row || !searchQuery) { CSS.highlights.delete(highlightName); return; }
     const part = focusedPartId ? row.querySelector<HTMLElement>(`[data-part-id="${CSS.escape(focusedPartId)}"]`) : null;
     const highlight = new Highlight(...chatSearchRanges(part ?? row, searchQuery));
     CSS.highlights.set(highlightName, highlight);
     return () => { if (CSS.highlights.get(highlightName) === highlight) CSS.highlights.delete(highlightName); };
-  }, [focusedMessageId, focusedPartId, searchQuery, highlightName, virtualItems]);
+  }, [focusedRowId, focusedPartId, searchQuery, highlightName, virtualItems]);
   useEffect(() => {
     if (!markedRowId) return;
     const timer = window.setTimeout(() => setMarkedRowId(null), 1600);
@@ -5201,7 +5229,7 @@ const Transcript = memo(function Transcript({
         const headingId = `${headingPrefix}${rowId}`;
         let expansionState = disclosures.get(rowId);
         if (!expansionState) { expansionState = new Map(); disclosures.set(rowId, expansionState); }
-        const isTarget = group.some((message) => message.id === focusedMessageId);
+        const isTarget = group.some((message) => message.id === focusedRowId);
         const answerText = isTarget && searchQuery ? splitResponseParts(group, false).answer.map((part) => part.text ?? "").join("\n").toLowerCase() : "";
         const revealWork = isTarget && (jumping || handledFocusNonce !== focusNonce) && ((focusedPartId && splitResponseParts(group, false).work.some((turn) => findPartById(turn.parts, focusedPartId)))
           || searchQuery && !searchQuery.toLowerCase().split(/\s+/u).every((term) => answerText.includes(term)));

@@ -117,6 +117,49 @@ export function questionReplies(messages: ChatMessage[]): QuestionReplies {
   return { textById, questionById, prompts };
 }
 
+const questionsInTurn = new WeakMap<ChatMessage, { cards: ChatMessage[]; message: ChatMessage }>();
+
+/** Claude's held question cards ride their own messages; each takes the place of the tool call that asked it. */
+export function questionsInPlace(messages: ChatMessage[]): ChatMessage[] {
+  const toolOwners = new Map<string, ChatMessage>();
+  const cardsByTool = new Map<string, ChatMessage[]>();
+  const cardsByTurn = new Map<ChatMessage, ChatMessage[]>();
+  for (const message of messages) {
+    for (const part of message.parts) {
+      if (part.type === "tool") toolOwners.set(part.id, message);
+    }
+  }
+  for (const message of messages) {
+    const [only, ...rest] = message.parts;
+    const isCard = rest.length === 0 && only?.prompt?.kind === "question" && only.id.startsWith("perm_");
+    // One question of a batch is `perm_{toolId}_{index}`.
+    const cardId = isCard ? only.id.slice("perm_".length) : "";
+    const toolId = toolOwners.has(cardId) ? cardId : cardId.replace(/_\d+$/, "");
+    const turn = isCard ? toolOwners.get(toolId) : undefined;
+    if (turn) {
+      cardsByTool.set(toolId, [...(cardsByTool.get(toolId) ?? []), message]);
+      cardsByTurn.set(turn, [...(cardsByTurn.get(turn) ?? []), message]);
+    }
+  }
+  if (cardsByTurn.size === 0) return messages;
+
+  const folded = new Set([...cardsByTurn.values()].flat());
+  return messages.flatMap((message) => {
+    if (folded.has(message)) return [];
+    const cards = cardsByTurn.get(message);
+    if (!cards) return [message];
+    const cached = questionsInTurn.get(message);
+    if (cached?.cards.length === cards.length && cached.cards.every((card, index) => card === cards[index])) return [cached.message];
+    const parts = message.parts.flatMap((part) => {
+      const asked = part.type === "tool" ? cardsByTool.get(part.id) : undefined;
+      return asked ? asked.map((card) => card.parts[0]) : [part];
+    });
+    const turn = { ...message, parts };
+    questionsInTurn.set(message, { cards, message: turn });
+    return [turn];
+  });
+}
+
 /** Whether a part paints anything in the transcript. */
 export function partIsVisible(part: ChatPart, activePermissionId?: string | null): boolean {
   // The persisted marker still delimits stopped turns for history consumers.
@@ -292,9 +335,10 @@ export function splitResponseParts(messages: ChatMessage[], streaming: boolean, 
     id: turn.message.id,
     parts: turn === current ? turn.work : [...turn.work, ...turn.answer],
   }));
-  const answeredQuestion = (part: ChatPart) => (part.type === "steer" && replies?.textById.has(part.id)) || (part.type === "prompt"
+  // Once the turn ends, a question stays in the activity between where it was asked and the agent's reply to it.
+  const answeredQuestion = (part: ChatPart) => streaming && ((part.type === "steer" && replies?.textById.has(part.id)) || (part.type === "prompt"
     && part.prompt?.kind === "question" && part.prompt.resolved
-    && ((part.prompt.answers?.length ?? 0) > 0 || Boolean(part.prompt.note) || part.prompt.approved === false));
+    && ((part.prompt.answers?.length ?? 0) > 0 || Boolean(part.prompt.note) || part.prompt.approved === false)));
   return {
     // In the order asked: a question answered after `current` follows it.
     answer: [

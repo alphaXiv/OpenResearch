@@ -97,6 +97,42 @@ pub(crate) fn config_dir() -> PathBuf {
     base.join("openresearch")
 }
 
+/// Present when the user's bug reports go to the team's Linear instead of GitHub.
+/// `ORX_SHARED_CONFIG_DIR` is the user's own config directory, which `dev.ts` names
+/// so that every dev checkout, each with a config directory of its own, shares the switch.
+pub(crate) fn linear_bug_reports_marker() -> PathBuf {
+    #[cfg(not(test))]
+    if let Some(dir) = std::env::var_os("ORX_SHARED_CONFIG_DIR") {
+        return PathBuf::from(dir).join(LINEAR_BUG_REPORTS);
+    }
+    config_dir().join(LINEAR_BUG_REPORTS)
+}
+
+const LINEAR_BUG_REPORTS: &str = "report-bugs-to-linear";
+
+pub(crate) fn linear_bug_reports() -> Result<bool> {
+    let marker = linear_bug_reports_marker();
+    marker
+        .try_exists()
+        .with_context(|| format!("could not check for {}", marker.display()))
+}
+
+pub(crate) fn set_linear_bug_reports(enabled: bool) -> Result<()> {
+    let marker = linear_bug_reports_marker();
+    let written = if enabled {
+        marker
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&marker, ""))
+    } else {
+        match std::fs::remove_file(&marker) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            removed => removed,
+        }
+    };
+    written.with_context(|| format!("could not update {}", marker.display()))
+}
+
 pub(crate) use user_dirs::*;
 
 /// The user's directories. Callers go through these, never `dirs`, so that
@@ -960,4 +996,17 @@ pub fn set_ssh_host(host: String, options: SshHostSettings) -> Result<()> {
 pub fn set_ssh_default(host: Option<String>) -> Result<()> {
     crate::telemetry::set_ssh_default(host)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod linear_bug_reports_tests {
+    #[test]
+    fn the_switch_persists_and_turning_it_off_twice_is_fine() {
+        assert!(!super::linear_bug_reports().unwrap());
+        super::set_linear_bug_reports(true).unwrap();
+        assert!(super::linear_bug_reports().unwrap());
+        super::set_linear_bug_reports(false).unwrap();
+        super::set_linear_bug_reports(false).unwrap();
+        assert!(!super::linear_bug_reports().unwrap());
+    }
 }
