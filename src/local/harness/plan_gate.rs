@@ -45,6 +45,8 @@ const WHOLE_VERB_READS: &[&str] = &[
     "version",
     // Posts a background report to the OpenResearch API; gating it would show an approval card.
     "feedback",
+    // Writes only the status report orx keeps for the user, never the project.
+    "milestone",
 ];
 
 /// Shell no-ops allowed as glue between read-only segments in a batch —
@@ -551,6 +553,7 @@ mod tests {
             "orx skill",
             "orx projects --json",
             "orx feedback --kind bug --summary 'x' --details 'y, then z'",
+            "orx milestone 'Width 512 beat the baseline, trying depth next'",
             "/usr/local/bin/orx runs",
             "orx", // bare usage
         ] {

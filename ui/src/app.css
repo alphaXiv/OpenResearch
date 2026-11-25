@@ -229,8 +229,10 @@
   color: var(--md-emphasis);
 }
 
-/* Opaque, with block padding that bridges the leading, so wrapped lines read as one block. */
-:root[data-colored-markdown="on"] .md :is(strong > em, em > strong) {
+/* Opaque, with block padding that bridges the leading, so wrapped lines read as one block. A chat's status keeps
+   bold italic for warnings, so it always shows them. */
+:root[data-colored-markdown="on"] .md :is(strong > em, em > strong),
+.status-report .md :is(strong > em, em > strong) {
   color: var(--md-strong-em);
   background: var(--md-strong-em-bg);
   padding-block: 0.25em;

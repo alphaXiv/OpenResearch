@@ -34,7 +34,9 @@ run-derived claim, confirm that:
 - the cited file lines actually contain the supporting output.
 
 Confirm a number from `orx exp status` in the log before citing it, and cite
-each claim with the playbook's run and file tags.
+each claim with the playbook's run and file tags. Once a result changes the
+plan, tell the status report orx keeps for the user what changed with
+`orx milestone "<what changed>"`.
 
 ## Summarize an experiment
 

@@ -4,7 +4,7 @@ use crate::local::model::LocalExperiment;
 /// A `claude` on the test home's PATH that answers each one-shot with the next reply in `dir`,
 /// as Claude Code's JSON result, and keeps what it was asked.
 #[cfg(unix)]
-fn fake_claude(dir: &std::path::Path, replies: &[&str]) {
+pub(super) fn fake_claude(dir: &std::path::Path, replies: &[&str]) {
     std::fs::create_dir_all(dir).unwrap();
     for (index, reply) in replies.iter().enumerate() {
         std::fs::write(
@@ -38,7 +38,7 @@ printf '{{"type":"result","is_error":false,"result":%s,"total_cost_usd":0.002,"u
 }
 
 #[cfg(unix)]
-fn calls(dir: &std::path::Path) -> usize {
+pub(super) fn calls(dir: &std::path::Path) -> usize {
     std::fs::read_to_string(dir.join("calls")).map_or(0, |n| n.trim().parse().unwrap())
 }
 
@@ -47,7 +47,7 @@ fn chat(store: &Store, id: &str, harness: &str) {
 }
 
 /// A running run of its own experiment, launched by `chat`, whose log the laptop keeps.
-fn run(store: &Store, id: &str, title: &str, chat: &str, log: &str) -> StoredRun {
+pub(super) fn run(store: &Store, id: &str, title: &str, chat: &str, log: &str) -> StoredRun {
     store
         .create_local_experiment(&LocalExperiment {
             id: format!("exp-{id}"),
@@ -818,6 +818,235 @@ fn each_agent_answers_which_model_watches_its_chat() {
 
     store.set_run_watching(false).unwrap();
     assert_eq!(of("claude"), Watching::Off);
+}
+
+/// What `/api/harnesses` says of Claude Code, Codex, OpenCode's providers and Cursor.
+fn catalog() -> Value {
+    json!({"harnesses": [
+        {"id": "claude-code", "name": "Claude Code", "agentReady": true, "models": [
+            {"id": "opus"},
+            {"id": "haiku", "displayName": "Claude Haiku"},
+        ]},
+        {"id": "codex", "name": "Codex", "agentReady": true, "models": [
+            {"id": "gpt-5.5", "displayName": "GPT-5.5"},
+            {"id": "gpt-5.5-luna", "displayName": "GPT-5.5 Luna"},
+        ]},
+        {"id": "opencode", "name": "OpenCode", "agentReady": true, "models": [
+            {"id": "anthropic/claude-sonnet-4-5", "displayName": "Claude Sonnet 4.5"},
+            {"id": "anthropic/claude-haiku-4-5", "displayName": "Claude Haiku 4.5"},
+            {"id": "openrouter/openai/gpt-5.5", "displayName": "GPT-5.5"},
+            {"id": "opencode/big-pickle-free", "displayName": "Big Pickle"},
+            {"id": "deepseek/deepseek-v4", "displayName": "DeepSeek V4"},
+        ]},
+        {"id": "cursor", "name": "Cursor", "agentReady": true, "models": [{"id": "claude-4.5-sonnet"}]},
+    ]})
+}
+
+fn on(store: &Store, id: &str, harness: &str, model: &str) -> StoredChatSession {
+    chat(store, id, harness);
+    store.set_chat_session_model(id, model).unwrap();
+    store.get_chat_session(id).unwrap().unwrap()
+}
+
+/// The harness and model a chat is watched with.
+fn watched(store: &Store, chat: &StoredChatSession) -> Option<(String, Option<String>)> {
+    match watching_model(store, chat).unwrap() {
+        Watching::Selected { harness, model, .. } => Some((harness, model)),
+        _ => None,
+    }
+}
+
+fn route(harness: &str, model: Option<&str>) -> Option<(String, Option<String>)> {
+    Some((harness.into(), model.map(str::to_owned)))
+}
+
+#[test]
+fn a_chat_is_watched_by_its_free_model_or_its_vendors_cheap_one_else_waits_for_a_pick() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    let free = on(&store, "free", "opencode", "opencode/big-pickle-free");
+    let sonnet = on(&store, "sonnet", "opencode", "anthropic/claude-sonnet-4-5");
+    let gpt = on(&store, "gpt", "opencode", "openrouter/openai/gpt-5.5");
+    let cursor = on(&store, "cursor", "cursor", "claude-4.5-sonnet");
+    let deepseek = on(&store, "deepseek", "opencode", "deepseek/deepseek-v4");
+
+    assert_eq!(
+        watched(&store, &free),
+        route("opencode", Some("opencode/big-pickle-free")),
+        "a free model needs no catalog"
+    );
+    assert_eq!(
+        watching_model(&store, &sonnet).unwrap(),
+        Watching::ReadingRoutes,
+        "unknown routes are not missing ones"
+    );
+
+    remember_routes(&catalog());
+    assert_eq!(
+        watched(&store, &sonnet),
+        route("opencode", Some("anthropic/claude-haiku-4-5")),
+        "the chat's own provider first"
+    );
+    assert_eq!(
+        watched(&store, &gpt),
+        route("codex", Some("gpt-5.5-luna")),
+        "then the user's own Codex"
+    );
+    assert_eq!(
+        watched(&store, &cursor),
+        route("claude-code", Some("haiku"))
+    );
+    assert_eq!(
+        watching_model(&store, &deepseek).unwrap(),
+        Watching::NeedsPick
+    );
+    assert_eq!(
+        needs_model(&store, &deepseek).unwrap(),
+        json!({"same": true})
+    );
+    assert_eq!(
+        needs_model(&store, &sonnet).unwrap(),
+        Value::Null,
+        "a chat that has a model is offered none"
+    );
+
+    store
+        .set_ui_json("hidden_agents", &["opencode:anthropic", "claude-code"])
+        .unwrap();
+    remember_routes(&catalog());
+    assert_eq!(
+        watching_model(&store, &sonnet).unwrap(),
+        Watching::NeedsPick,
+        "nothing Settings turned off"
+    );
+    assert_eq!(
+        needs_model(&store, &cursor).unwrap(),
+        json!({"same": false}),
+        "Cursor can't run its own model without tools"
+    );
+}
+
+#[test]
+fn a_chat_whose_own_cheap_model_cant_write_is_offered_a_pick_once_its_agents_catalog_is_read() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    let codex = on(&store, "codex", "codex", "gpt-5.5");
+    assert_eq!(
+        watching_model(&store, &codex).unwrap(),
+        Watching::ReadingRoutes
+    );
+    assert_eq!(
+        needs_model(&store, &codex).unwrap(),
+        Value::Null,
+        "nothing offered while reading"
+    );
+
+    luna().lock().unwrap().insert(
+        None,
+        CatalogRead {
+            at: std::time::Instant::now(),
+            luna: Ok(None),
+            failures: 0,
+        },
+    );
+    assert!(matches!(
+        watching_model(&store, &codex).unwrap(),
+        Watching::Unavailable(_)
+    ));
+    assert_eq!(
+        needs_model(&store, &codex).unwrap(),
+        json!({"same": true}),
+        "a Codex with no GPT Luna offers the chat's own model or another"
+    );
+}
+
+#[test]
+fn a_pick_of_the_chats_own_model_or_another_route_watches_every_agent() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let store = Store::open().unwrap();
+    let deepseek = on(&store, "deepseek", "opencode", "deepseek/deepseek-v4");
+    let cursor = on(&store, "cursor", "cursor", "gpt-5.5");
+    let claude = on(&store, "claude", "claude-code", "opus");
+    let routes = watch_routes(&catalog(), &store.ui_state().unwrap())
+        .unwrap()
+        .unwrap();
+    let labels: Vec<&str> = routes.iter().map(|route| route.label.as_str()).collect();
+    assert_eq!(
+        labels[..5],
+        [
+            "Claude Haiku",
+            "GPT-5.5 Luna",
+            "Claude Haiku 4.5",
+            "Big Pickle",
+            "GPT-5.5"
+        ],
+        "the vendors' cheap models, then free ones, then the rest"
+    );
+    assert!(
+        !routes.iter().any(|route| route.harness == "cursor"),
+        "Cursor can't promise a look no tools"
+    );
+    assert!(
+        !routes.iter().any(|route| route.model == "opus"),
+        "Claude Code's one-shot runs Haiku, so only its Haiku is offered"
+    );
+    let pickle = routes
+        .iter()
+        .find(|route| route.label == "Big Pickle")
+        .unwrap();
+
+    assert_eq!(check_pick(&deepseek, None, &routes), Ok(()));
+    store.set_chat_watch_route("deepseek", None).unwrap();
+    assert_eq!(
+        watched(&store, &deepseek),
+        route("opencode", Some("deepseek/deepseek-v4"))
+    );
+
+    let refused = check_pick(&cursor, None, &routes);
+    assert!(refused.unwrap_err().contains("Cursor"));
+    let refused = check_pick(&claude, None, &routes);
+    assert!(
+        refused.is_err(),
+        "Claude Code's one-shot runs Haiku, never the chat's model"
+    );
+    let unknown = check_pick(&cursor, Some("[\"opencode\",null,\"x/y\"]"), &routes);
+    assert!(unknown.unwrap_err().contains("no longer offered"));
+    assert_eq!(check_pick(&cursor, Some(&pickle.id()), &routes), Ok(()));
+    store
+        .set_chat_watch_route("cursor", Some(&pickle.id()))
+        .unwrap();
+    remember_routes(&catalog());
+    assert_eq!(
+        watched(&store, &cursor),
+        route("opencode", Some("opencode/big-pickle-free"))
+    );
+    assert_eq!(needs_model(&store, &cursor).unwrap(), Value::Null);
+
+    store
+        .set_chat_watch_route("claude", Some(&pickle.id()))
+        .unwrap();
+    assert_eq!(
+        watched(&store, &claude),
+        route("opencode", Some("opencode/big-pickle-free")),
+        "a pick comes before the agent's own cheap model"
+    );
+
+    remember_routes(&json!({"harnesses": []}));
+    assert!(matches!(
+        watching_model(&store, &cursor).unwrap(),
+        Watching::Unavailable(why) if why.contains("no longer offered")
+    ));
+    assert_eq!(
+        needs_model(&store, &cursor).unwrap(),
+        json!({"same": false}),
+        "a pick that no longer runs is offered again"
+    );
 }
 
 #[test]
