@@ -1578,13 +1578,6 @@ fn is_initial_chat_message(transcript_text: Option<&str>, has_messages: bool) ->
     transcript_text.is_none() && !has_messages
 }
 
-/// Told once to a chat that was in Copilot mode, whose history still says to ask before acting.
-const COPILOT_ENDED: &str = "<orx-autonomy-changed>\n\
-Copilot mode no longer exists. Earlier instructions in this chat to ask the user before every \
-`orx exp run` or change of direction no longer apply. Own the research loop as usual, and ask the \
-user only when you judge a decision is theirs to make.\n\
-</orx-autonomy-changed>";
-
 fn with_turn_context(
     goal: Option<&str>,
     demo_evidence_context: Option<&str>,
@@ -2897,9 +2890,8 @@ mod shell_command_tests {
 #[cfg(test)]
 mod initial_message_tests {
     use super::{
-        contextualize_messages, is_initial_chat_message, retire_copilot_block,
-        with_selected_chat_context, with_turn_context, AnnotatedText, TextAnnotation,
-        COPILOT_ENDED,
+        contextualize_messages, is_initial_chat_message, with_selected_chat_context,
+        with_turn_context, AnnotatedText, TextAnnotation,
     };
     use serde_json::{json, Value};
 
@@ -2934,16 +2926,6 @@ mod initial_message_tests {
             with_turn_context(None, None, None, "ordinary".into()),
             "ordinary"
         );
-    }
-
-    #[test]
-    fn a_turn_an_older_orx_saved_in_copilot_mode_replays_with_the_notice() {
-        let saved = "<orx-autonomy level=\"copilot\">\nAsk before every run.\n</orx-autonomy>\n\n<current-user-message>\ngo\n</current-user-message>";
-        let replayed = retire_copilot_block(saved);
-        assert!(!replayed.contains("Ask before every run."));
-        assert!(replayed.starts_with(COPILOT_ENDED));
-        assert!(replayed.ends_with("<current-user-message>\ngo\n</current-user-message>"));
-        assert_eq!(retire_copilot_block("ordinary"), "ordinary");
     }
 
     #[test]
@@ -6647,14 +6629,14 @@ impl ChatHost {
             }
             "retry" | "continue" => {
                 let prompt = if action == "retry" {
-                    rebase_prepared_attachment_paths(&retire_copilot_block(&turn.prepared_input))
+                    rebase_prepared_attachment_paths(&turn.prepared_input)
                 } else {
                     format!(
                     "<orx-recovery>\nA previous turn ended after the request may have been accepted. \
                      Inspect the current repository and transcript state before acting. Do not \
                      repeat completed tool actions. Continue the unfinished request safely.\n\n\
                      Original request:\n{}\n</orx-recovery>",
-                    rebase_prepared_attachment_paths(&retire_copilot_block(&turn.prepared_input))
+                    rebase_prepared_attachment_paths(&turn.prepared_input)
                 )
                 };
                 let submission = self
@@ -7536,9 +7518,6 @@ impl ChatHost {
                         .any(|m| m.text.trim_start().starts_with('/'))
             })
             .map(|message| delegation::message_ref(&message.id));
-        // A replayed turn's Copilot block is retired when it is sent; the mode is cleared only with a saved turn.
-        let in_copilot_mode = store.in_copilot_mode(&session.id)?;
-        let copilot_ended = prepared_input.is_none() && in_copilot_mode;
         let mut turn_text = prepared_input.unwrap_or_else(|| {
             let mut expanded = contextualize_messages(messages, |text| {
                 if orx.is_empty() {
@@ -7556,17 +7535,12 @@ impl ChatHost {
             if let Some(message_ref) = message_ref {
                 expanded = format!("{message_ref}\n{expanded}");
             }
-            let turn = with_turn_context(
+            with_turn_context(
                 session.goal.as_deref(),
                 super::demo::turn_context(&project.id),
                 shell_context.as_deref(),
                 expanded,
-            );
-            if copilot_ended {
-                format!("{COPILOT_ENDED}\n\n{turn}")
-            } else {
-                turn
-            }
+            )
         });
         // Harnesses take plain text; attachments ride as on-disk paths every
         // CLI can open with its own file-reading tool (Read handles PDFs and
@@ -7696,9 +7670,6 @@ impl ChatHost {
                 ctx.continuation = continuation;
                 let admitted = Store::append_chat_turn(&tx, stored_user.as_ref(), &turn)?;
                 if matches!(admitted, ChatTurnAdmission::Inserted) {
-                    if in_copilot_mode {
-                        Store::clear_copilot_mode(&tx, session_id)?;
-                    }
                     if let Some(previous) = previous_flag_turn {
                         Store::reattach_flag_wakes(
                             &tx,
@@ -9681,7 +9652,7 @@ fn turn_ctx_from_stored(
     turn: &StoredChatTurn,
     assistant: WireMessage,
 ) -> Result<TurnCtx> {
-    let mut text = rebase_prepared_attachment_paths(&retire_copilot_block(&turn.prepared_input));
+    let mut text = rebase_prepared_attachment_paths(&turn.prepared_input);
     if let Some(flags) = &turn.flag_input {
         if !text.is_empty() {
             text.push_str("\n\n");
@@ -9766,22 +9737,6 @@ fn turn_ctx_from_stored(
         resume: None,
         checkpointed: false,
     })
-}
-
-/// A turn an older orx saved in Copilot mode carries its ask-first block; replay it with the notice instead.
-fn retire_copilot_block(input: &str) -> String {
-    const OPEN: &str = "<orx-autonomy level=\"copilot\">";
-    const CLOSE: &str = "</orx-autonomy>";
-    let Some(start) = input.find(OPEN) else {
-        return input.to_string();
-    };
-    let Some(end) = input[start..]
-        .find(CLOSE)
-        .map(|end| start + end + CLOSE.len())
-    else {
-        return input.to_string();
-    };
-    format!("{}{COPILOT_ENDED}{}", &input[..start], &input[end..])
 }
 
 fn rebase_prepared_attachment_paths(input: &str) -> String {

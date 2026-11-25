@@ -5431,24 +5431,6 @@ impl Store {
         Ok(())
     }
 
-    /// Whether an older orx left the chat in the removed Copilot mode.
-    pub fn in_copilot_mode(&self, id: &str) -> Result<bool> {
-        Ok(self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM chat_sessions WHERE id = ?1 AND autonomy = 'copilot')",
-            params![id],
-            |row| row.get(0),
-        )?)
-    }
-
-    /// Cleared with the turn that tells the agent Copilot mode ended, so it is told once.
-    pub(crate) fn clear_copilot_mode(tx: &rusqlite::Transaction<'_>, id: &str) -> Result<()> {
-        tx.execute(
-            "UPDATE chat_sessions SET autonomy = NULL WHERE id = ?1 AND autonomy = 'copilot'",
-            params![id],
-        )?;
-        Ok(())
-    }
-
     /// Cleared after a compaction: the pre-compaction total would otherwise be
     /// inherited by the next turn and keep the meter pinned high.
     pub fn clear_chat_session_context_usage(&self, id: &str) -> Result<()> {
@@ -12106,35 +12088,6 @@ pub(crate) mod tests {
         assert!(!dir.join("local-runs/run").exists());
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn a_chat_an_older_orx_left_in_copilot_mode_is_cleared_once() {
-        let dir = crate::local::git::TemporaryDirectory::new("orx-copilot-ended").unwrap();
-        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
-        store
-            .create_local_project(&local_project_fixture("project"))
-            .unwrap();
-        store.put_chat_session("copilot", "claude-code");
-        store.put_chat_session("agentic", "claude-code");
-        store
-            .conn
-            .execute(
-                "UPDATE chat_sessions SET autonomy = 'copilot' WHERE id = 'copilot'",
-                [],
-            )
-            .unwrap();
-        assert!(store.in_copilot_mode("copilot").unwrap());
-        assert!(!store.in_copilot_mode("agentic").unwrap());
-        // A turn that never commits leaves the mode for the next one to report.
-        let tx = store.begin_immediate().unwrap();
-        Store::clear_copilot_mode(&tx, "copilot").unwrap();
-        drop(tx);
-        assert!(store.in_copilot_mode("copilot").unwrap());
-        let tx = store.begin_immediate().unwrap();
-        Store::clear_copilot_mode(&tx, "copilot").unwrap();
-        tx.commit().unwrap();
-        assert!(!store.in_copilot_mode("copilot").unwrap());
     }
 
     #[test]
