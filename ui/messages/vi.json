@@ -1311,6 +1311,7 @@
   "chat_pasted_image": "Ảnh đã dán",
   "chat_type_custom_answer": "Nhập câu trả lời tùy chỉnh…",
   "chat_steering": "Đang điều hướng…",
+  "chat_sends_after_compacting": "Sẽ gửi sau khi nén…",
   "chat_new_chat_placeholder": "Mô tả việc nên thử tiếp theo, thêm bài nghiên cứu và tệp bằng @, hoặc gõ / để dùng lệnh và kỹ năng.",
   "chat_followup_placeholder": "Hỏi tiếp, đưa phản hồi, hoặc thêm bài nghiên cứu và tệp bằng @.",
   "chat_harness_unavailable": "{harness} không khả dụng — hãy mở bộ chọn mô hình",

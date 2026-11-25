@@ -1311,6 +1311,7 @@
   "chat_pasted_image": "Imagen pegada",
   "chat_type_custom_answer": "Escribe una respuesta personalizada…",
   "chat_steering": "Guiando…",
+  "chat_sends_after_compacting": "Se enviará después de comprimir…",
   "chat_new_chat_placeholder": "Describe qué probar a continuación, añade artículos y archivos con @ o escribe / para comandos y skills.",
   "chat_followup_placeholder": "Haz una pregunta de seguimiento, da indicaciones o añade artículos y archivos con @.",
   "chat_harness_unavailable": "{harness} no está disponible — abre el selector de modelos",

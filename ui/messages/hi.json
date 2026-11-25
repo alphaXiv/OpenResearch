@@ -1311,6 +1311,7 @@
   "chat_pasted_image": "पेस्ट की गई इमेज",
   "chat_type_custom_answer": "अपना जवाब टाइप करें…",
   "chat_steering": "दिशा दी जा रही है…",
+  "chat_sends_after_compacting": "संक्षिप्त करने के बाद भेजा जाएगा…",
   "chat_new_chat_placeholder": "बताएँ कि आगे क्या आज़माना है, @ से पेपर और फ़ाइलें जोड़ें, या कमांड और स्किल के लिए / लिखें।",
   "chat_followup_placeholder": "फ़ॉलो-अप पूछें, फ़ीडबैक दें, या @ से पेपर और फ़ाइलें जोड़ें।",
   "chat_harness_unavailable": "{harness} उपलब्ध नहीं है — मॉडल पिकर खोलें",

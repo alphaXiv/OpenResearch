@@ -1311,6 +1311,7 @@
   "chat_pasted_image": "Pasted image",
   "chat_type_custom_answer": "Type a custom answer…",
   "chat_steering": "Steering…",
+  "chat_sends_after_compacting": "Sends after compacting…",
   "chat_new_chat_placeholder": "Describe what to try next, add papers and files with @, or type / for commands and skills.",
   "chat_followup_placeholder": "Ask a follow-up, give feedback, or add papers and files with @.",
   "chat_harness_unavailable": "{harness} is unavailable — open the model picker",
