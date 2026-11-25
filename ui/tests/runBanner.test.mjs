@@ -100,7 +100,7 @@ test("the remembered level opens the line, and a run waiting for a choice opens 
   await settle();
   assert.ok(button(m.run_show_more()));
   monitors.r1 = flagged;
-  await view.update([run("r1", { monitor: summary({ tone: "flag", sentence: flagged.sentence, bindings: { loss: "NaN" }, flag: { id: "f1", state: "waiting", mode: "copilot" }, rev: flagged.rev }) })]);
+  await view.update([run("r1", { monitor: summary({ tone: "flag", sentence: flagged.sentence, bindings: { loss: "NaN" }, flag: { id: "f1", state: "waiting" }, rev: flagged.rev }) })]);
   await settle();
   assert.ok(button(m.run_show_less()), "the strip opened by itself");
   await act(async () => workspace.queryClient.refetchQueries({ queryKey: workspace.queries.getRunMonitorQuery("r1").queryKey }));
@@ -423,7 +423,7 @@ test("an ended run is dismissed for every window, and Keep going answers the fla
   assert.equal(requests.filter((r) => r.request === "POST /api/chat/sessions/s/shown-runs/r2/dismiss").length, 1);
   assert.deepEqual(workspace.queryClient.getQueryData(shown.queryKey).runs, []);
 
-  const waiting = run("r1", { monitor: summary({ tone: "flag", flag: { id: "f1", state: "waiting", mode: "copilot" } }) });
+  const waiting = run("r1", { monitor: summary({ tone: "flag", flag: { id: "f1", state: "waiting" } }) });
   await banner([waiting]);
   await settle();
   await click(find("button", m.run_flag_keep_going()));
@@ -434,7 +434,7 @@ test("an ended run is dismissed for every window, and Keep going answers the fla
 test("a flag's Stop run asks first and keeps the dialog open when the server refuses", async () => {
   let refusal = "The run's machine is offline.";
   const requests = backend({ monitors: { r1: flagged }, flagRefusal: () => refusal });
-  await banner([run("r1", { monitor: summary({ tone: "flag", flag: { id: "f1", state: "waiting", mode: "copilot" } }) })]);
+  await banner([run("r1", { monitor: summary({ tone: "flag", flag: { id: "f1", state: "waiting" } }) })]);
   await settle();
   const answers = () => requests.filter((r) => r.request === "POST /api/runs/r1/flag").map((r) => r.body.choice);
   const strip = () => [...document.querySelectorAll("button")].find((element) => element.textContent.includes(m.experiments_stop_run()) && !element.closest('[role="dialog"]'));
@@ -519,7 +519,7 @@ test("a host that needs authentication offers one Connect action with the strip 
 test("a flag's detail pluralizes the count from its own look", async () => {
   const counted = { ...flagged, counts: { "ERR 429": 43 }, flags: [{ ...flagged.flags[0], bindings: { 'count:"ERR 429"': 1 }, detail: '**{count:"ERR 429"}** lines like "ERR 429" so far.' }] };
   backend({ monitors: { r1: counted } });
-  await banner([run("r1", { monitor: summary({ tone: "flag", flag: { id: "f1", state: "waiting", mode: "copilot" } }) })]);
+  await banner([run("r1", { monitor: summary({ tone: "flag", flag: { id: "f1", state: "waiting" } }) })]);
   await settle();
   assert.ok([...document.querySelectorAll("[role=group] span")].some((p) => p.textContent.replace(/[⁦-⁩]/g, "").startsWith('1 line like "ERR 429" so far.')));
 });
@@ -550,7 +550,7 @@ test("the expanded flag renders the full warning in one place", async () => {
 
 const plain = (text) => text.replace(/[⁦-⁩]/g, "");
 const named = (label) => [...document.querySelectorAll("button")].find((element) => plain(element.textContent) === plain(label)) ?? null;
-const waitingRun = () => run("r1", { monitor: summary({ tone: "flag", flag: { id: "f1", state: "waiting", mode: "copilot" } }) });
+const waitingRun = () => run("r1", { monitor: summary({ tone: "flag", flag: { id: "f1", state: "waiting" } }) });
 
 test("a follower's flag does not name the current chat's agent as the Ask recipient", async () => {
   backend({ monitors: { r1: flagged } });
@@ -992,9 +992,9 @@ test("a shown active run without a summary ignores cached monitor data and draws
 });
 
 test("an unresolved flag stays visible after completion and announces that the run ended", async () => {
-  const ended = { ...flagged, flags: [{ ...flagged.flags[0], state: "waiting", mode: "copilot" }] };
+  const ended = { ...flagged, flags: [{ ...flagged.flags[0], state: "waiting" }] };
   const requests = backend({ monitors: { r1: ended } });
-  const done = run("r1", { status: "done", endedAt: now, monitor: summary({ tone: "flag", sentence: flagged.sentence, flag: { id: "f1", state: "waiting", mode: "copilot" }, rev: flagged.rev }) });
+  const done = run("r1", { status: "done", endedAt: now, monitor: summary({ tone: "flag", sentence: flagged.sentence, flag: { id: "f1", state: "waiting" }, rev: flagged.rev }) });
   const view = await banner([{ ...done, status: "running", endedAt: null }]);
   await settle();
   await view.update([done]);

@@ -21,7 +21,7 @@ test("a chat's sidebar row shows the flask while a run runs and the warning whil
     routes: {
       "GET /api/chat/shown-runs": () => [
         { sessionId: "a", run: run("r1"), experimentName: null, experimentSlug: "one", runNo: 1, runCount: 1 },
-        { sessionId: "b", run: run("r2", { id: "f", state: "waiting", mode: "copilot" }), experimentName: null, experimentSlug: "two", runNo: 1, runCount: 1 },
+        { sessionId: "b", run: run("r2", { id: "f", state: "waiting" }), experimentName: null, experimentSlug: "two", runNo: 1, runCount: 1 },
         { sessionId: "c", run: run("r3", { id: "f", state: "agent_looking", mode: "agentic" }), experimentName: null, experimentSlug: "three", runNo: 1, runCount: 1 },
         { sessionId: "d", run: { ...run("r4"), status: "done" }, experimentName: null, experimentSlug: "four", runNo: 1, runCount: 1 },
       ],
@@ -59,7 +59,7 @@ test("in the inbox, a chat whose run flag waits keeps its warning in Working, a 
         }),
         "GET /api/chat/shown-runs": () => [
           { sessionId: "a", run: run("r1"), experimentName: null, experimentSlug: "one", runNo: 1, runCount: 1 },
-          { sessionId: "b", run: run("r2", { id: "f", state: "waiting", mode: "copilot" }), experimentName: null, experimentSlug: "two", runNo: 1, runCount: 1 },
+          { sessionId: "b", run: run("r2", { id: "f", state: "waiting" }), experimentName: null, experimentSlug: "two", runNo: 1, runCount: 1 },
           { sessionId: "d", run: { ...run("r4"), status: "done" }, experimentName: null, experimentSlug: "four", runNo: 1, runCount: 1 },
           { sessionId: "e", run: monitored("r5", { tone: "running", bindings: { loss: 2.31 }, sentence: { template: "Loss **{loss}**, falling steadily.", t: Date.now() } }), experimentName: null, experimentSlug: "five", runNo: 1, runCount: 1 },
           { sessionId: "f", run: monitored("r6", { tone: "done", headline: { name: "loss", label: "Loss", value: 1.87 } }, { status: "done", endedAt: 2 }), experimentName: null, experimentSlug: "six", runNo: 1, runCount: 1 },

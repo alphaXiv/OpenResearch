@@ -250,10 +250,10 @@ export const specimenGroups: { name: string; specimens: Specimen[] }[] = [
     }, {}, { level: "line" }),
     one("Old watcher sentence · automatic fallback", { ...running, sentence: { ...running.sentence!, t: now - 4 * 60_000 } }),
     ...(["look", "tripwire", "rule"] as const).flatMap((source) => [
-      one(`Agentic · ${source === "rule" ? "Ask rule" : source} · agent reading`, warning(source, "agent_looking")),
-      one(`Copilot · ${source === "rule" ? "Ask rule" : source} · waiting for you`, warning(source, "waiting"), {}, { level: "line" }),
+      one(`Flag · ${source === "rule" ? "Ask rule" : source} · agent reading`, warning(source, "agent_looking")),
+      one(`Flag · ${source === "rule" ? "Ask rule" : source} · waiting for you`, warning(source, "waiting"), {}, { level: "line" }),
     ]),
-    one("Agentic · queued · collapsed", warning("look", "raised"), {}, { level: "line" }),
+    one("Flag · queued · collapsed", warning("look", "raised"), {}, { level: "line" }),
     one("Flag · waking the agent", warning("look", "waking")),
     one("Flag · reading without log evidence", warning("rule", "agent_looking", { evidence: null })),
     one("Flag · log evidence across several lines", warning("look", "waiting", {

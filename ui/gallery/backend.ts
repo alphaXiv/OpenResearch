@@ -22,7 +22,7 @@ function shownRuns(specimen: Specimen) {
 function preferences(specimen: Specimen): UiState {
   return {
     workspace: null, onboardingCompleted: true, tourCompleted: true,
-    preferredAgent: null, preferredAutonomy: null, nestedDelegation: false,
+    preferredAgent: null, nestedDelegation: false,
     opencodeFreeModels: false, opencodeReviewModel: null,
     favoriteModels: [], hiddenModels: [], hiddenAgents: [],
     modelSectionOrder: [], collapsedModelSections: [],

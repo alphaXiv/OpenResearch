@@ -4,7 +4,6 @@ import { Check, ChevronDown, ChevronRight, Gift, History, Star } from "lucide-re
 import { fmtNumber, tidyModelName } from "../api";
 import { m } from "../paraglide/messages.js";
 import { CLAUDE_TIERS, type ModelLine, type ModelOffer } from "../modelLines";
-import { harnessKey } from "../modelSelection";
 import { AgentIconTile } from "./AgentIcon";
 import { agentLab, LabMark, LABS, ModelMark, modelLab } from "./HarnessLogo";
 import type { PickerAgent } from "./pickerAgents";
@@ -137,7 +136,6 @@ export function ModelList({
   onCollapse,
   selectedLine,
   selectedAgent,
-  lockedHarness,
   onPick,
   onToggleFavorite,
   children,
@@ -158,8 +156,6 @@ export function ModelList({
   onCollapse: (collapsed: string[]) => void;
   selectedLine?: PickerLine;
   selectedAgent?: PickerAgent;
-  /** The agent the chat can't leave right now, by `harnessKey`: other agents' models open a new chat instead. */
-  lockedHarness?: string;
   /** `from` is the section the row was in, as telemetry names it. */
   onPick: (line: PickerLine, agent: PickerAgent, from: PickedFrom) => void;
   onToggleFavorite: (family: string) => void;
@@ -319,7 +315,6 @@ export function ModelList({
       onLeave={toRail}
       currentAgent={selectedAgent}
       selectedAgent={line === selectedLine ? selectedAgent : undefined}
-      lockedHarness={lockedHarness}
       favorite={favorites.has(line.family)}
       fresh={fresh.has(line)}
       freeBadge={section?.id !== FREE}
@@ -425,7 +420,7 @@ export function ModelList({
   );
 }
 
-function ModelRow({ line, agents, selected, entry, onLeave, currentAgent, selectedAgent, lockedHarness, favorite, fresh, freeBadge, onPick, onToggleFavorite }: {
+function ModelRow({ line, agents, selected, entry, onLeave, currentAgent, selectedAgent, favorite, fresh, freeBadge, onPick, onToggleFavorite }: {
   line: PickerLine;
   agents: PickerAgent[];
   selected: boolean;
@@ -435,7 +430,6 @@ function ModelRow({ line, agents, selected, entry, onLeave, currentAgent, select
   onLeave: (from: HTMLElement) => boolean;
   currentAgent?: PickerAgent;
   selectedAgent?: PickerAgent;
-  lockedHarness?: string;
   favorite: boolean;
   fresh: boolean;
   /** Free's own rows need no badge saying so. */
@@ -447,7 +441,6 @@ function ModelRow({ line, agents, selected, entry, onLeave, currentAgent, select
   const name = lineName(line);
   const spoken = free ? `${name}, ${m.model_picker_free()}` : name;
   const auto = autoAgent(line, agents, currentAgent);
-  const newChat = (agent: PickerAgent) => lockedHarness !== undefined && harnessKey(agent.harness) !== lockedHarness;
   // Arrow keys along a row move between its agents; Up and Down move between rows.
   const along = (event: KeyboardEvent<HTMLElement>) => {
     const step = inlineStep(event);
@@ -465,7 +458,6 @@ function ModelRow({ line, agents, selected, entry, onLeave, currentAgent, select
         data-nav
         className={MAIN}
         aria-label={m.model_picker_model_on({ model: spoken, agent: auto.name })}
-        aria-description={newChat(auto) ? m.model_picker_new_chat_with({ agent: auto.name }) : undefined}
         aria-pressed={selected}
         onKeyDown={along}
         onClick={() => onPick(line, auto)}
@@ -478,13 +470,12 @@ function ModelRow({ line, agents, selected, entry, onLeave, currentAgent, select
       </button>
       <span className="flex shrink-0 items-center">
         {agents.length > 1 && agents.map((agent) => (
-          <Tooltip key={agent.key} interactive content={newChat(agent) ? m.model_picker_new_chat_with({ agent: agent.name }) : agent.name} className="rounded-md">
+          <Tooltip key={agent.key} interactive content={agent.name} className="rounded-md">
             <button
               type="button"
               tabIndex={-1}
               data-agent
               aria-label={m.model_picker_model_on({ model: spoken, agent: agent.name })}
-              aria-description={newChat(agent) ? m.model_picker_new_chat_with({ agent: agent.name }) : undefined}
               aria-pressed={agent === selectedAgent}
               onKeyDown={along}
               onClick={() => onPick(line, agent)}

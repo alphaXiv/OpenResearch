@@ -1,6 +1,6 @@
 //! Flags: a run that may be going wrong, raised by a look, a tripwire or a rule that asks. A flag
-//! never stops a run. An Agentic chat's agent is woken with it to settle it; a Copilot chat
-//! waits for the user. What became of a flag is its journal's choices and the notices that carried
+//! never stops a run. The chat's agent is woken with it to settle it or hand it to the user.
+//! What became of a flag is its journal's choices and the notices that carried
 //! it, read back.
 
 use std::collections::BTreeSet;
@@ -9,7 +9,6 @@ use serde_json::{json, Value};
 
 use super::Phase;
 use crate::error::Result;
-use crate::local::autonomy::Autonomy;
 use crate::store::{
     flag_ask_dedupe, FlagEvent, FlagNotice, NewFlag, Store, StoredChatSession, StoredRun,
 };
@@ -48,8 +47,8 @@ fn home(store: &Store, run: &StoredRun) -> Result<Option<StoredChatSession>> {
     Ok(None)
 }
 
-fn agentic(chat: &StoredChatSession) -> bool {
-    !chat.archived && Autonomy::from_stored(chat.autonomy.as_deref()) == Autonomy::Agentic
+fn active(chat: &StoredChatSession) -> bool {
+    !chat.archived
 }
 
 fn settles(event: &FlagEvent) -> bool {
@@ -124,7 +123,7 @@ pub(crate) fn read(store: &Store, run: &StoredRun) -> Result<Vec<Value>> {
     } else {
         None
     };
-    let autonomous = home.as_ref().is_some_and(agentic);
+    let home_active = home.as_ref().is_some_and(active);
     let at_home = |notice: &&FlagNotice| {
         home.as_ref()
             .is_some_and(|chat| chat.id == notice.chat_session_id)
@@ -161,9 +160,9 @@ pub(crate) fn read(store: &Store, run: &StoredRun) -> Result<Vec<Value>> {
                     .rfind(|notice| own(notice, id));
                 match last {
                     Some(last) if live && last.retired && !last.claimed => "waiting",
-                    Some(last) if autonomous && needs_redelivery(last) => "raised",
+                    Some(last) if home_active && needs_redelivery(last) => "raised",
                     Some(last)
-                        if autonomous
+                        if home_active
                             && last.delivered
                             && last.turn.as_deref() == Some("completed") =>
                     {
@@ -175,7 +174,7 @@ pub(crate) fn read(store: &Store, run: &StoredRun) -> Result<Vec<Value>> {
                             "waiting"
                         }
                     }
-                    Some(last) if autonomous && last.retired && last.delivered => "agent_looking",
+                    Some(last) if home_active && last.retired && last.delivered => "agent_looking",
                     Some(last) => carried(last, false),
                     None => "waiting",
                 }
@@ -227,7 +226,7 @@ pub(crate) fn carry_cut_flags(
     client_turn_id: &str,
     now: i64,
 ) -> Result<Vec<String>> {
-    if !agentic(chat) {
+    if !active(chat) {
         return Ok(Vec::new());
     }
     store.retire_unconfirmed_flag_attachments(Some(&chat.id), now)?;
@@ -277,7 +276,7 @@ fn unrouted(events: &[FlagEvent]) -> impl Iterator<Item = (&str, &Value)> {
     })
 }
 
-/// A completed review gets one reminder. Only the owning Independent chat can keep by default.
+/// A completed review gets one reminder. Only the owning chat can keep by default.
 pub(crate) fn follow_up_flags(store: &Store, now: i64) -> Result<()> {
     for run_id in store.flag_follow_up_runs(None)? {
         let Some(run) = store.get_run(&run_id)? else {
@@ -301,7 +300,7 @@ pub(crate) fn follow_up_flags(store: &Store, now: i64) -> Result<()> {
                 };
                 if !store
                     .get_chat_session(chat)?
-                    .is_some_and(|chat| agentic(&chat))
+                    .is_some_and(|chat| active(&chat))
                 {
                     continue;
                 }
@@ -387,13 +386,13 @@ pub(crate) fn open(flags: &[Value]) -> Option<&Value> {
     flags.iter().rev().find(|flag| !settled(flag))
 }
 
-/// The notices that wake each Agentic chat that follows the run with `flag`.
+/// The notices that wake each active chat that follows the run with `flag`.
 pub(crate) fn wakes(store: &Store, run: &StoredRun, flag: &Value) -> Result<Vec<(String, String)>> {
     let mut wakes = Vec::new();
     for id in store.run_subscribers(&run.id)? {
         if store
             .get_chat_session(&id)?
-            .is_some_and(|chat| agentic(&chat))
+            .is_some_and(|chat| active(&chat))
         {
             wakes.push((id, wake(run, flag, false)));
         }
@@ -418,7 +417,7 @@ fn noted_wake(run: &StoredRun, flag: &Value) -> String {
     )
 }
 
-/// A flag to raise, with the notices that wake the run's Agentic chats with it.
+/// A flag to raise, with the notices that wake the run's chats with it.
 pub(crate) fn new_flag(
     store: &Store,
     run: &StoredRun,
@@ -621,32 +620,13 @@ mod tests {
     use crate::store::{tests::run_fixture, Raise};
 
     #[test]
-    fn a_live_flag_offers_a_choice_after_switching_back_to_independent() {
-        let dir = TemporaryDirectory::new("orx-flag-autonomy").unwrap();
-        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
-        store.put_chat_session("owner", "claude-code", None);
-        let run = run_fixture("run", "running", Some("owner"));
-        store.upsert_run(&run).unwrap();
-        let flag = new_flag(&store, &run, json!({"id": "f1", "at": 1}), true).unwrap();
-        store.raise_flags(&[flag], 1).unwrap();
-        assert_eq!(read(&store, &run).unwrap()[0]["state"], "raised");
-        store
-            .set_chat_session_autonomy("owner", Autonomy::Copilot)
-            .unwrap();
-        assert!(store.run_notice_batch_at("owner", 2).unwrap().is_empty());
-        store
-            .set_chat_session_autonomy("owner", Autonomy::Agentic)
-            .unwrap();
-        assert_eq!(read(&store, &run).unwrap()[0]["state"], "waiting");
-    }
-
-    #[test]
     fn a_subscribers_unsettled_reviews_leave_the_flag_open() {
         for owner in [Some("owner"), None] {
             let dir = TemporaryDirectory::new("orx-flag-owner").unwrap();
             let store = Store::open_at(dir.path().to_path_buf()).unwrap();
-            store.put_chat_session("owner", "claude-code", Some("copilot"));
-            store.put_chat_session("subscriber", "claude-code", None);
+            store.put_chat_session("owner", "claude-code");
+            store.set_chat_session_archived("owner", true).unwrap();
+            store.put_chat_session("subscriber", "claude-code");
             let run = run_fixture("run", "running", owner);
             store.upsert_run(&run).unwrap();
             store.subscribe_run(&run.id, "subscriber", 1).unwrap();

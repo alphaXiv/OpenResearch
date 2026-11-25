@@ -362,8 +362,8 @@ test("run history opens the older SSH run's chart, stats and journal while the l
 
 test("a flagged run only names the agent when the launch chat is known", async () => {
   const flagged = fixture("flagged");
-  const waiting = { ...flagged, runId: "r2", asOf: now, flags: [{ ...flagged.flags[0], state: "waiting", mode: "copilot" }] };
-  const flaggedRun = () => run("r2", { monitor: summary(waiting, { tone: "flag", sentence: flagged.sentence, flag: { id: "f1", state: "waiting", mode: "copilot" } }) });
+  const waiting = { ...flagged, runId: "r2", asOf: now, flags: [{ ...flagged.flags[0], state: "waiting" }] };
+  const flaggedRun = () => run("r2", { monitor: summary(waiting, { tone: "flag", sentence: flagged.sentence, flag: { id: "f1", state: "waiting" } }) });
   const asks = (container) => [...container.querySelectorAll("button")].map(text);
 
   const subscribed = await overview([flaggedRun()], () => waiting, { chat: "s1", sessions: [{ ...session("s1"), harness: "claude-code" }] });

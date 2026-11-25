@@ -14,8 +14,6 @@ pub(super) struct ProjectSettingsEdit {
     agent: Option<Option<StoredAgentSelectionReq>>,
     #[serde(default, deserialize_with = "present")]
     disabled_lit_sources: Option<Option<Vec<String>>>,
-    #[serde(default, deserialize_with = "present")]
-    autonomy: Option<Option<String>>,
     /// Replaces all three; an empty one follows the machine's.
     #[serde(default)]
     slurm: Option<SlurmDefaults>,
@@ -64,11 +62,6 @@ pub(super) async fn update_project_settings(
         .transpose()
         .map_err(bad_request)?;
 
-    let autonomy = edit
-        .autonomy
-        .map(|autonomy| autonomy.map(autonomy_id).transpose())
-        .transpose()
-        .map_err(bad_request)?;
     let slurm = edit
         .slurm
         .map(slurm_defaults)
@@ -85,9 +78,6 @@ pub(super) async fn update_project_settings(
         .get_local_project(&id)?
         .ok_or_else(|| not_found("project"))?;
     let saved = store.update_project_settings(&id, |settings| {
-        if let Some(autonomy) = autonomy {
-            settings.autonomy = autonomy;
-        }
         if let Some(slurm) = slurm {
             settings.slurm = slurm;
         }
@@ -151,15 +141,6 @@ pub(super) fn compute_default(target: ComputeDefault) -> Result<ComputeDefault> 
 
 fn nonempty(value: String) -> Option<String> {
     Some(value.trim().to_string()).filter(|value| !value.is_empty())
-}
-
-fn autonomy_id(id: String) -> Result<String> {
-    if crate::local::autonomy::Autonomy::from_id(&id).is_none() {
-        return Err(anyhow!(
-            "Unknown autonomy '{id}'. Choose agentic or copilot."
-        ));
-    }
-    Ok(id)
 }
 
 fn slurm_defaults(defaults: SlurmDefaults) -> Result<SlurmDefaults> {
@@ -256,11 +237,6 @@ mod tests {
             .to_string()
             .contains("'scholar'"));
 
-        assert!(autonomy_id("copilot".into()).is_ok());
-        assert!(autonomy_id("yolo".into())
-            .unwrap_err()
-            .to_string()
-            .contains("'yolo'"));
         assert_eq!(k8s_namespace("research-1".into()).unwrap(), "research-1");
         for bad in ["Research", "-lab", "lab_1", &"a".repeat(64)] {
             assert!(k8s_namespace(bad.into()).is_err(), "{bad}");
@@ -278,40 +254,5 @@ mod tests {
             ..Default::default()
         })
         .is_err());
-    }
-}
-
-#[cfg(test)]
-mod autonomy_tests {
-    use super::*;
-    use crate::local::autonomy::Autonomy;
-
-    #[test]
-    fn a_new_chat_without_autonomy_takes_its_projects_then_the_last_used() {
-        let dir = std::env::temp_dir().join(format!("orx-autonomy-{}", uuid::Uuid::new_v4()));
-        let store = Store::open_at(dir.clone()).unwrap();
-        let mut project = crate::local::agent_text::sample_project();
-        project.id = "p".into();
-        store.create_local_project(&project).unwrap();
-
-        assert_eq!(
-            super::super::project_autonomy(&store, "p").unwrap(),
-            "agentic"
-        );
-        store.set_preferred_autonomy(Autonomy::Copilot).unwrap();
-        assert_eq!(
-            super::super::project_autonomy(&store, "p").unwrap(),
-            "copilot"
-        );
-        store
-            .update_project_settings("p", |settings| settings.autonomy = Some("agentic".into()))
-            .unwrap();
-        assert_eq!(
-            super::super::project_autonomy(&store, "p").unwrap(),
-            "agentic"
-        );
-
-        drop(store);
-        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -38,7 +38,6 @@ use crate::commands::remote_host::{DashboardLock, HostDescriptor, RemoteAuth};
 use crate::commands::up_remote::{self, RemoteSessionStatus};
 use crate::error::{anyhow, Result};
 use crate::local;
-use crate::local::autonomy::Autonomy;
 use crate::local::chat::ChatHost;
 use crate::local::is_terminal;
 use crate::local::opencode::AgentHost;
@@ -189,6 +188,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     // Harnesses spawn lazily on the first message to one of their sessions;
     // no eager agent bring-up. (--no-agent is now a no-op kept for compat.)
     let agent = Arc::new(AgentHost::new(args.model.clone()));
+    agent.start_reaper();
     let codex = Arc::new(local::codex::CodexHost::new());
     let claude = Arc::new(local::claude::ClaudeHost::new());
     claude.start_reaper();
@@ -1508,6 +1508,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
         )
         .route("/api/chat/sessions/{id}/worktree", get(session_worktree))
         .route("/api/chat/sessions/{id}/message", post(send_chat_message))
+        .route("/api/chat/sessions/{id}/takeover", post(take_over_chat))
         .route("/api/chat/sessions/{id}/shell", post(run_shell_command))
         .route(
             "/api/chat/sessions/{id}/project",
@@ -7695,7 +7696,6 @@ struct SetUiStateReq {
     #[serde(default)]
     preferred_agent: Option<StoredAgentSelectionReq>,
     workspace: Option<GlobalWorkspaceState>,
-    preferred_autonomy: Option<Autonomy>,
     nested_delegation: Option<bool>,
     opencode_free_models: Option<bool>,
     /// `provider/model`, or empty for the chat's own.
@@ -7873,9 +7873,6 @@ async fn set_ui_state(
         }
         if let Some(selection) = selection {
             store.set_preferred_agent(&selection)?;
-        }
-        if let Some(autonomy) = req.preferred_autonomy {
-            store.set_preferred_autonomy(autonomy)?;
         }
         if let Some(allowed) = req.nested_delegation {
             store.set_nested_delegation(allowed)?;
@@ -10850,21 +10847,9 @@ struct CreateChatSessionReq {
     #[serde(default)]
     plan_mode: bool,
     reasoning_level: Option<String>,
-    autonomy: Option<Autonomy>,
     /// Sources a draft turned off before its first message.
     #[serde(default)]
     disabled_lit_sources: Option<Vec<String>>,
-}
-
-/// The autonomy a new chat gets when its request names none: its project's, else the last one used.
-fn project_autonomy(store: &Store, project_id: &str) -> Result<String> {
-    let own = store.project_settings(project_id)?.autonomy;
-    let autonomy = own
-        .as_deref()
-        .and_then(Autonomy::from_id)
-        .or(store.ui_state()?.preferred_autonomy)
-        .unwrap_or_default();
-    Ok(autonomy.id().to_string())
 }
 
 async fn selected_chat_model(
@@ -10973,7 +10958,6 @@ fn new_chat_settings(
         permission_mode,
         plan_mode: false,
         reasoning_level,
-        autonomy: Some(preferences.preferred_autonomy.unwrap_or(Autonomy::Agentic)),
         disabled_lit_sources: None,
     })
 }
@@ -11184,9 +11168,6 @@ async fn create_chat_session(
     if req.harness.is_none() {
         let mut preferences = store.ui_state()?;
         let project = store.project_settings(&req.project_id)?;
-        if let Some(autonomy) = project.autonomy.as_deref().and_then(Autonomy::from_id) {
-            preferences.preferred_autonomy = Some(autonomy);
-        }
         let pinned = project.agent;
         let from_project = pinned.is_some();
         if pinned.is_some() {
@@ -11243,7 +11224,6 @@ async fn create_chat_session(
         .map(project_settings::lit_sources)
         .transpose()
         .map_err(bad_request)?;
-    let session_project = req.project_id.clone();
     let session = StoredChatSession {
         profile_id: req.profile,
         id: format!("chat_{}", uuid::Uuid::new_v4()),
@@ -11263,10 +11243,6 @@ async fn create_chat_session(
         context_usage_json: None,
         bootstrap_context: None,
         goal: None,
-        autonomy: Some(match req.autonomy {
-            Some(autonomy) => autonomy.id().to_string(),
-            None => project_autonomy(&store, &session_project)?,
-        }),
         active_leaf_id: None,
         side_parent_session_id: None,
         side_parent_leaf_id: None,
@@ -11468,7 +11444,8 @@ struct UpdateChatSessionReq {
     /// Present-and-null clears the goal, which is why it is doubly wrapped.
     #[serde(default, deserialize_with = "present_nullable_string")]
     goal: Option<Option<String>>,
-    autonomy: Option<Autonomy>,
+    /// Sent alone by older dashboards; accepted and ignored.
+    autonomy: Option<serde::de::IgnoredAny>,
     /// `false` keeps a delegate for the user: see `release_delegate`.
     notify_parent: Option<bool>,
 }
@@ -11655,24 +11632,9 @@ async fn update_chat_session(
             selection.model.as_deref(),
         )
         .map_err(bad_request)?;
-        let window = catalog["harnesses"]
-            .as_array()
-            .and_then(|entries| {
-                entries.iter().find(|entry| {
-                    entry["id"].as_str() == Some(&selection.harness)
-                        && entry["profile"]["id"].as_str() == selection.profile.as_deref()
-                })
-            })
-            .and_then(|entry| entry["models"].as_array())
-            .and_then(|models| {
-                models
-                    .iter()
-                    .find(|model| model["id"].as_str() == selection.model.as_deref())
-            })
-            .and_then(|model| model["contextWindow"].as_u64());
         state
             .chat
-            .set_agent(&id, selection, window)
+            .set_agent(&id, selection)
             .await
             .map_err(bad_request)?
     } else if let Some(title) = req.title {
@@ -11725,11 +11687,9 @@ async fn update_chat_session(
             .set_permission_mode(&id, &permission_mode)
             .await?
             .ok_or_else(|| not_found("chat session"))?
-    } else if let Some(autonomy) = req.autonomy {
-        state
-            .chat
-            .set_autonomy(&id, autonomy)
-            .await?
+    } else if req.autonomy.is_some() {
+        Store::open()?
+            .get_chat_session(&id)?
             .ok_or_else(|| not_found("chat session"))?
     } else if req.notify_parent == Some(false) {
         let store = Store::open()?;
@@ -11860,6 +11820,13 @@ struct SendChatReq {
 }
 
 #[derive(Deserialize)]
+struct TakeOverChatReq {
+    agent: crate::store::StoredAgentSelection,
+    #[serde(flatten)]
+    message: SendChatReq,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum SendMode {
     Steer,
@@ -11936,6 +11903,25 @@ async fn send_chat_message(
     Path(id): Path<String>,
     Json(req): Json<SendChatReq>,
 ) -> ApiResult {
+    submit_chat_message(state, id, req, None).await
+}
+
+/// Another agent takes the chat over: the running turn stops and this message
+/// runs next on that agent, whatever `mode` says.
+async fn take_over_chat(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<TakeOverChatReq>,
+) -> ApiResult {
+    submit_chat_message(state, id, req.message, Some(req.agent)).await
+}
+
+async fn submit_chat_message(
+    state: AppState,
+    id: String,
+    req: SendChatReq,
+    agent: Option<crate::store::StoredAgentSelection>,
+) -> ApiResult {
     reject_if_stopping(&state)?;
     reject_if_moving(&state)?;
     let store = Store::open()?;
@@ -11945,8 +11931,11 @@ async fn send_chat_message(
     let project = store
         .get_local_project(&session.project_id)?
         .ok_or_else(|| not_found("project"))?;
-    let harness = session.harness;
-    let autonomy = local::autonomy::Autonomy::from_stored(session.autonomy.as_deref());
+    let takeover = agent
+        .filter(|agent| agent.harness != session.harness || agent.profile != session.profile_id);
+    let harness = takeover
+        .as_ref()
+        .map_or(session.harness, |agent| agent.harness.clone());
     let slash_skills = local::chat::builtin_slash_skill_names(&project, &req.text);
     let text = req.text.trim().to_string();
     let annotations = req
@@ -11967,8 +11956,41 @@ async fn send_chat_message(
         plan_revision: None,
         reasoning_level: req.reasoning_level,
     };
+    let conflict_or = |error: anyhow::Error| {
+        if local::chat::is_client_turn_conflict(&error) {
+            ApiError(StatusCode::CONFLICT, error.to_string())
+        } else {
+            ApiError::from(error)
+        }
+    };
     // The turn runs in the background; progress streams over /api/events.
-    let (response, capture_message) = if matches!(req.mode, Some(SendMode::Steer)) {
+    let (response, capture_message) = if let Some(mut agent) = takeover {
+        check_agent(&agent)?;
+        local::chat::refuse_acp_switch(&store, &id, &agent.harness).map_err(bad_request)?;
+        let catalog = harnesses_payload(&state, &HarnessQuery::default()).await;
+        agent.model = local::harness::selected_model(
+            &catalog,
+            &agent.harness,
+            agent.profile.as_deref(),
+            agent.model.as_deref(),
+        )
+        .map_err(bad_request)?;
+        let result = state
+            .chat
+            .take_over(
+                &id,
+                agent,
+                text,
+                overrides,
+                req.images,
+                annotations,
+                req.client_turn_id,
+            )
+            .await
+            .map_err(conflict_or)?;
+        let capture = !result.existing;
+        (json!({ "ok": true, "turn": result }), capture)
+    } else if matches!(req.mode, Some(SendMode::Steer)) {
         let result = state
             .chat
             .steer_message(
@@ -11981,14 +12003,8 @@ async fn send_chat_message(
                 None,
             )
             .await
-            .map_err(|error| {
-                if local::chat::is_client_turn_conflict(&error) {
-                    ApiError(StatusCode::CONFLICT, error.to_string())
-                } else {
-                    // A failure can occur after the message was admitted.
-                    ApiError::from(error)
-                }
-            })?;
+            // A failure can occur after the message was admitted.
+            .map_err(conflict_or)?;
         match result {
             Some(turn) => {
                 let capture = !turn.existing;
@@ -12009,18 +12025,12 @@ async fn send_chat_message(
                 None,
             )
             .await
-            .map_err(|error| {
-                if local::chat::is_client_turn_conflict(&error) {
-                    ApiError(StatusCode::CONFLICT, error.to_string())
-                } else {
-                    ApiError::from(error)
-                }
-            })?;
+            .map_err(conflict_or)?;
         let capture = !result.existing;
         (json!({ "ok": true, "turn": result }), capture)
     };
     if capture_message {
-        crate::telemetry::capture_chat_message_sent(&harness, autonomy);
+        crate::telemetry::capture_chat_message_sent(&harness);
         for skill in slash_skills {
             crate::telemetry::capture_skill_invoked(skill, "slash", Some(&harness));
         }
@@ -12118,8 +12128,7 @@ async fn fork_chat_turn(
             .get_local_project(&session.project_id)?
             .ok_or_else(|| not_found("project"))?;
         let skills = local::chat::builtin_slash_skill_names(&project, text);
-        let autonomy = local::autonomy::Autonomy::from_stored(session.autonomy.as_deref());
-        Some((session.harness, autonomy, skills))
+        Some((session.harness, skills))
     } else {
         None
     };
@@ -12134,8 +12143,8 @@ async fn fork_chat_turn(
         .await
         .map_err(bad_request)?;
     if started {
-        if let Some((harness, autonomy, skills)) = invocation {
-            crate::telemetry::capture_chat_message_sent(&harness, autonomy);
+        if let Some((harness, skills)) = invocation {
+            crate::telemetry::capture_chat_message_sent(&harness);
             for skill in skills {
                 crate::telemetry::capture_skill_invoked(skill, "slash", Some(&harness));
             }
@@ -13392,7 +13401,6 @@ mod tests {
             context_usage_json: None,
             bootstrap_context: None,
             goal: None,
-            autonomy: None,
             active_leaf_id: None,
             side_parent_session_id: None,
             side_parent_leaf_id: None,
@@ -13457,7 +13465,6 @@ mod tests {
             onboarding_completed: true,
             tour_completed: true,
             workspace: None,
-            preferred_autonomy: Some(Autonomy::Copilot),
             nested_delegation: false,
             opencode_free_models: true,
             opencode_review_model: None,
@@ -13491,7 +13498,6 @@ mod tests {
         assert_eq!(req.reasoning_level.as_deref(), Some("default"));
         assert!(req.service_tier.is_none());
         assert_eq!(req.permission_mode.as_deref(), Some("full-access"));
-        assert_eq!(req.autonomy, Some(Autonomy::Copilot));
         assert!(!req.plan_mode);
     }
 
@@ -13501,7 +13507,6 @@ mod tests {
             onboarding_completed: false,
             tour_completed: false,
             workspace: None,
-            preferred_autonomy: None,
             preferred_agent: None,
             nested_delegation: false,
             opencode_free_models: true,
@@ -13524,7 +13529,6 @@ mod tests {
         assert_eq!(req.harness.as_deref(), Some("claude-code"));
         assert_eq!(req.model.as_deref(), Some("opus"));
         assert_eq!(req.permission_mode.as_deref(), Some("plan"));
-        assert_eq!(req.autonomy, Some(Autonomy::Agentic));
         preferences.preferred_agent = Some(StoredAgentSelection {
             profile: None,
             harness: "claude-code".into(),
@@ -13563,7 +13567,6 @@ mod tests {
                 reasoning_level: None,
             }),
             workspace: None,
-            preferred_autonomy: None,
             nested_delegation: false,
             opencode_free_models: true,
             opencode_review_model: None,
@@ -13872,7 +13875,6 @@ mod tests {
                 tour_completed: Some(true),
                 preferred_agent: None,
                 workspace: Some(invalid),
-                preferred_autonomy: None,
                 nested_delegation: None,
                 opencode_free_models: None,
                 opencode_review_model: None,
@@ -14884,7 +14886,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(unknown.0, StatusCode::NOT_FOUND);
 
-        store.put_chat_session("chat", "opencode", None);
+        store.put_chat_session("chat", "opencode");
         assert_eq!(
             chat_report(Path("chat".into())).await.unwrap().0,
             Value::Null
@@ -14895,7 +14897,7 @@ mod tests {
         assert_eq!(closed.0, StatusCode::CONFLICT);
         assert!(closed.1.contains("off for this chat"), "{}", closed.1);
 
-        store.put_chat_session("claude", "claude-code", None);
+        store.put_chat_session("claude", "claude-code");
         let closed = refresh_chat_report(State(state.clone()), Path("claude".into()))
             .await
             .unwrap_err();
@@ -15059,6 +15061,28 @@ mod tests {
         assert_ne!(
             refused["content"], delegated["content"],
             "the user's chat refuses before delivery"
+        );
+    }
+
+    #[test]
+    fn a_takeover_reads_the_message_the_dashboard_sends_beside_its_agent() {
+        let req: TakeOverChatReq = serde_json::from_value(json!({
+            "agent": {"harness": "claude-code", "profile": null, "model": "opus",
+                "serviceTier": null, "permissionMode": "auto", "reasoningLevel": "default"},
+            "text": "take it from here",
+            "clientTurnId": "ct_1",
+            "model": null,
+            "reasoningLevel": "default",
+            "annotations": [],
+        }))
+        .unwrap();
+        assert_eq!(req.agent.harness, "claude-code");
+        assert_eq!(req.message.text, "take it from here");
+        assert_eq!(req.message.client_turn_id.as_deref(), Some("ct_1"));
+        assert_eq!(
+            req.message.model,
+            Some(None),
+            "a null model still clears it"
         );
     }
 

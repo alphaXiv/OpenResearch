@@ -31,7 +31,7 @@ of days, narrow `maxGapS` for one that may go wrong fast.
 A flag is the watcher, a rule that asks, or orx's own checks (a value that is
 not a number, a measure half again worse than the parent's at the same step, no
 progress, a new kind of error) saying a run may be going wrong. It never stops
-the run. In Agentic mode it wakes you with the lines it saw and where they are:
+the run. It wakes you with the lines it saw and where they are:
 it saw a digest and none of the chat, so read the run yourself
 (`orx exp status <expId> --run <runId>`, `orx logs <runId>`) and confirm before
 acting. If you own the choice, settle it before ending your turn, with a reason
@@ -46,8 +46,7 @@ orx exp flag <runId> --flag <flagId> --ask --reason 'It may be fine; the user kn
 `--keep` settles this flag. Later looks read what you kept and why. Say what you
 verified and what evidence would change your mind. A later look can raise a new
 flag. `--stop` stops it as `orx exp cancel` does. `--ask` leaves the choice to
-the user, who sees Stop run, Keep going and Ask in the chat. In Copilot mode the
-flag waits for the user, and you hear of it only when they ask you.
+the user, who sees Stop run, Keep going and Ask in the chat.
 
 ## Flags that keep coming
 
