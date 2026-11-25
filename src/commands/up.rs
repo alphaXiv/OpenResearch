@@ -1472,6 +1472,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             get(get_user_skill).put(update_user_skill),
         )
         .route(
+            "/api/settings/instructions",
+            get(get_instructions).put(save_instructions),
+        )
+        .route(
             "/api/latex-templates",
             get(list_latex_templates)
                 .post(upload_latex_template)
@@ -2254,6 +2258,60 @@ async fn update_user_skill(Path(name): Path<String>, Json(req): Json<UpdateSkill
     .map_err(|e| ApiError::from(anyhow!(e)))?
     .map_err(bad_request)?;
     Ok(Json(json!({ "skill": user_skill_json(&saved) })))
+}
+
+fn instructions_json(
+    path: &std::path::Path,
+    snapshot: &crate::local::chat::instructions::Snapshot,
+) -> Value {
+    json!({ "content": snapshot.content, "version": snapshot.version, "path": path })
+}
+
+async fn get_instructions() -> ApiResult {
+    use crate::local::chat::instructions;
+    let path = instructions::path();
+    let snapshot = tokio::task::spawn_blocking({
+        let path = path.clone();
+        move || instructions::read(&path)
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!(e)))?
+    .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+    Ok(Json(instructions_json(&path, &snapshot)))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveInstructionsReq {
+    content: String,
+    base_version: String,
+}
+
+async fn save_instructions(
+    Json(req): Json<SaveInstructionsReq>,
+) -> std::result::Result<Response, ApiError> {
+    use crate::local::chat::instructions;
+    let path = instructions::path();
+    let written = tokio::task::spawn_blocking({
+        let path = path.clone();
+        move || instructions::write(&path, &req.content, &req.base_version)
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!(e)))?
+    .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, format!("{e:#}")))?;
+    Ok(match written {
+        Ok(saved) => Json(instructions_json(&path, &saved)).into_response(),
+        Err(current) => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "Your OpenResearch instructions changed since you opened them. Your edits are kept; review the saved version before saving again.",
+                "code": "fileChanged",
+                "currentVersion": current.version,
+                "exists": current.exists,
+            })),
+        )
+            .into_response(),
+    })
 }
 
 fn latex_template_json(t: &crate::local::latex_templates::LatexTemplate) -> Value {
@@ -12894,6 +12952,39 @@ pub(crate) async fn spa(uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn saving_instructions_over_a_newer_file_is_a_conflict_that_names_it() {
+        let read = || async {
+            let Json(body) = get_instructions().await.unwrap();
+            body
+        };
+        let save = |content: &str, base: &Value| {
+            save_instructions(Json(SaveInstructionsReq {
+                content: content.into(),
+                base_version: base.as_str().unwrap().into(),
+            }))
+        };
+        let empty = read().await;
+        assert_eq!(empty["content"], "");
+        let saved = save("Name runs after the idea.", &empty["version"])
+            .await
+            .unwrap();
+        assert_eq!(saved.status(), StatusCode::OK);
+        assert_eq!(read().await["content"], "Name runs after the idea.");
+
+        let stale = save("Mine.", &empty["version"]).await.unwrap();
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(stale.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["code"], "fileChanged");
+        assert_eq!(body["currentVersion"], read().await["version"]);
+        assert_eq!(read().await["content"], "Name runs after the idea.");
+    }
 
     #[cfg(unix)]
     #[test]

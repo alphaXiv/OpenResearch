@@ -315,6 +315,12 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     staleTime: 300_000,
   });
 
+  const getInstructionsQuery = () => queryOptions({
+    queryKey: workspaceKey("getInstructions"),
+    queryFn: ({ signal }) => api.getInstructions(signal),
+    refetchInterval: 30_000,
+  });
+
   const listUserSkillsQuery = () => queryOptions({
     queryKey: workspaceKey("listUserSkills"),
     queryFn: ({ signal }) => api.listUserSkills(signal),
@@ -418,6 +424,7 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     listAcpHarnessesQuery,
     listLatexTemplatesQuery,
     listUserSkillsQuery,
+    getInstructionsQuery,
     refreshHarnesses,
     refreshHarness,
     readHarnesses,

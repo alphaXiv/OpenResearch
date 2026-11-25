@@ -2618,5 +2618,19 @@
   "lit_sources_save_title": "Lưu làm mặc định",
   "lit_sources_save_project": "Lưu cho dự án này",
   "lit_sources_save_all": "Lưu cho mọi dự án",
-  "lit_sources_revert": "Dùng nguồn của dự án"
+  "lit_sources_revert": "Dùng nguồn của dự án",
+  "instructions_title": "Hướng dẫn OpenResearch",
+  "instructions_description": "Những gì mọi agent tuân theo trong mọi dự án OpenResearch, chẳng hạn cách đặt tên lượt chạy hoặc báo cáo kết quả. Agent có thể đề xuất thay đổi để bạn phê duyệt.",
+  "instructions_placeholder": "Đặt tên lượt chạy theo ý tưởng mà nó kiểm tra. Báo cáo kết quả bằng bảng.",
+  "instructions_saved_in": "Đã lưu tại {path}",
+  "instructions_changed": "Hướng dẫn này đã thay đổi bên ngoài trang này. Phiên bản đã lưu ở bên dưới, và các chỉnh sửa của bạn vẫn còn trong trình soạn thảo.",
+  "instructions_keep_mine": "Giữ chỉnh sửa của tôi",
+  "instructions_use_saved": "Dùng phiên bản đã lưu",
+  "chat_instructions_title": "Thay đổi hướng dẫn OpenResearch của bạn?",
+  "chat_instructions_note": "Cuộc trò chuyện mới bắt đầu với các hướng dẫn này. Cuộc trò chuyện đang mở có thể giữ hướng dẫn cũ cho đến khi tác tử khởi động lại.",
+  "chat_instructions_stale": "Hướng dẫn của bạn đã thay đổi sau khi agent đề xuất điều này. Hãy từ chối và yêu cầu agent đề xuất lại.",
+  "chat_instructions_approve": "Phê duyệt",
+  "chat_instructions_decline": "Từ chối",
+  "chat_instructions_approved": "Đã phê duyệt thay đổi hướng dẫn",
+  "chat_instructions_declined": "Đã từ chối thay đổi hướng dẫn"
 }

@@ -2619,5 +2619,19 @@
   "lit_sources_save_title": "既定値として保存",
   "lit_sources_save_project": "このプロジェクトに保存",
   "lit_sources_save_all": "すべてのプロジェクトに保存",
-  "lit_sources_revert": "プロジェクトのソースを使う"
+  "lit_sources_revert": "プロジェクトのソースを使う",
+  "instructions_title": "OpenResearch の指示",
+  "instructions_description": "すべての OpenResearch プロジェクトですべてのエージェントが従う内容です。たとえば実行の名前の付け方や結果の報告方法など。エージェントは変更を提案でき、あなたが承認します。",
+  "instructions_placeholder": "実行には検証するアイデアにちなんだ名前を付ける。結果は表で報告する。",
+  "instructions_saved_in": "保存先: {path}",
+  "instructions_changed": "この指示はこのページの外で変更されました。保存済みの版を下に表示しています。あなたの編集はエディターに残っています。",
+  "instructions_keep_mine": "自分の編集を残す",
+  "instructions_use_saved": "保存済みの版を使う",
+  "chat_instructions_title": "OpenResearch の指示を変更しますか？",
+  "chat_instructions_note": "新しいチャットはこの指示で始まります。開いているチャットは、エージェントが再起動するまで以前の指示のままの場合があります。",
+  "chat_instructions_stale": "エージェントがこれを提案した後に指示が変更されました。却下して、エージェントにもう一度提案するよう依頼してください。",
+  "chat_instructions_approve": "承認",
+  "chat_instructions_decline": "却下",
+  "chat_instructions_approved": "指示の変更を承認しました",
+  "chat_instructions_declined": "指示の変更を却下しました"
 }

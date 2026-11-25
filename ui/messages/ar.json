@@ -2619,5 +2619,19 @@
   "lit_sources_save_title": "حفظ كافتراضي",
   "lit_sources_save_project": "حفظ لهذا المشروع",
   "lit_sources_save_all": "حفظ لكل المشاريع",
-  "lit_sources_revert": "استخدام مصادر المشروع"
+  "lit_sources_revert": "استخدام مصادر المشروع",
+  "instructions_title": "تعليمات OpenResearch",
+  "instructions_description": "ما يتّبعه كل وكيل في كل مشروع على OpenResearch، مثل طريقة تسمية التشغيلات أو عرض النتائج. يمكن للوكلاء اقتراح تغييرات لتوافق عليها.",
+  "instructions_placeholder": "سمِّ التشغيلات باسم الفكرة التي تختبرها. اعرض النتائج في جدول.",
+  "instructions_saved_in": "محفوظة في {path}",
+  "instructions_changed": "تغيّرت هذه التعليمات خارج هذه الصفحة. النسخة المحفوظة أدناه، وما زالت تعديلاتك في المحرّر.",
+  "instructions_keep_mine": "الاحتفاظ بتعديلاتي",
+  "instructions_use_saved": "استخدام النسخة المحفوظة",
+  "chat_instructions_title": "هل تريد تغيير تعليمات OpenResearch؟",
+  "chat_instructions_note": "تبدأ المحادثات الجديدة بها. قد تحتفظ المحادثات المفتوحة بتعليماتها السابقة حتى يُعاد تشغيل وكيلها.",
+  "chat_instructions_stale": "تغيّرت تعليماتك بعد أن اقترح الوكيل هذا. ارفضه واطلب من الوكيل أن يقترحه من جديد.",
+  "chat_instructions_approve": "موافقة",
+  "chat_instructions_decline": "رفض",
+  "chat_instructions_approved": "تمت الموافقة على تغيير تعليماتك",
+  "chat_instructions_declined": "تم رفض تغيير تعليماتك"
 }

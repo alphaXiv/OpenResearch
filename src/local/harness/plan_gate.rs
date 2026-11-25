@@ -336,6 +336,7 @@ fn is_readonly_orx(tokens: &[&str], stage: &str) -> bool {
         ),
         // Verbs with a write subcommand: allow only the read-only subcommand(s).
         "project" => matches!(subcommand(&mut rest), Some("view")),
+        "instructions" => matches!(subcommand(&mut rest), None | Some("show")),
         "alphaxiv" => match subcommand(&mut rest) {
             Some("library" | "tools") => true,
             Some("call") => rest.next().is_some_and(|tool| {
@@ -501,6 +502,13 @@ mod tests {
 
     fn allowed(command: &str) -> bool {
         decide(&payload(command)).is_some()
+    }
+
+    #[test]
+    fn showing_instructions_is_a_read_but_proposing_is_gated() {
+        assert!(allowed("orx instructions"));
+        assert!(allowed("orx instructions show"));
+        assert!(!allowed("orx instructions propose draft.md"));
     }
 
     #[test]
@@ -854,7 +862,7 @@ mod tests {
             );
         }
         // The verbs with mixed read/write subcommands must also be real.
-        for verb in ["project", "exp", "agents", "alphaxiv"] {
+        for verb in ["project", "exp", "agents", "alphaxiv", "instructions"] {
             assert!(real.contains(verb), "`{verb}` is not a real orx command");
         }
     }

@@ -2619,5 +2619,19 @@
   "lit_sources_save_title": "Guardar como predeterminado",
   "lit_sources_save_project": "Guardar para este proyecto",
   "lit_sources_save_all": "Guardar para todos los proyectos",
-  "lit_sources_revert": "Usar las fuentes del proyecto"
+  "lit_sources_revert": "Usar las fuentes del proyecto",
+  "instructions_title": "Instrucciones de OpenResearch",
+  "instructions_description": "Lo que todos los agentes siguen en cada proyecto de OpenResearch, como cómo nombrar las ejecuciones o presentar los resultados. Los agentes pueden proponer cambios para que los apruebes.",
+  "instructions_placeholder": "Nombra las ejecuciones según la idea que prueban. Presenta los resultados en una tabla.",
+  "instructions_saved_in": "Guardado en {path}",
+  "instructions_changed": "Estas instrucciones cambiaron fuera de esta página. La versión guardada está abajo y tus ediciones siguen en el editor.",
+  "instructions_keep_mine": "Conservar mis ediciones",
+  "instructions_use_saved": "Usar la versión guardada",
+  "chat_instructions_title": "¿Cambiar tus instrucciones de OpenResearch?",
+  "chat_instructions_note": "Los chats nuevos empiezan con ellas. Los chats ya abiertos pueden conservar sus instrucciones anteriores hasta que su agente se reinicie.",
+  "chat_instructions_stale": "Tus instrucciones cambiaron después de que el agente propusiera esto. Recházalo y pide al agente que lo proponga de nuevo.",
+  "chat_instructions_approve": "Aprobar",
+  "chat_instructions_decline": "Rechazar",
+  "chat_instructions_approved": "Aprobaste el cambio en tus instrucciones",
+  "chat_instructions_declined": "Rechazaste el cambio en tus instrucciones"
 }
