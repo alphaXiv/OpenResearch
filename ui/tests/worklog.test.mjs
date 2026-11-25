@@ -218,3 +218,24 @@ test("pipes, tees and revisions keep what each step touched", () => {
   assert.deepEqual(revisions.files.map((file) => [file.path, file.ref]), [["src/lib.rs", "HEAD"], ["src/lib.rs", "HEAD~1"]]);
   assert.deepEqual(row(bash("cat 'a  b.txt'", { cwd: "/repo" })).files, ["/repo/a  b.txt"]);
 });
+
+test("a call the work log trips on still shows its command", (t) => {
+  const errors = t.mock.method(console, "error", () => {});
+  const tripped = bash("uv run train.py --steps 600");
+  Object.defineProperty(tripped.state.input, "cwd", { enumerable: true, get() { throw new Error("unreadable"); } });
+  assert.equal(row(tripped).label, words(m.activity_ran_command({ command: "uv run train.py --steps 600" })));
+  assert.equal(errors.mock.callCount(), 1);
+});
+
+test("a work log that fails to draw leaves the rest of the chat", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const report = call("Write", { file_path: "/repo/artifacts/report.md" });
+  Object.defineProperty(report.state.input, "content", { enumerable: false, get() { throw new Error("unreadable"); } });
+  const container = await renderTurn([
+    { id: "text-1", type: "text", text: "Writing it up.", phase: "commentary" },
+    report,
+    { id: "text-2", type: "text", text: "Done.", phase: "final_answer" },
+  ]);
+  assert.ok(plain(container.textContent).includes(words(m.activity_steps_failed())), plain(container.textContent));
+  assert.ok(plain(container.textContent).includes("Done."));
+});

@@ -790,6 +790,7 @@
   "activity_delegate": "委任",
   "activity_run": "実行",
   "activity_more_steps": "+{count}",
+  "activity_steps_failed": "これらのステップを表示できませんでした",
   "activity_more_names": "ほか {count} 件",
   "activity_in_background": "{activity} (バックグラウンド)",
   "activity_reading_a_file": "ファイルを読み取り中…",

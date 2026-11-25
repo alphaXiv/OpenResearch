@@ -304,6 +304,7 @@ import {
   tableMarkdown,
 } from "./annotationMarkdown";
 import { Button, IconButton, LoadingRow, MENU_LABEL, MENU_SEPARATOR, MenuItem, showAlert, Spinner, Tooltip } from "./ui";
+import { Boundary } from "./ui/Boundary";
 import { QuestionDock, useQuestions } from "./QuestionDock";
 import { PaperTitle } from "./PaperTitle";
 
@@ -2732,24 +2733,31 @@ function renderParts(
   );
   const flushTools = () => {
     if (toolRun.length === 0) return;
+    const failed = (
+      <div className="tool-row flex items-start gap-2 min-w-0 py-1 px-1 text-base leading-6 text-muted">
+        <span className="flex h-6 shrink-0 items-center"><TriangleAlert size={16} strokeWidth={1.75} aria-hidden="true" /></span>
+        {m.activity_steps_failed()}
+      </div>
+    );
     rendered.push(
-      <ResearchToolRun
-        key={`tg-${toolRun[0].id}`}
-        parts={toolRun}
-        discovered={discovered}
-        expansionState={expansionState}
-        revealNonce={revealNonce}
-        revealPartId={revealPartId}
-        pendingTail={toolRun.some((part) => part.id === pendingTailToolId)}
-        streaming={predictTextTail}
-        onOpenSubagent={onOpenSubagent}
-        onOpenFile={onOpenFile}
-        onOpenRun={onOpenRun}
-        onOpenSpawnedSession={onOpenSpawnedSession}
-        runExperimentName={runExperimentName}
-        onOpenExperiment={onOpenExperiment}
-        experimentName={experimentName}
-      />,
+      <Boundary key={`tg-${toolRun[0].id}`} name="work log" rev={toolRun.at(-1)} fallback={failed}>
+        <ResearchToolRun
+          parts={toolRun}
+          discovered={discovered}
+          expansionState={expansionState}
+          revealNonce={revealNonce}
+          revealPartId={revealPartId}
+          pendingTail={toolRun.some((part) => part.id === pendingTailToolId)}
+          streaming={predictTextTail}
+          onOpenSubagent={onOpenSubagent}
+          onOpenFile={onOpenFile}
+          onOpenRun={onOpenRun}
+          onOpenSpawnedSession={onOpenSpawnedSession}
+          runExperimentName={runExperimentName}
+          onOpenExperiment={onOpenExperiment}
+          experimentName={experimentName}
+        />
+      </Boundary>,
     );
     toolRun = [];
   };

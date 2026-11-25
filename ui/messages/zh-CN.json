@@ -784,6 +784,7 @@
   "activity_delegate": "委派",
   "activity_run": "运行",
   "activity_more_steps": "+{count}",
+  "activity_steps_failed": "无法显示这些步骤",
   "activity_more_names": "另 {count} 项",
   "activity_in_background": "{activity}（后台）",
   "activity_reading_a_file": "正在读取文件…",

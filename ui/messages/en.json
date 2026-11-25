@@ -790,6 +790,7 @@
   "activity_delegate": "Delegate",
   "activity_run": "Run",
   "activity_more_steps": "+{count}",
+  "activity_steps_failed": "Couldn't show these steps",
   "activity_more_names": "{count} more",
   "activity_in_background": "{activity} in the background",
   "activity_reading_a_file": "Reading a file…",

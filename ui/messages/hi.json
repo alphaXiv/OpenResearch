@@ -790,6 +790,7 @@
   "activity_delegate": "सौंपें",
   "activity_run": "चलाएं",
   "activity_more_steps": "+{count}",
+  "activity_steps_failed": "ये चरण नहीं दिखाए जा सके",
   "activity_more_names": "{count} अन्य",
   "activity_in_background": "बैकग्राउंड में {activity}",
   "activity_reading_a_file": "एक फ़ाइल पढ़ी जा रही है…",

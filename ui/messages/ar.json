@@ -789,6 +789,7 @@
   "activity_delegate": "تفويض",
   "activity_run": "تشغيل",
   "activity_more_steps": "+{count}",
+  "activity_steps_failed": "تعذّر عرض هذه الخطوات",
   "activity_more_names": "{count} أخرى",
   "activity_in_background": "{activity} في الخلفية",
   "activity_reading_a_file": "جارٍ قراءة ملف…",

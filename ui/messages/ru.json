@@ -790,6 +790,7 @@
   "activity_delegate": "Передача",
   "activity_run": "Выполнение",
   "activity_more_steps": "+{count}",
+  "activity_steps_failed": "Не удалось показать эти шаги",
   "activity_more_names": "ещё {count}",
   "activity_in_background": "{activity} в фоне",
   "activity_reading_a_file": "Чтение файла…",

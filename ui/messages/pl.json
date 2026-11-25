@@ -790,6 +790,7 @@
   "activity_delegate": "Przekaż",
   "activity_run": "Uruchom",
   "activity_more_steps": "+{count}",
+  "activity_steps_failed": "Nie udało się wyświetlić tych kroków",
   "activity_more_names": "{count} więcej",
   "activity_in_background": "{activity} w tle",
   "activity_reading_a_file": "Odczytywanie pliku…",

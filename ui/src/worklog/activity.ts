@@ -201,7 +201,18 @@ export function toolActivity(part: ChatPart): ToolActivity {
   const locale = getLocale();
   const cached = toolActivities.get(part);
   if (cached?.locale === locale) return cached.activity;
-  const activity = computeToolActivity(part);
+
+  let activity: ToolActivity;
+  try {
+    activity = computeToolActivity(part);
+  } catch (error) {
+    // A call the recognizers trip on reads like one they don't know: its command, or its tool.
+    console.error("work log could not describe a tool call", part.tool, error);
+    const command = part.state?.input?.command;
+    const text = typeof command === "string" ? command.replace(/\s+/g, " ").trim() : "";
+    activity = text ? ranCommand(text) : { kind: "command", icon: "wrench", label: part.tool ?? m.chat_panel_used_tools() };
+  }
+
   // Stream updates replace parts; weak keys release labels with their transcript.
   toolActivities.set(part, { locale, activity });
   return activity;
@@ -429,6 +440,12 @@ function codexWebActivity(input: Record<string, unknown>): ToolActivity {
   return web(m.chat_panel_browsed_the_web(), m.activity_browsing());
 }
 
+/** A command named as it was typed, for one no recognizer describes. */
+function ranCommand(command: string): ToolActivity {
+  const shown = ltr(command.length > 160 ? `${command.slice(0, 159)}…` : command);
+  return { kind: "command", icon: "terminal", label: m.activity_ran_command({ command: shown }), progressLabel: m.activity_running_command({ command: shown }), command };
+}
+
 function shellActivity(part: ChatPart, input: Record<string, unknown>): ToolActivity {
   const rawCommand = inputString(input, "command", "cmd");
   const commandArgv = exactInputStringArray(input, "commandArgv");
@@ -462,10 +479,7 @@ function shellActivity(part: ChatPart, input: Record<string, unknown>): ToolActi
   if (orx) return inBackground({ ...orx, command });
 
   const summary = summarizeSteps(shellSteps(withVariables(text.trim()), bodies, workdir));
-  if (!summary) {
-    const shown = ltr(command.length > 160 ? `${command.slice(0, 159)}…` : command);
-    return inBackground({ kind: "command", icon: "terminal", label: m.activity_ran_command({ command: shown }), progressLabel: m.activity_running_command({ command: shown }), command });
-  }
+  if (!summary) return inBackground(ranCommand(command));
   return inBackground({
     kind: summary.kind,
     icon: summary.icon,

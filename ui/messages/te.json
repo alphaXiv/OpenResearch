@@ -790,6 +790,7 @@
   "activity_delegate": "అప్పగించడం",
   "activity_run": "రన్ చేయడం",
   "activity_more_steps": "+{count}",
+  "activity_steps_failed": "ఈ దశలను చూపించలేకపోయాము",
   "activity_more_names": "మరో {count}",
   "activity_in_background": "బ్యాక్‌గ్రౌండ్‌లో {activity}",
   "activity_reading_a_file": "ఒక ఫైల్ చదువుతోంది…",

@@ -10,7 +10,7 @@ import { runTone } from "../runMonitor/model";
 import type { ChartBlock, RunMonitor, ViewBlock } from "../runMonitor/types";
 import { useWorkspace } from "../workspace";
 import { FileScopeContext } from "./FileReference";
-import { Block, Boundary, drawsAt } from "./run/blocks/Block";
+import { Block, BlockBoundary, drawsAt } from "./run/blocks/Block";
 import { Chart } from "./run/blocks/Chart";
 import { Legend } from "./run/blocks/Legend";
 import { chartOf, seriesOf } from "./run/blocks/series";
@@ -129,9 +129,9 @@ function CompactChart({ run, monitor, onOpenRun }: { run: Run; monitor: RunMonit
           </ul>
         ) : <Legend series={series} row />}
       </div>
-      <Boundary title={title} rev={monitor.rev}>
+      <BlockBoundary title={title} rev={monitor.rev}>
         <Chart monitor={monitor} block={block} title={title} size="page" live={live} height={120} />
-      </Boundary>
+      </BlockBoundary>
     </section>
   );
 }

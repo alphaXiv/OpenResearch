@@ -790,6 +790,7 @@
   "activity_delegate": "Delegar",
   "activity_run": "Ejecutar",
   "activity_more_steps": "+{count}",
+  "activity_steps_failed": "No se pudieron mostrar estos pasos",
   "activity_more_names": "{count} más",
   "activity_in_background": "{activity} en segundo plano",
   "activity_reading_a_file": "Leyendo un archivo…",
