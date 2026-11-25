@@ -194,7 +194,11 @@ test("Re-check blocks Finish and keeps its result when models appear in the back
 test("switching one provider keeps every provider's model count while the agents reload", async () => {
   const opencode = {
     id: "opencode", name: "OpenCode", installed: true, authenticated: true, authState: "ready", agentReady: true,
-    version: "1.14.0", models: [model("openai/gpt-6.1-sol", "GPT-6.1 Sol"), model("wandb/qwen-4", "Qwen 4")], options: {},
+    version: "1.14.0", options: {}, models: [
+      model("openai/gpt-6.1-sol", "GPT-6.1 Sol"), model("openai/gpt-6.1-luna", "GPT-6.1 Luna"),
+      model("openrouter/kimi-k3", "Kimi K3"), model("openrouter/glm-5.3", "GLM 5.3"), model("openrouter/qwen-4", "Qwen 4"),
+      model("wandb/qwen-4", "Qwen 4"),
+    ],
   };
   let reloads = 0;
   let answer;
@@ -203,20 +207,31 @@ test("switching one provider keeps every provider's model count while the agents
     "GET /api/harnesses/setup/commands": () => ({}),
     "GET /api/harnesses/acp": () => [],
     "GET /api/harnesses/acp/presets": () => [],
-    "GET /api/opencode/providers": () => [{ id: "openai", kind: "key", name: "OpenAI" }, { id: "wandb", kind: "key", name: "Wandb" }],
+    "GET /api/opencode/providers": () => ["OpenAI", "OpenRouter", "Wandb"].map((name) => ({ id: name.toLowerCase(), kind: "key", name })),
     "GET /api/local-models": () => [],
   });
   await render(createElement(AgentList, { remote: false }));
   await settle();
-  const count = m.settings_models_available_one({ count: 1 });
-  assert.ok(document.body.textContent.includes(count));
+  /** The row whose switch uses `name`: the switch's nearest ancestor that names it. */
+  const row = (name) => {
+    let element = document.querySelector(`button[aria-label="${m.settings_agent_use({ name })}"]`);
+    while (element && !element.textContent.includes(name)) element = element.parentElement;
+    return element?.textContent ?? "";
+  };
+  const counts = () => {
+    assert.ok(row("OpenAI").includes(m.settings_models_available({ count: 2 })), row("OpenAI"));
+    assert.ok(row("OpenRouter").includes(m.settings_models_available({ count: 3 })), row("OpenRouter"));
+    assert.ok(!document.body.textContent.includes(m.common_checking()), "no row reads as checking");
+  };
+  counts();
+  assert.ok(row("Wandb").includes(m.settings_models_available_one({ count: 1 })), row("Wandb"));
 
   await click(document.querySelector(`button[aria-label="${m.settings_agent_use({ name: "Wandb" })}"]`));
   assert.equal(reloads, 2, "the switch reloads the agents");
-  assert.ok(!document.body.textContent.includes(m.common_checking()), "no row reads as checking during the reload");
-  assert.ok(document.body.textContent.includes(count));
+  counts();
+  assert.ok(row("Wandb").includes(m.settings_agent_off()), row("Wandb"));
 
   await act(async () => answer({ harnesses: [opencode] }));
   await settle();
-  assert.ok(document.body.textContent.includes(count));
+  counts();
 });
