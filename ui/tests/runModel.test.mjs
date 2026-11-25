@@ -163,7 +163,6 @@ test("lost contact speaks in the contact notice's words and freezes the bar", ()
   assert.equal(away.cost, m.run_cost_last_seen({ cost: "$1.06" }));
 
   const auth = model(run({ host: "lab-a40", backend: { kind: "slurm_job" }, contact: { type: "needs_auth", since, cause: "key" } }));
-  assert.equal(auth.connectHost, "lab-a40");
   assert.ok(auth.text.includes("**"), "the host is the bold figure");
 
   assert.equal(model(run({ cancelling: true })).text, m.status_cancelling());

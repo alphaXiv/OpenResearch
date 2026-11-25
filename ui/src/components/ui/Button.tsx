@@ -2,7 +2,7 @@ import type { AnchorHTMLAttributes, ComponentProps } from "react";
 import { cn } from "./cn";
 
 type ButtonVariant = "default" | "primary" | "ghost" | "danger" | "warning" | "purple" | "amber";
-type ButtonSize = "default" | "small" | "large";
+type ButtonSize = "default" | "small" | "compact" | "large";
 
 const BASE = [
   "btn inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap border font-medium",
@@ -24,6 +24,7 @@ const VARIANTS: Record<ButtonVariant, string> = {
 const SIZES: Record<ButtonSize, string> = {
   default: "h-8 rounded-md px-3.5 text-sm",
   small: "h-7 rounded-sm px-2.5 text-sm",
+  compact: "h-6 rounded-sm px-2 text-menu",
   large: "h-11 rounded-lg px-6 text-base",
 };
 

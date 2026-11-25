@@ -27,7 +27,7 @@ const run = (id, extra = {}) => ({
 const item = (value) => ({ sessionId: "s", run: value, experimentName: value.id, experimentSlug: `lr-${value.id}`, runNo: 1, runCount: 1 });
 
 /** Serves today's server for one chat's runs; every request is kept. */
-function backend({ uiState = { onboardingCompleted: true }, monitors = { r1: running }, hosts = [], flagRefusal } = {}) {
+function backend({ uiState = { onboardingCompleted: true }, monitors = { r1: running }, hosts = [], flagRefusal, retryRefusal } = {}) {
   const requests = [];
   serve((path, init) => {
     const request = `${init.method ?? "GET"} ${path}`;
@@ -38,6 +38,7 @@ function backend({ uiState = { onboardingCompleted: true }, monitors = { r1: run
     const monitor = /^GET \/api\/runs\/([^/]+)\/monitor$/.exec(request);
     if (monitor) return monitors[monitor[1]];
     if (/^POST \/api\/runs\/[^/]+\/cancel$/.test(request)) return { ok: true };
+    if (retryRefusal && /^POST \/api\/compute\/hosts\/[^/]+\/retry$/.test(request)) return Response.json({ error: retryRefusal }, { status: 409 });
     if (/^POST \/api\/runs\/[^/]+\/flag$/.test(request)) {
       const refusal = flagRefusal?.();
       return refusal ? Response.json({ error: refusal }, { status: 409 }) : { flag: { ...flagged.flags[0], state: "kept" }, run: run("r1") };
@@ -466,7 +467,7 @@ test("the reporting error appears once with the run strip open", async () => {
   assert.equal(occurrences(), 1);
 });
 
-test("an SSH contact problem shows its message and retry time once, and the strip adds its cause and actions", async () => {
+test("an SSH contact problem shows its message and retry time once, with Retry and Abandon in the header", async () => {
   const since = now - 60_000;
   const nextRetryMs = now + 60_000;
   const host = { alias: "lab-a40", status: "backoff", class: "key", sinceMs: since, nextRetryMs };
@@ -481,11 +482,14 @@ test("an SSH contact problem shows its message and retry time once, and the stri
   const lead = plain(m.run_notice_unreachable({ host: "lab-a40", time: fmtClock(since) }));
   const retry = plain(m.run_notice_retry_at({ time: fmtClock(nextRetryMs) }));
   for (const message of [lead, retry]) assert.equal(said().split(message).length - 1, 1);
+  assert.ok(find("button", m.app_retry()));
   await click(button(m.run_show_more()));
   for (const message of [lead, retry]) assert.equal(said().split(message).length - 1, 1);
-  assert.ok(find("p", "timed out"));
-  assert.ok(find("button", m.app_retry()));
-  assert.ok(find("button", m.run_abandon()));
+  assert.ok(!said().includes("timed out"), "the header already says the host is out of reach");
+  await click(document.querySelector(`[aria-label="${m.run_more_actions()}"]`));
+  await settle();
+  const abandon = [...document.querySelectorAll('[role="menuitem"]')].find((item) => item.textContent === m.run_abandon());
+  assert.ok(abandon, "Abandon waits in Retry's menu");
 
   const later = nextRetryMs + 60_000;
   await act(async () => workspace.queries.setEngineHost({ ...host, nextRetryMs: later }));
@@ -493,6 +497,22 @@ test("an SSH contact problem shows its message and retry time once, and the stri
   const rescheduled = plain(m.run_notice_retry_at({ time: fmtClock(later) }));
   assert.equal(said().split(rescheduled).length - 1, 1);
   assert.equal(plain(status()).split(rescheduled).length - 1, 1);
+});
+
+test("a Retry that fails from the closed strip says why under its header", async () => {
+  const since = now - 60_000;
+  const host = { alias: "lab-a40", status: "backoff", class: "key", sinceMs: since, nextRetryMs: now + 60_000 };
+  backend({ uiState: { onboardingCompleted: true, runBanner: "line" }, hosts: [host], retryRefusal: "lab-a40's host key changed." });
+  const away = (at) => run("r1", { host: "lab-a40", backend: { kind: "ssh_job" }, contact: { type: "unreachable", since: at, cause: "timed out" } });
+  const view = await banner([away(since)]);
+  await settle();
+  assert.ok(button(m.run_show_more()), "the strip stays closed");
+  await click(find("button", m.app_retry()));
+  assert.ok(document.querySelector('[role="alert"]')?.textContent.includes("lab-a40's host key changed."));
+
+  await view.update([away(now)]);
+  await settle();
+  assert.ok(!document.querySelector('[role="alert"]'), "a later outage starts without the old refusal");
 });
 
 test("a host that needs authentication offers one Connect action with the strip closed or open", async () => {
@@ -511,7 +531,7 @@ test("a host that needs authentication offers one Connect action with the strip 
   assert.equal(connect().length, 1);
   await click(button(m.run_show_more()));
   assert.equal(connect().length, 1);
-  assert.ok(find("p", auth.contact.cause));
+  assert.ok(!container.textContent.includes(auth.contact.cause), "Connect already says the host needs signing in to");
   await click(connect()[0]);
   assert.deepEqual(asked, ["lab-a40"]);
 });
@@ -1092,7 +1112,7 @@ test("cancellation is said once while a failed stop retains its explanation", as
   assert.equal(view.container.textContent.split(m.status_cancelling()).length - 1, 1);
   await view.update([run("r1", { cancelling: true, cancelError: "The scheduler refused this stop" })]);
   await settle();
-  assert.ok(view.container.querySelector('.run-contact-notice').textContent.includes("The scheduler refused this stop"));
+  assert.ok(view.container.textContent.includes("The scheduler refused this stop"));
 });
 
 test("a chart can open on its own while its headline is pending", async () => {

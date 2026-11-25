@@ -134,7 +134,7 @@ test("a chat run banner says why a run lost contact and offers the way forward",
   assert.ok(refused.buttons.includes(m.run_abandon()) && !refused.buttons.includes(m.run_stop()), refused.buttons.join());
 
   const offline = await banner(run({ status: "running", contact: { type: "unreachable", since: 1, cause: "Operation timed out" } }));
-  assert.ok(offline.text.includes("Operation timed out"), offline.text);
+  assert.ok(offline.text.includes("gpu-box") && !offline.text.includes("Operation timed out"), offline.text);
   assert.ok(offline.buttons.includes(m.run_stop()) && offline.buttons.includes(m.run_abandon()), offline.buttons.join());
 
   const healthy = await banner(run({ status: "running" }));

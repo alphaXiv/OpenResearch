@@ -3,7 +3,7 @@ import { runNoticeCopy } from "../components/RunContactNotice";
 import { statusLabel } from "../components/StatusBadge";
 import { autoDir, fmtNumber, ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
-import { runActive, runApiProvider, runConnectHost, runDisplay, runNeverStarted, runNotice, runResult, runStoppable, type RunNotice } from "../runDisplay";
+import { runActive, runApiProvider, runDisplay, runNeverStarted, runNotice, runResult, runStoppable, type RunNotice } from "../runDisplay";
 import { fillSentence, fmtMagnitude, fmtSignal, plainSentence, tokensOf } from "./format";
 import type { Bindings, Flag, FlagState, RunMonitor, RunMonitorSummary, ShownRun, SignalSpec, SignalValue, Signals, Versus, VersusBy } from "./types";
 import { tickText } from "./journal";
@@ -88,7 +88,6 @@ export interface RunModel {
   notice: RunNotice | null;
   /** The run's view is older than it looks: when it was last seen, and in its state's own words why. */
   stale: { state: "stale" | "rebuilding" | "unavailable" | "failed"; age: string | null; why: string } | null;
-  connectHost: string | null;
   canStop: boolean;
   canDismiss: boolean;
 }
@@ -472,7 +471,6 @@ export function runModel({ item, monitor: fetched, monitorFailed = false, shown,
     note,
     notice,
     stale,
-    connectHost: live ? runConnectHost(run) : null,
     canStop: runStoppable(run) && tone !== "revising",
     canDismiss: shown && !live && tone !== "revising" && !(notice && UNDISMISSABLE.has(notice.kind)),
   };
