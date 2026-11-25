@@ -87,7 +87,7 @@ const run = promisify(execFile);
 
 /** Skips jj's empty, undescribed working-copy commit so the line names the work, not a placeholder. */
 const JJ_REVSET = 'latest(heads(::@ ~ (empty() & description(exact:""))))';
-const JJ_TEMPLATE = 'change_id.shortest(8) ++ "\\0" ++ bookmarks.join(" ") ++ "\\0" ++ description';
+const JJ_TEMPLATE = 'change_id.shortest(8) ++ "\\0" ++ bookmarks.join(" ") ++ "\\0" ++ commit_id.short(12) ++ "\\0" ++ description';
 
 type ExecError = Error & { code?: unknown; stderr?: string };
 
@@ -95,8 +95,8 @@ type ExecError = Error & { code?: unknown; stderr?: string };
 async function readCommit(cwd: string) {
   try {
     const { stdout } = await run("jj", ["log", "--no-graph", "-r", JJ_REVSET, "-T", JJ_TEMPLATE], { cwd });
-    const [id, ref, description] = stdout.split("\0");
-    return { id, ref, description: description.trim() };
+    const [id, ref, commit, description] = stdout.split("\0");
+    return { id, ref, commit, description: description.trim() };
   } catch (error) {
     const { code, stderr, message } = error as ExecError;
     const noJj = code === "ENOENT" || stderr?.includes("There is no jj repo");
@@ -109,14 +109,34 @@ async function readCommit(cwd: string) {
       run("git", ["branch", "--show-current"], { cwd }),
     ]);
     const [id, description] = log.split("\0");
-    return { id, ref: branch.trim(), description: description.trim() };
+    return { id, ref: branch.trim(), commit: id, description: description.trim() };
   } catch (error) {
     const { stderr, message } = error as ExecError;
     throw new Error(`git could not read the commit in ${cwd}: ${stderr?.trim() || message}`);
   }
 }
 
-/** The checkout's current commit at /__dev/commit, so dev windows from different worktrees can be told apart. */
+/** Where the checkout forked from main, which resolves on any machine, and its branch's latest pull request. Best effort: a bug report goes without them. */
+async function readOrigin(cwd: string, ref: string) {
+  // A slow network costs the report its pull request, never the report.
+  const out = (command: string, args: string[]) =>
+    run(command, args, { cwd, timeout: 5_000 }).then(({ stdout }) => stdout.trim() || null, () => null);
+  // jj marks a bookmark ahead of or conflicting with its remote with * or ?.
+  const first = (refs: string | null) => refs?.split(" ")[0]?.replace(/[*?]+$/, "") || null;
+
+  const jj = (revset: string, template: string) => out("jj", ["log", "--no-graph", "-r", revset, "-T", template]);
+  const base = await jj(`heads(::(${JJ_REVSET}) & ::trunk())`, "commit_id.short(12)")
+    ?? await out("git", ["merge-base", "origin/main", "HEAD"]).then((sha) => sha?.slice(0, 12) ?? null);
+  // A jj change without a bookmark of its own takes the one it is stacked on, if that isn't merged yet.
+  const branch = first(ref) ?? first(await jj(`latest(heads((::(${JJ_REVSET}) ~ ::trunk()) & bookmarks()))`, 'bookmarks.map(|b| b.name()).join(" ")'));
+  const pr = branch && await out(
+    "gh",
+    ["pr", "list", "--repo", "alphaXiv/OpenResearch", "--head", branch, "--state", "all", "--limit", "1", "--json", "url", "--jq", ".[0].url // empty"],
+  );
+  return { base, pr: pr || null };
+}
+
+/** The checkout's current commit at /__dev/commit, and with `?pr` where it forked from main and its pull request, so dev windows from different worktrees can be told apart. */
 function devCommit(): Plugin {
   return {
     name: "dev-commit",
@@ -134,13 +154,16 @@ function devCommit(): Plugin {
           return;
         }
 
-        readCommit(server.config.root).then(
-          (commit) => res.end(JSON.stringify(commit)),
-          (error: Error) => {
-            res.statusCode = 500;
-            res.end(JSON.stringify({ error: error.message }));
-          },
-        );
+        const withPr = new URL(req.url ?? "", "http://dev").searchParams.has("pr");
+        readCommit(server.config.root)
+          .then(async (commit) => withPr ? { ...commit, ...await readOrigin(server.config.root, commit.ref) } : commit)
+          .then(
+            (commit) => res.end(JSON.stringify(commit)),
+            (error: Error) => {
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: error.message }));
+            },
+          );
       });
     },
   };

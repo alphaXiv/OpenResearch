@@ -268,6 +268,11 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     staleTime: 300_000,
   });
 
+  const getBugReportsQuery = () => queryOptions({
+    queryKey: workspaceKey("getBugReports"),
+    queryFn: ({ signal }) => api.getBugReports(signal),
+  });
+
   const getHarnessSetupCommandsQuery = () => queryOptions({
     queryKey: workspaceKey("getHarnessSetupCommands"),
     queryFn: ({ signal }) => api.getHarnessSetupCommands(signal),
@@ -405,6 +410,7 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     getProjectDefaultsQuery,
     getProjectGitStatusQuery,
     getTelemetryQuery,
+    getBugReportsQuery,
     getHarnessSetupCommandsQuery,
     getHarnessesQuery,
     getSkillsQuery,
@@ -754,6 +760,20 @@ export const mutSetTelemetry = mutations.define({
   refetchOnSuccess: false,
 });
 
+export const mutSetBugReports = mutations.define({
+  id: "settings/bug-reports",
+  mutate: (ws: Workspace, linear: boolean) => ws.api.setBugReports(linear),
+  optimistic({ helpers, args: [ws, linear], onSuccess }) {
+    const options = ws.queries.getBugReportsQuery();
+    helpers(ws.queryClient).updateExisting(options, () => ({ linear }));
+    onSuccess((saved) => ws.setScopedQueryData(options.queryKey, saved));
+  },
+  key: ({ args: [ws] }) => [ws.identity, "bug-reports"],
+  describe: "change where bug reports go",
+  describeResult: null,
+  refetchOnSuccess: false,
+});
+
 export const mutSetGithubForNewProjects = mutations.define({
   id: "settings/projects-github",
   mutate: (ws: Workspace, enabled: boolean) => ws.api.setProjectDefaults(enabled, true),
@@ -1054,6 +1074,15 @@ export const mutInstallRemote = mutations.define({
   mutate: (ws: Workspace, paths: api.RemoteInstallPaths) => ws.api.installRemoteSession(paths),
   optimistic: () => {},
   describe: "install OpenResearch on the machine",
+  describeResult: null,
+});
+
+export const mutUpdateRemote = mutations.define({
+  id: "remote/update",
+  /** From this computer's workspace `id` names the machine; a remote's own workspace, as `orx up --remote` serves it, passes null. */
+  mutate: (ws: Workspace, id: string | null) => id === null ? ws.api.updateCurrentRemote() : ws.api.updateRemoteSession(id),
+  optimistic: () => {},
+  describe: "update OpenResearch on the machine",
   describeResult: null,
 });
 

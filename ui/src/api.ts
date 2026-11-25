@@ -792,6 +792,8 @@ export type RemoteSessionStatus =
   | "needsUpdate"
   | "applying"
   | "connected"
+  /** Connected and usable while this computer's build installs beside the running host. */
+  | "updating"
   | "restarting"
   | "reconnecting"
   | "disconnected";
@@ -810,6 +812,7 @@ export interface RemoteSessionInfo {
   version: string | null;
   /** The remote's version, or its canary tag; null when unknown. */
   buildId: string | null;
+  /** The remote API's level: a route added after the remote's level is missing there, so gate its entry point on this. */
   dashboardProtocol: number | null;
   gatewayUrl: string;
   error: string | null;
@@ -819,6 +822,8 @@ export interface RemoteSessionInfo {
   installPaths: RemoteInstallPaths | null;
   uiPreferences: { theme: string | null; locale: string | null };
   canStartNewHost: boolean;
+  /** The remote runs a build older than this computer's, which can install its own there. */
+  updateAvailable: boolean;
 }
 
 /** `production` only for an official release built by the project's CI. */
@@ -826,7 +831,7 @@ export type BuildChannel = "production" | "development";
 
 export type RuntimeInfo =
   | { kind: "local"; version: string; buildChannel: BuildChannel }
-  | { kind: "ssh"; version: string; buildChannel: BuildChannel; dashboardProtocol: number; session: RemoteSessionInfo };
+  | { kind: "ssh"; version: string; buildChannel: BuildChannel; session: RemoteSessionInfo };
 
 export interface RemoteStopPreview {
   instanceId: string;
@@ -1016,8 +1021,12 @@ export interface LocalMachine {
   hostname: string;
   os: string;
   arch: string;
-  /** CPU brand string on macOS (e.g. "Apple M2 Pro"). */
+  /** The CPU's brand string, e.g. "Apple M2 Pro". */
   chip: string | null;
+  /** The OS and its version, e.g. "macOS 15.2". */
+  osName: string | null;
+  /** The computer's model, e.g. "MacBook Pro". */
+  model: string | null;
   cpuCount: number;
   memBytes: number | null;
   gpus: LocalGpu[];
@@ -1156,6 +1165,11 @@ export interface ProjectGitStatus {
     url: string | null;
     syncStatus: string | null;
   };
+}
+
+/** Where Report a bug files: Linear when true, GitHub otherwise. Shared by every checkout on the machine. */
+export interface BugReportSettings {
+  linear: boolean;
 }
 
 export interface TelemetrySettings {
@@ -1626,6 +1640,8 @@ export interface ChatToolState {
     harness?: HarnessId;
     profile?: string | null;
     recoveryAction?: "retry" | "continue";
+    /** Epoch ms when a usage limit that failed the turn resets, if known. */
+    resetAt?: number | null;
     [k: string]: unknown;
   };
   output?: string;
@@ -2827,6 +2843,9 @@ export function createApi(
   const reconnectRemoteSession = (id: string) =>
     post<RemoteSessionInfo>(`/api/remote/sessions/${encodeURIComponent(id)}/reconnect`);
 
+  const updateRemoteSession = (id: string) =>
+    post<RemoteSessionInfo>(`/api/remote/sessions/${encodeURIComponent(id)}/update`);
+
   const disconnectRemoteSession = (id: string) =>
     post<RemoteSessionInfo>(`/api/remote/sessions/${encodeURIComponent(id)}/disconnect`);
 
@@ -2834,6 +2853,8 @@ export function createApi(
     post<RemoteSessionInfo>("/_orx/install", paths);
 
   const reconnectCurrentRemote = () => post<RemoteSessionInfo>("/_orx/reconnect");
+
+  const updateCurrentRemote = () => post<RemoteSessionInfo>("/_orx/update");
 
   const disconnectCurrentRemote = () => post<RemoteSessionInfo>("/_orx/disconnect");
 
@@ -3116,6 +3137,10 @@ export function createApi(
 
   const getTelemetry = (signal?: AbortSignal) => get<TelemetrySettings>("/api/settings/telemetry", signal);
 
+  const getBugReports = (signal?: AbortSignal) => get<BugReportSettings>("/api/settings/bug-reports", signal);
+
+  const setBugReports = (linear: boolean) => post<BugReportSettings>("/api/settings/bug-reports", { linear });
+
   const setTelemetry = (enabled: boolean) =>
     post<TelemetrySettings>("/api/settings/telemetry", { enabled });
 
@@ -3276,9 +3301,9 @@ export function createApi(
   /** The message an agent cited by ref: where it lives, the agent that wrote it if one did, and its first words. */
   const citedMessage = (cited: string) => get<CitedMessage>(`/api/chat/messages/${encodeURIComponent(cited)}`);
 
-  /** Branch a persistent side chat off a snapshot of `sessionId`'s transcript. */
-  const openSideChat = (sessionId: string) =>
-    post<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}/side`, {}).then(
+  /** Branch a persistent side chat off a snapshot of `sessionId`'s transcript, on `agent` or else the parent's agent. */
+  const openSideChat = (sessionId: string, agent?: AgentSelection) =>
+    post<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}/side`, { agent }).then(
       (r) => r.session,
     );
 
@@ -3562,9 +3587,11 @@ export function createApi(
     listRemoteSessions,
     createRemoteSession,
     reconnectRemoteSession,
+    updateRemoteSession,
     disconnectRemoteSession,
     installRemoteSession,
     reconnectCurrentRemote,
+    updateCurrentRemote,
     disconnectCurrentRemote,
     startCurrentRemoteHost,
     getRemoteStopPreview,
@@ -3617,6 +3644,8 @@ export function createApi(
     importSharedProject,
     getTelemetry,
     setTelemetry,
+    getBugReports,
+    setBugReports,
     captureUiEvent,
     reportLocale,
     getHarnessSetupCommands,

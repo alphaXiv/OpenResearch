@@ -47,7 +47,7 @@ export const refused = (error = "refused") => Response.json({ error }, { status:
 
 /** A connected remote host's runtime for its session `id`. */
 const remoteRuntime = (id) => ({
-  kind: "ssh", version: "test", buildChannel: "stable", dashboardProtocol: 1,
+  kind: "ssh", version: "test", buildChannel: "stable",
   session: { id, host: "gpu", user: "me", status: "connected", version: "test", dashboardProtocol: 1, gatewayUrl: "http://localhost:4910/", error: null, repairCommand: null, installPaths: null, uiPreferences: { theme: null, locale: null }, canStartNewHost: true },
 });
 

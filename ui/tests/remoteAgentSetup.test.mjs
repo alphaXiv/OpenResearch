@@ -22,7 +22,7 @@ globalThis.WebSocket = class extends EventTarget {
 };
 
 const runtime = {
-  kind: "ssh", version: "test", buildChannel: "stable", dashboardProtocol: 1,
+  kind: "ssh", version: "test", buildChannel: "stable",
   session: { id: "gpu", host: "gpu-lab", user: "me", status: "connected", version: "test", dashboardProtocol: 1, gatewayUrl: "http://localhost:4910/", error: null, repairCommand: null, installPaths: null, uiPreferences: { theme: null, locale: null }, canStartNewHost: true },
 };
 const codex = { id: "codex", name: "Codex", installed: true, authenticated: true, authState: "ready", agentReady: true, models: [model("gpt-6.1-sol")], defaultModel: "gpt-6.1-sol", options: {} };

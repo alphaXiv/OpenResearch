@@ -5,6 +5,7 @@
  */
 import { readFileSync, rmSync, statSync } from 'node:fs'
 import { test as base, expect, type Page } from '@playwright/test'
+import { recordApi } from './api-contract.ts'
 import { startAgentScripts, type Agent } from './agent.ts'
 import { startOrx, type Orx, type Project } from './orx.ts'
 import { listedEgress, startOutside, type Outside } from './outside.ts'
@@ -79,6 +80,7 @@ export const test = base.extend<{ launchOrx: (options?: { ownBuild?: boolean; ap
     const browser: string[] = []
     page.on('console', (message) => browser.push(`[${message.type()}] ${message.text()}`))
     page.on('pageerror', (error) => browser.push(`[pageerror] ${error.stack ?? error.message}`))
+    if (process.env.ORX_E2E_RECORD_API) recordApi(page, process.env.ORX_E2E_RECORD_API)
 
     await use(page)
 

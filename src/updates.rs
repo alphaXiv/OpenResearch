@@ -59,6 +59,21 @@ pub(crate) fn current_build_id() -> &'static str {
     option_env!("ORX_DESKTOP_CANARY_TAG").unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
+/// Whether the build `ours` is known to be newer than a peer's: two canaries compare by tag,
+/// anything else by version, so a canary and a stable release of one version are not ordered.
+pub(crate) fn build_is_newer(
+    ours: (&Version, &str),
+    version: &str,
+    build_id: Option<&str>,
+) -> bool {
+    let (our_version, our_build) = ours;
+    let canary = |id: &str| id.strip_prefix("canary-").and_then(canary_id);
+    match (canary(our_build), build_id.and_then(canary)) {
+        (Some(ours), Some(theirs)) => ours > theirs,
+        _ => Version::parse(version).is_ok_and(|theirs| is_outdated(&theirs, our_version)),
+    }
+}
+
 fn desktop_release_available(
     current: &Version,
     latest: &Version,
@@ -2264,6 +2279,46 @@ mod tests {
         std::env::set_var(crate::local::chat::LOCAL_SESSION_ENV, "1");
 
         assert!(super::UpdateWarning::start(true).refresh.is_none());
+    }
+
+    #[test]
+    fn a_build_is_newer_only_when_its_channel_can_tell() {
+        let stable = Version::parse("0.3.5").unwrap();
+        let ours = (&stable, "0.3.5");
+        assert!(super::build_is_newer(ours, "0.3.4", Some("0.3.4")));
+        assert!(super::build_is_newer(ours, "0.3.4", None));
+        assert!(!super::build_is_newer(ours, "0.3.5", Some("0.3.5")));
+        assert!(!super::build_is_newer(ours, "0.3.6", Some("0.3.6")));
+        assert!(!super::build_is_newer(
+            ours,
+            "0.3.5",
+            Some("canary-20261120.3")
+        ));
+        assert!(!super::build_is_newer(ours, "unknown", None));
+
+        let canary = (&stable, "canary-20261121.2");
+        assert!(super::build_is_newer(
+            canary,
+            "0.3.5",
+            Some("canary-20261121.1")
+        ));
+        assert!(super::build_is_newer(
+            canary,
+            "0.3.5",
+            Some("canary-20261120.9")
+        ));
+        assert!(!super::build_is_newer(
+            canary,
+            "0.3.5",
+            Some("canary-20261121.2")
+        ));
+        assert!(!super::build_is_newer(
+            canary,
+            "0.3.5",
+            Some("canary-20261122.1")
+        ));
+        assert!(!super::build_is_newer(canary, "0.3.5", Some("0.3.5")));
+        assert!(super::build_is_newer(canary, "0.3.4", Some("0.3.4")));
     }
 
     #[test]
