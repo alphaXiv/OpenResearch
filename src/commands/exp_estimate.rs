@@ -54,17 +54,44 @@ pub(super) async fn run(store: &Store, mut args: crate::ExpRunArgs) -> Result<()
             }
         }
     }
-    let compute = match &args.flavor {
+    let flags = |backend: &str, flavor: Option<&str>| match flavor {
         Some(flavor) => format!("--backend {backend} --flavor {flavor}"),
         None => format!("--backend {backend}"),
     };
+    let compute = flags(&backend, args.flavor.as_deref());
     let limit = crate::config::paced(Duration::from_secs(60));
     let quote = tokio::time::timeout(limit, price(&backend, &args))
         .await
         .unwrap_or_else(|_| Err(anyhow!("no price within 60 s")));
     println!("Command: {command}");
     match &parent {
-        Some((experiment, run, _)) => println!("Parent timing: {} — {}", experiment.display_name(), run.id),
+        Some((experiment, run, _)) => {
+            let launch = match store.engine_run_state(&run.id) {
+                Ok(state) => state.and_then(|state| state.launch),
+                Err(error) => {
+                    println!(
+                        "Parent hardware unreadable: could not read how {} launched: {error:#}",
+                        run.id
+                    );
+                    None
+                }
+            };
+            let ran = crate::store::public_backend(&run.backend_json, launch.as_ref())
+                .unwrap_or_default();
+            let gpu = launch.as_ref().and_then(|launch| launch.options["gpu"].as_str());
+            let ran_on = match ran["kind"].as_str() {
+                Some(kind) => flags(
+                    kind.trim_end_matches("_job"),
+                    ran["flavor"].as_str().or(gpu),
+                ),
+                None => "a backend orx could not read".into(),
+            };
+            println!(
+                "Parent timing: {} — {}, on {ran_on}",
+                experiment.display_name(),
+                run.id
+            );
+        }
         None => println!("Parent timing: unavailable; record a completed parent run before sizing this experiment."),
     }
     println!(
@@ -188,6 +215,7 @@ fn report(
         .map(|p| (p, true, estimate::TimedBy::Parent))
         .collect();
     let stages = estimate::stages(plan, None, false, &timed);
+    let planned = stages.len();
     let duration = |ms: f64| {
         let seconds = (ms / 1000.0).round() as i64;
         if seconds < 60 {
@@ -262,31 +290,39 @@ fn report(
     lines.push(
         "Not included: queueing, provisioning, and changes in hardware or per-step work.".into(),
     );
+    let none_timed = unknown.len() == planned;
     let bound = if unknown.is_empty() {
         lines.push(format!("Total: about {}", duration(total)));
-        "about"
+        Some("about")
+    } else if none_timed {
+        lines.push(format!("Total: unknown ({} not timed)", unknown.join(", ")));
+        None
     } else {
         lines.push(format!(
             "Total: at least {} ({} not timed)",
             duration(total),
             unknown.join(", ")
         ));
-        "at least"
+        Some("at least")
     };
     match price {
         Ok(Some(quote)) => {
             let hourly = usd(cost(quote, Per::Hour.millis() as i64));
-            let spent = usd(cost(quote, total.round() as i64));
             lines.push(format!(
                 "Price: {hourly}/hr for {compute}, from {}",
                 quote.source
             ));
-            lines.push(format!("Cost: {bound} {spent}"));
+            lines.push(match bound {
+                Some(bound) => format!("Cost: {bound} {}", usd(cost(quote, total.round() as i64))),
+                None => "Cost: unknown until a run times its stages".into(),
+            });
         }
         Ok(None) => lines.push(format!("Cost: orx has no price for {compute}")),
         Err(error) => lines.push(format!("Cost: unknown for {compute}: {error:#}")),
     }
-    if !unknown.is_empty() {
+    if none_timed {
+        lines.push("No parent timing covers these stages, so this run's duration and cost are unknown until it measures them. Tell the user so, with the hourly price when there is one, or run a short calibration before promising a duration or cost.".into());
+    } else if !unknown.is_empty() {
         lines.push(format!("This is a floor: {} are not timed. Tell the user the total is unknown or run a short calibration before promising a duration or cost.", unknown.join(", ")));
     }
     lines.join("\n")
@@ -404,6 +440,24 @@ mod tests {
             text.contains("Cost: unknown for --backend hf: pass the --flavor"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_plan_no_run_has_timed_gives_the_hourly_price_and_no_total() {
+        let plan = orx_signals::plan(&json!([{"phase":"train", "of":600, "unit":"steps"}]), false)
+            .unwrap();
+        let h200 = Ok(Some(Quote {
+            amount_micros: 6_000_000,
+            per: Per::Hour,
+            currency: "USD".into(),
+            source: "huggingface.co".into(),
+            quoted_at: 0,
+        }));
+        let text = report(&plan, None, "--backend hf --flavor h200", &h200);
+        assert!(text.contains("Total: unknown (train not timed)"), "{text}");
+        assert!(text.contains("Price: $6.00/hr"), "{text}");
+        assert!(text.contains("Cost: unknown"), "{text}");
+        assert!(!text.contains("at least"), "{text}");
     }
 
     #[test]
