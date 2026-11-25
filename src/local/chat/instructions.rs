@@ -170,7 +170,7 @@ impl ChatHost {
             if written.is_err() {
                 bail!("Your OpenResearch instructions changed after the agent proposed this, so approving it would undo that change. Decline it and ask the agent to propose again.");
             }
-            "The user approved your proposed OpenResearch instructions, and they are saved. New OpenResearch chats start with them; chats already open, this one included, keep the instructions they started with."
+            "The user approved your proposed OpenResearch instructions, and they are saved. New OpenResearch chats start with them. Chats already open, this one included, may keep the instructions they started with until their agent restarts."
         } else {
             "The user declined your proposed change to their OpenResearch instructions, so they stay as they were."
         };

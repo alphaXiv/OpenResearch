@@ -2625,7 +2625,7 @@
   "instructions_keep_mine": "Düzenlemelerimi koru",
   "instructions_use_saved": "Kayıtlı sürümü kullan",
   "chat_instructions_title": "OpenResearch talimatların değiştirilsin mi?",
-  "chat_instructions_note": "Yeni sohbetler bunlarla başlar; açık sohbetler başladıkları talimatları korur.",
+  "chat_instructions_note": "Yeni sohbetler bunlarla başlar. Açık sohbetler, ajanları yeniden başlayana kadar önceki talimatları koruyabilir.",
   "chat_instructions_stale": "Ajan bunu önerdikten sonra talimatların değişti. Reddet ve ajandan yeniden önermesini iste.",
   "chat_instructions_approve": "Onayla",
   "chat_instructions_decline": "Reddet",

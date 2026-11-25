@@ -2625,7 +2625,7 @@
   "instructions_keep_mine": "Keep my edits",
   "instructions_use_saved": "Use saved version",
   "chat_instructions_title": "Change your OpenResearch instructions?",
-  "chat_instructions_note": "New chats start with them; chats already open keep the instructions they started with.",
+  "chat_instructions_note": "New chats start with them. Chats already open may keep their earlier instructions until their agent restarts.",
   "chat_instructions_stale": "Your instructions changed after the agent proposed this. Decline it and ask the agent to propose again.",
   "chat_instructions_approve": "Approve",
   "chat_instructions_decline": "Decline",
