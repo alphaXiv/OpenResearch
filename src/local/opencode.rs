@@ -70,6 +70,11 @@ pub(crate) fn opencode_candidates() -> Vec<PathBuf> {
     )
 }
 
+/// The OpenCode inbox id a steer goes in as, so a stop or a reconnect can find it in the transcript.
+pub(crate) fn steer_inbox_id(steer_id: &str) -> String {
+    format!("msg_{}", steer_id.trim_start_matches("q_").replace('-', ""))
+}
+
 pub(crate) fn not_found() -> crate::error::Error {
     anyhow!(
         "opencode not found (checked PATH and ~/.opencode/bin/opencode). \
@@ -165,6 +170,7 @@ pub(super) struct ProjectState {
     runs: usize,
     active_runs: usize,
     compute: Option<super::ComputeTarget>,
+    pub(super) instructions: String,
 }
 
 impl ProjectState {
@@ -181,6 +187,8 @@ impl ProjectState {
             runs: runs.len(),
             active_runs,
             compute: super::compute_default(&store, project_id)?,
+            instructions: super::chat::instructions::read(&super::chat::instructions::path())?
+                .content,
         })
     }
 }
@@ -290,7 +298,7 @@ pub(super) fn playbook_md(project: &LocalProject, state: &ProjectState) -> Strin
         .split_once("-->\n\n")
         .map(|(_, rest)| rest)
         .unwrap_or(SYSTEM_PROMPT);
-    template
+    let playbook = template
         .replace("{name}", name)
         .replace("{id}", id)
         .replace("{folder_line}", &folder_line)
@@ -299,7 +307,18 @@ pub(super) fn playbook_md(project: &LocalProject, state: &ProjectState) -> Strin
         .replace("{compute_bullet}", &compute_bullet)
         .replace("{artifacts}", &artifacts)
         .replace("{project_state}", &project_state)
-        .replace("{chat_format}", CHAT_FORMAT_REL)
+        .replace("{chat_format}", CHAT_FORMAT_REL);
+    let instructions = state.instructions.trim();
+    if instructions.is_empty() {
+        return playbook;
+    }
+    format!(
+        "{}\n\n## Your user's OpenResearch instructions\n\n\
+         They apply to every OpenResearch project. To change them, write the whole new file and run \
+         `orx instructions propose <file>` so the user can approve it; never edit the file yourself.\n\n\
+         {instructions}\n",
+        playbook.trim_end()
+    )
 }
 
 /// Keep the files we drop into the checkout out of `git status` / accidental
@@ -494,6 +513,7 @@ struct AgentChild {
     /// Held from adoption until the turn it resumes starts, so no update replaces OpenCode
     /// under that turn in between.
     resuming: Option<tokio::sync::RwLockReadGuard<'static, ()>>,
+    last_used: std::time::Instant,
 }
 
 impl AgentChild {
@@ -514,6 +534,23 @@ impl AgentChild {
     async fn stop(&self) -> Result<()> {
         runtime::stop_kept(&self.keeper).await
     }
+}
+
+/// Whether any session on the server is working, by OpenCode's own account.
+async fn sessions_at_work(endpoint: &AgentEndpoint) -> std::result::Result<bool, ()> {
+    let active: Value = endpoint
+        .client
+        .get(format!("{}/api/session/active", endpoint.base_url))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|_| ())?
+        .json()
+        .await
+        .map_err(|_| ())?;
+    let sessions = active["data"].as_object().ok_or(())?;
+    Ok(!sessions.is_empty())
 }
 
 /// Spawn `opencode serve` in the session's worktree and wait for it to come
@@ -603,6 +640,7 @@ async fn spawn_agent(
         endpoint,
         database,
         resuming: None,
+        last_used: std::time::Instant::now(),
     })
 }
 
@@ -834,8 +872,9 @@ impl AgentHost {
     /// The session's live server and its keeper, which a turn checkpoints against.
     pub(crate) async fn server_for(&self, session_id: &str) -> Option<(AgentEndpoint, KeptHandle)> {
         let mut guard = self.inner.lock().await;
-        let agent = guard.get(session_id)?;
+        let agent = guard.get_mut(session_id)?;
         if agent.alive() {
+            agent.last_used = std::time::Instant::now();
             Some((agent.endpoint.clone(), agent.keeper.clone()))
         } else {
             guard.remove(session_id);
@@ -861,22 +900,172 @@ impl AgentHost {
             .cloned()
     }
 
-    pub(crate) async fn interrupt(&self, session_id: &str, native_id: &str) -> Result<()> {
+    /// Stops the session's execution and cancels what waits in its inbox, a steer the
+    /// execution never read included: orx's own queue holds what runs next. Returns the
+    /// `steers` OpenCode had already delivered.
+    pub(crate) async fn interrupt(
+        &self,
+        session_id: &str,
+        native_id: &str,
+        steers: &[String],
+    ) -> Result<Vec<String>> {
         let Some(endpoint) = self.endpoint_for(session_id).await else {
-            return Ok(());
+            return Ok(Vec::new());
         };
-        endpoint
+        let stop = async {
+            endpoint
+                .client
+                .post(format!(
+                    "{}/api/session/{native_id}/interrupt",
+                    endpoint.base_url
+                ))
+                .timeout(Duration::from_secs(2))
+                .json(&json!({}))
+                .send()
+                .await?
+                .error_for_status()?;
+            Ok::<_, crate::error::Error>(())
+        }
+        .await;
+        let inbox = format!("{}/api/session/{native_id}/inbox", endpoint.base_url);
+        let cancel = async {
+            let waiting: Value = endpoint
+                .client
+                .get(&inbox)
+                .timeout(Duration::from_secs(2))
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await
+                .with_context(|| {
+                    format!("Could not read OpenCode's inbox for chat {session_id}")
+                })?;
+            for id in waiting["data"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|item| item["id"].as_str())
+            {
+                endpoint
+                    .client
+                    .delete(format!("{inbox}/{id}"))
+                    .timeout(Duration::from_secs(2))
+                    .send()
+                    .await?
+                    .error_for_status()
+                    .with_context(|| {
+                        format!("Could not cancel OpenCode prompt {id} in chat {session_id}")
+                    })?;
+            }
+            Ok::<_, crate::error::Error>(())
+        }
+        .await;
+        // Which steers OpenCode read is still worth knowing when either step failed.
+        for error in [stop.err(), cancel.err()].into_iter().flatten() {
+            eprintln!("orx up: stopping OpenCode in chat {session_id}: {error:#}");
+        }
+        if steers.is_empty() {
+            return Ok(Vec::new());
+        }
+        let export: Value = endpoint
             .client
-            .post(format!(
-                "{}/api/session/{native_id}/interrupt",
-                endpoint.base_url
+            .get(format!(
+                "{}{}",
+                endpoint.base_url,
+                endpoint.v2_export_path(native_id)
             ))
             .timeout(Duration::from_secs(2))
-            .json(&json!({}))
             .send()
             .await?
-            .error_for_status()?;
-        Ok(())
+            .error_for_status()?
+            .json()
+            .await
+            .with_context(|| {
+                format!("Could not read OpenCode's transcript for chat {session_id}")
+            })?;
+        let exported = export["data"]["messages"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        Ok(steers
+            .iter()
+            .filter(|steer| {
+                let inbox_id = steer_inbox_id(steer);
+                exported
+                    .iter()
+                    .any(|message| message["id"].as_str() == Some(inbox_id.as_str()))
+            })
+            .cloned()
+            .collect())
+    }
+
+    pub fn start_reaper(self: &std::sync::Arc<Self>) {
+        let host = std::sync::Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(crate::local::agent_lifecycle::REAPER_INTERVAL).await;
+                let Some(host) = host.upgrade() else {
+                    break;
+                };
+                host.reap_idle_at(
+                    std::time::Instant::now(),
+                    crate::local::agent_lifecycle::IdlePolicy::current(),
+                )
+                .await;
+            }
+        });
+    }
+
+    /// Stops servers unused past `policy` while OpenCode reports no session at work, which
+    /// includes one paused on a prompt. The next message respawns and resumes the chat.
+    async fn reap_idle_at(
+        &self,
+        now: std::time::Instant,
+        policy: crate::local::agent_lifecycle::IdlePolicy,
+    ) {
+        let candidates: Vec<_> = self
+            .inner
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, agent)| agent.resuming.is_none() && agent.alive())
+            .map(|(id, agent)| {
+                let age = now.saturating_duration_since(agent.last_used);
+                (id.clone(), agent.last_used, age, agent.endpoint.clone())
+            })
+            .filter(|(.., age, _)| *age >= crate::local::agent_lifecycle::MIN_IDLE_BEFORE_LIMIT)
+            .collect();
+        let mut idle = Vec::new();
+        for (id, used, age, endpoint) in candidates {
+            // An unanswered check keeps the server; the next tick asks again.
+            let turn = store::Store::open().and_then(|store| store.chat_turn_leased(&id));
+            if matches!(turn, Ok(false)) && sessions_at_work(&endpoint).await == Ok(false) {
+                idle.push((id, used, age));
+            }
+        }
+        let over_limit = policy.over_limit(&idle.iter().map(|(.., age)| *age).collect::<Vec<_>>());
+        for (index, (id, used, age)) in idle.into_iter().enumerate() {
+            if age < policy.idle_timeout && !over_limit.contains(&index) {
+                continue;
+            }
+            let agent = {
+                let mut inner = self.inner.lock().await;
+                if inner.get(&id).is_none_or(|agent| agent.last_used != used) {
+                    continue;
+                }
+                inner.remove(&id)
+            };
+            if let Some(agent) = agent {
+                eprintln!(
+                    "orx up: stopping idle OpenCode server session={id} idle_s={}",
+                    age.as_secs()
+                );
+                if let Err(error) = agent.stop().await {
+                    eprintln!("orx up: failed to stop idle OpenCode for {id}: {error}");
+                }
+            }
+        }
     }
 
     pub(crate) async fn retire_idle_children(&self) -> Result<()> {
@@ -1039,7 +1228,8 @@ impl AgentHost {
         let config = launch_config(&current);
         {
             let mut guard = self.inner.lock().await;
-            if let Some(agent) = guard.get(session_id) {
+            if let Some(agent) = guard.get_mut(session_id) {
+                agent.last_used = std::time::Instant::now();
                 let resident = &agent.resident;
                 if resident.project_id == project.id
                     && resident.alphaxiv_signed_in == crate::alphaxiv::signed_in()
@@ -1171,6 +1361,7 @@ impl AgentHost {
                 endpoint,
                 database,
                 resuming,
+                last_used: std::time::Instant::now(),
             },
         );
         Ok(())
@@ -1261,6 +1452,7 @@ impl AgentHost {
                 resident,
                 database,
                 resuming: None,
+                last_used: std::time::Instant::now(),
             },
         );
         keeper
@@ -1695,6 +1887,62 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn idle_servers_are_released_only_once_opencode_is_quiet() {
+        use crate::local::agent_lifecycle::IdlePolicy;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let working = std::sync::Arc::new(AtomicBool::new(true));
+        let active = working.clone();
+        let app = axum::Router::new().route(
+            "/api/session/active",
+            axum::routing::get(move || {
+                let busy = active.load(Ordering::SeqCst);
+                async move {
+                    axum::Json(if busy {
+                        json!({"data": {"native": {}}})
+                    } else {
+                        json!({"data": {}})
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let unreachable = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let roots = [(); 2].map(|()| git::TemporaryDirectory::new("orx-opencode-idle").unwrap());
+        let host = AgentHost::new(None);
+        host.serve_for_test("chat", port, roots[0].path()).await;
+        host.serve_for_test("gone", unreachable, roots[1].path())
+            .await;
+        let sessions = || async {
+            let mut ids: Vec<_> = host
+                .status()
+                .await
+                .into_iter()
+                .filter_map(|s| s.session_id)
+                .collect();
+            ids.sort();
+            ids
+        };
+        let long_after = std::time::Instant::now() + IdlePolicy::DEFAULT.idle_timeout * 2;
+        // A server still at work, or one that cannot say, stays however long it went unused.
+        host.reap_idle_at(long_after, IdlePolicy::DEFAULT).await;
+        assert_eq!(sessions().await, ["chat", "gone"]);
+        working.store(false, Ordering::SeqCst);
+        let soon = std::time::Instant::now() + Duration::from_secs(60);
+        host.reap_idle_at(soon, IdlePolicy::DEFAULT).await;
+        assert_eq!(sessions().await, ["chat", "gone"]);
+        host.reap_idle_at(long_after, IdlePolicy::DEFAULT).await;
+        assert_eq!(sessions().await, ["gone"]);
+        host.shutdown().await;
+    }
+
     #[tokio::test]
     async fn cancellation_does_not_wait_for_migration_or_allow_late_startup() {
         let host = AgentHost::new(None);
@@ -1897,6 +2145,19 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_instructions_file_fails_the_playbook_rather_than_dropping_it() {
+        let path = crate::local::chat::instructions::path();
+        std::fs::create_dir_all(&path).unwrap();
+        let error = ProjectState::load("proj_unreadable_instructions")
+            .err()
+            .unwrap()
+            .to_string();
+        std::fs::remove_dir_all(&path).unwrap();
+        assert!(error.contains(&path.display().to_string()), "{error}");
+    }
+
     #[test]
     fn project_state_summarizes_counts_and_the_run_command() {
         let mut project = sample_project();
@@ -1909,7 +2170,7 @@ mod tests {
             experiments: 12,
             runs: 18,
             active_runs: 1,
-            compute: None,
+            ..ProjectState::default()
         };
         let existing = project_state_md(&project, &state);
         assert!(existing.contains("**12 experiments**"));

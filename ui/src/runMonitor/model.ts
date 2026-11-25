@@ -80,7 +80,7 @@ export interface RunModel {
   flag: { id: string; state: FlagState; handback?: number | null; record: Flag | null } | null;
   /** What the watcher found, in full, while the flag is unsettled. */
   flagDetail: string | null;
-  /** A Copilot flag waits on the user; the strip opens by itself. */
+  /** A flag waiting on the user opens the strip by itself. */
   needsChoice: boolean;
   /** What only the strip says under the sentence: a rule's detail, or that the agent is revising. */
   note: string | null;

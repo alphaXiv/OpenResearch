@@ -132,7 +132,6 @@ fn chat(store: &Store, id: &str, harness: &str) {
             context_usage_json: None,
             bootstrap_context: None,
             goal: None,
-            autonomy: None,
             active_leaf_id: None,
             side_parent_session_id: None,
             side_parent_leaf_id: None,

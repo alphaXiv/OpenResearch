@@ -13,7 +13,6 @@ pub mod agent_profiles;
 pub mod agent_skills;
 #[cfg(test)]
 pub(crate) mod agent_text;
-pub mod autonomy;
 pub mod bash;
 pub mod browser_cookies;
 pub mod chat;

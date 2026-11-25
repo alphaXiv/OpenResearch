@@ -9,7 +9,7 @@ const flagged = JSON.parse(readFileSync(new URL("./fixtures/runMonitor/flagged.j
 const { evidence } = flagged.flags[0];
 const run = {
   id: "r1", experimentId: "e1", projectId: "p", status: "running", createdAt: 1, startedAt: 1, updatedAt: 10, contact: null, cancelling: false, host: null, backend: { kind: "local_job" },
-  monitor: { tone: "flag", whole: 0.25, headline: null, sentence: flagged.sentence, bindings: { loss: "NaN" }, signals: flagged.view.signals, estimate: null, flag: { id: "f1", state: "waiting", mode: "copilot" }, rev: flagged.rev, generation: flagged.generation, asOf: flagged.asOf },
+  monitor: { tone: "flag", whole: 0.25, headline: null, sentence: flagged.sentence, bindings: { loss: "NaN" }, signals: flagged.view.signals, estimate: null, flag: { id: "f1", state: "waiting" }, rev: flagged.rev, generation: flagged.generation, asOf: flagged.asOf },
 };
 const experiment = { id: "e1", projectId: "p", slug: "lr", createdAt: 1, updatedAt: 1 };
 const pane = (value) => `/projects/p/tasks/s?pane=${encodeURIComponent(JSON.stringify(value))}`;

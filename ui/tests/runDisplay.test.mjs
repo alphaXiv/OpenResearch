@@ -150,13 +150,13 @@ test("a run stopped by a rule or its agent reads Auto-stopped, a revised one Rev
   assert.equal(runDisplay(run("cancelled", { outcome: { by: "agent", at: 1 } })).status, "auto_stopped");
   assert.equal(runDisplay(run("cancelled", { outcome: { by: "user", at: 1 } })).status, "cancelled");
   assert.equal(runDisplay(run("cancelled", { outcome: { by: "agent", at: 1 }, monitor: monitor("revising") })).status, "revising");
-  assert.equal(runDisplay(run("running", { monitor: monitor("flag", { id: "f", state: "waiting", mode: "copilot" }) })).status, "flagged");
-  assert.equal(runDisplay(run("running", { contact: unreachable, monitor: monitor("flag", { id: "f", state: "waiting", mode: "copilot" }) })).status, "unreachable");
+  assert.equal(runDisplay(run("running", { monitor: monitor("flag", { id: "f", state: "waiting" }) })).status, "flagged");
+  assert.equal(runDisplay(run("running", { contact: unreachable, monitor: monitor("flag", { id: "f", state: "waiting" }) })).status, "unreachable");
   assert.equal(runDisplay(run("cancelled", { contact: { type: "stopping", since: 1, count: 1 }, outcome: { by: "rule", at: 1 } })).status, "not_fully_stopped");
 });
 
 test("a finished run whose flag no one settled reads Flagged, without the pulse of a live run", () => {
-  const flag = { id: "f1", state: "waiting", mode: "copilot" };
+  const flag = { id: "f1", state: "waiting" };
   assert.equal(runDisplay({ status: "done", monitor: { flag } }).status, "flagged_ended");
   assert.equal(runDisplay({ status: "failed", monitor: { flag } }).status, "failed");
   assert.equal(runDisplay({ status: "done", monitor: { flag: null } }).status, "done");

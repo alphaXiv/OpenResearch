@@ -75,7 +75,7 @@ test("while the agent reads an ended run's flag, the user can keep its result, w
   assert.equal(named(m.experiments_stop_run()), null);
 });
 
-test("a Copilot flag queued for review only shows the status", async () => {
+test("a flag queued for review only shows the status", async () => {
   const { container } = await strip("asking");
   assert.equal(container.querySelector('[data-run-frame] [role="status"]').textContent, m.chat_queued());
   assert.equal(named(m.run_flag_keep_going()), null);

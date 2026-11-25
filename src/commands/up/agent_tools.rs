@@ -444,6 +444,17 @@ async fn call(
                 )
                 .await
         }
+        // Unlisted: `orx instructions propose` calls it, so every agent reaches it with or without MCP.
+        "propose_instructions" => {
+            let content = args
+                .get("content")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("`content` is required."))?;
+            state
+                .chat
+                .propose_instructions(&caller.id, content.to_string())
+                .await
+        }
         "cancel" => {
             let store = Store::open()?;
             let target = chat(&store, text(args, "chatId")?)?;
@@ -1134,7 +1145,6 @@ mod tests {
                 context_usage_json: None,
                 bootstrap_context: None,
                 goal: None,
-                autonomy: None,
                 active_leaf_id: None,
                 side_parent_session_id: side_parent.map(str::to_string),
                 side_parent_leaf_id: None,

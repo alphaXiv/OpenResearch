@@ -117,8 +117,7 @@ impl Store {
                          FROM run_monitor_events e WHERE e.run_id = r.id AND e.kind = 'choice'
                            AND json_extract(e.body_json, '$.flagId') = w.flag_id
                          ORDER BY e.seq DESC LIMIT 1
-                     ) ELSE s.autonomy IS NOT 'copilot'
-                         AND (r.status NOT IN ('done', 'failed', 'lost')
+                     ) ELSE (r.status NOT IN ('done', 'failed', 'lost')
                               OR COALESCE(r.ended_at, r.updated_at) < w.created_at)
                          AND NOT EXISTS (SELECT 1 FROM run_monitor_events e
                              WHERE e.run_id = r.id AND e.kind = 'choice'
@@ -340,7 +339,7 @@ impl Store {
         let available: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM runs r JOIN chat_sessions s ON s.id = ?3 WHERE r.id = ?1
                 AND r.cancel_requested = 0 AND r.cancel_accepted_at IS NULL
-                AND s.archived = 0 AND s.autonomy IS NOT 'copilot'
+                AND s.archived = 0
                 AND ?4 = (SELECT n.id FROM flag_wakes n WHERE n.run_id = r.id
                     AND n.chat_session_id = s.id AND n.flag_id = ?2
                     AND (n.dedupe IN ('initial', 'remind', 'result') OR n.dedupe GLOB 'resume:*')
@@ -578,7 +577,7 @@ mod tests {
     fn released_drain_cannot_claim_a_flag_reminder() {
         let dir = TemporaryDirectory::new("orx-flag-downgrade").unwrap();
         let store = Store::open_at(dir.path().to_path_buf()).unwrap();
-        store.put_chat_session("owner", "claude-code", None);
+        store.put_chat_session("owner", "claude-code");
         let run = run_fixture("run", "running", Some("owner"));
         store.upsert_run(&run).unwrap();
         let flag = crate::engine::flags::new_flag(&store, &run, json!({"id": "f1"}), true).unwrap();
@@ -664,7 +663,7 @@ mod tests {
         drop(old);
 
         let store = Store::open_at(dir.path().to_path_buf()).unwrap();
-        store.put_chat_session("owner", "claude-code", None);
+        store.put_chat_session("owner", "claude-code");
         let mut run = run_fixture("released-run", "done", Some("owner"));
         run.ended_at = Some(1);
         store.upsert_run(&run).unwrap();
@@ -732,7 +731,6 @@ mod tests {
     #[test]
     fn admission_withdraws_claimed_automatic_wakes_when_their_basis_changes() {
         for change in [
-            "copilot",
             "done",
             "dismiss",
             "keep",
@@ -742,7 +740,7 @@ mod tests {
         ] {
             let dir = TemporaryDirectory::new("orx-flag-admission").unwrap();
             let store = Store::open_at(dir.path().to_path_buf()).unwrap();
-            store.put_chat_session("owner", "claude-code", None);
+            store.put_chat_session("owner", "claude-code");
             let mut run = run_fixture("run", "running", Some("owner"));
             store.upsert_run(&run).unwrap();
             let flag =
@@ -753,9 +751,6 @@ mod tests {
             let claim = &batch[0].client_turn_id;
 
             match change {
-                "copilot" => store
-                    .set_chat_session_autonomy("owner", Autonomy::Copilot)
-                    .unwrap(),
                 "done" => store.set_chat_session_archived("owner", true).unwrap(),
                 "dismiss" => store.dismiss_run_notices("run", "owner", 3).unwrap(),
                 "keep" => {
@@ -804,7 +799,7 @@ mod tests {
     fn an_ask_claimed_before_the_run_ends_is_rewritten_after_its_result() {
         let dir = TemporaryDirectory::new("orx-ended-ask").unwrap();
         let store = Store::open_at(dir.path().to_path_buf()).unwrap();
-        store.put_chat_session("owner", "claude-code", None);
+        store.put_chat_session("owner", "claude-code");
         let mut run = run_fixture("run", "running", Some("owner"));
         store.upsert_run(&run).unwrap();
         let body = json!({"id": "f1", "text": "Review the loss"});
@@ -825,9 +820,6 @@ mod tests {
         let batch = store.run_notice_batch_at("owner", 3).unwrap();
         assert_eq!(batch.len(), 1);
         assert!(batch[0].body.contains("--stop"));
-        store
-            .set_chat_session_autonomy("owner", Autonomy::Copilot)
-            .unwrap();
 
         store.watch_legacy_run("run", Some(("running", 1))).unwrap();
         run.status = "done".into();
@@ -871,7 +863,7 @@ mod tests {
     fn a_follow_up_cannot_queue_after_the_latest_wake_was_carried_into_a_user_turn() {
         let dir = TemporaryDirectory::new("orx-flag-follow-up").unwrap();
         let store = Store::open_at(dir.path().to_path_buf()).unwrap();
-        store.put_chat_session("owner", "claude-code", None);
+        store.put_chat_session("owner", "claude-code");
         let mut run = run_fixture("run", "running", Some("owner"));
         store.upsert_run(&run).unwrap();
         let flag = crate::engine::flags::new_flag(&store, &run, json!({"id": "f1"}), true).unwrap();
@@ -905,7 +897,7 @@ mod tests {
     fn a_settled_flag_withdraws_a_queued_ask() {
         let dir = TemporaryDirectory::new("orx-flag-ask-retirement").unwrap();
         let store = Store::open_at(dir.path().to_path_buf()).unwrap();
-        store.put_chat_session("owner", "claude-code", Some("copilot"));
+        store.put_chat_session("owner", "claude-code");
         let run = run_fixture("run", "running", Some("owner"));
         store.upsert_run(&run).unwrap();
         let flag = crate::engine::flags::new_flag(&store, &run, json!({"id": "f1"}), true).unwrap();
@@ -940,7 +932,7 @@ mod tests {
     fn a_flag_superseded_by_the_result_is_not_a_delivery_error() {
         let dir = TemporaryDirectory::new("orx-flag-retirement").unwrap();
         let store = Store::open_at(dir.path().to_path_buf()).unwrap();
-        store.put_chat_session("owner", "claude-code", None);
+        store.put_chat_session("owner", "claude-code");
         let mut run = run_fixture("run", "running", Some("owner"));
         store.upsert_run(&run).unwrap();
         let flag = NewFlag {

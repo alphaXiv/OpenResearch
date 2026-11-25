@@ -1,4 +1,4 @@
-//! When `orx up` releases idle resident agent children (Claude, Codex). Each
+//! When `orx up` releases idle resident agent children (Claude, Codex, OpenCode, ACP). Each
 //! holds a few hundred MB, so low-RAM machines keep fewer of them warm; the
 //! next message to a released chat respawns and resumes it.
 
