@@ -2846,11 +2846,13 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
             // window arrives later on `result`, so report the token count only.
             // (Sub-agent messages returned early above, so their smaller counts
             // never reach — and never clobber — the main session's meter.)
-            if let Some(used) = claude_used_tokens(event.pointer("/message/usage")) {
+            let usage = event.pointer("/message/usage");
+            if let Some(used) = claude_used_tokens(usage) {
                 state.had_activity |= used > 0;
                 ctx.report_usage(ContextUsage {
                     used_tokens: used,
                     context_window: None,
+                    cache_ttl_secs: claude_cache_ttl_secs(usage),
                     ..Default::default()
                 });
             }
@@ -3132,6 +3134,25 @@ fn claude_used_tokens(usage: Option<&Value>) -> Option<u64> {
         return None;
     }
     Some(keys.iter().filter_map(|k| field(k)).sum())
+}
+
+/// The lifetime of the cache this request wrote, read off the API's per-TTL
+/// write buckets; `None` for a request that only read the cache.
+fn claude_cache_ttl_secs(usage: Option<&Value>) -> Option<u64> {
+    let written = |bucket: &str| {
+        usage
+            .and_then(|usage| usage.pointer(&format!("/cache_creation/{bucket}")))
+            .and_then(Value::as_u64)
+            .is_some_and(|tokens| tokens > 0)
+    };
+    // The shorter bucket wins: that part of the prompt goes cold first.
+    if written("ephemeral_5m_input_tokens") {
+        Some(5 * 60)
+    } else if written("ephemeral_1h_input_tokens") {
+        Some(60 * 60)
+    } else {
+        None
+    }
 }
 
 /// Fold the terminal `result` event's usage into the meter: `modelUsage` reports
@@ -5625,6 +5646,45 @@ mod tests {
         let usage = ctx.context_usage.expect("assistant usage reported");
         assert_eq!(usage.used_tokens, 3 + 27557 + 100 + 4);
         assert_eq!(usage.context_window, None);
+    }
+
+    #[test]
+    fn cache_lifetime_follows_the_bucket_claude_wrote_and_survives_cache_hits() {
+        let mut ctx = TurnCtx::test_stub();
+        let assistant = |cache_creation: &str| -> Value {
+            serde_json::from_str(&format!(
+                r#"{{"type":"assistant","message":{{"id":"m1","content":[{{"type":"text","text":"hi"}}],
+                     "usage":{{"input_tokens":3,"cache_creation_input_tokens":900,"cache_read_input_tokens":100,"output_tokens":4,
+                       "cache_creation":{cache_creation}}}}}}}"#
+            ))
+            .unwrap()
+        };
+        let ttl = |ctx: &TurnCtx| ctx.context_usage.as_ref().unwrap().cache_ttl_secs;
+
+        apply_event(
+            &mut ctx,
+            &mut TurnState::default(),
+            &assistant(r#"{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":900}"#),
+        );
+        assert_eq!(ttl(&ctx), Some(3600));
+
+        apply_event(
+            &mut ctx,
+            &mut TurnState::default(),
+            &assistant(r#"{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}"#),
+        );
+        assert_eq!(
+            ttl(&ctx),
+            Some(3600),
+            "a pure cache hit keeps the known lifetime"
+        );
+
+        apply_event(
+            &mut ctx,
+            &mut TurnState::default(),
+            &assistant(r#"{"ephemeral_5m_input_tokens":900,"ephemeral_1h_input_tokens":0}"#),
+        );
+        assert_eq!(ttl(&ctx), Some(300));
     }
 
     #[test]

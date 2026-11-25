@@ -340,6 +340,7 @@ pub(super) async fn deliver_news(
                 return Err(error);
             }
         };
+        chat.compact_before_resume(&session_id, false).await;
         let submitted = chat.send_orx_messages(&session_id, pieces, guard).await;
         let told = matches!(submitted, Ok(TurnSubmission::Started(_)));
         for (item, token) in &claimed {

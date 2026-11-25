@@ -122,6 +122,7 @@ import {
   LogIn,
   MessageSquareQuote,
   MessagesSquare,
+  Minimize2,
   MoreHorizontal,
   NotebookText,
   Paperclip,
@@ -311,6 +312,8 @@ import { PaperTitle } from "./PaperTitle";
 
 const TOOL_LINE_CLASS_NAME = "tool-line flex-1 min-w-0 line-clamp-2 break-words text-base leading-6";
 const TOOL_OUTPUT_CLASS_NAME = "tool-output py-1.5 px-2.5 font-mono text-xs text-subtext whitespace-pre-wrap wrap-anywhere max-h-65 overflow-y-auto bg-background border border-border-variant rounded-sm";
+/** Below this context, rereading a cold chat costs less than compacting it; matches the server's floor. */
+const COLD_COMPACT_MIN_TOKENS = 200_000;
 const SELECTION_ACTION_GAP_PX = 8;
 const CHAT_ANNOTATION_HIGHLIGHT_NAME = "chat-annotations";
 const SIDE_CHAT_ANNOTATION_HIGHLIGHT_NAME = "side-chat-annotations";
@@ -5869,6 +5872,28 @@ export function ChatPanel({
   }, [projectId, state.busySessions, sessions, activeId, mainView]);
 
   const busy = activeId ? state.busySessions.has(activeId) : false;
+
+  // The agent's last request warmed its prompt cache; past the lifetime it reported, the next
+  // message would reread the whole chat at full price, so the composer offers to compact first.
+  const cacheTtlSecs = (openSession?.contextUsage?.usedTokens ?? 0) >= COLD_COMPACT_MIN_TOKENS
+    ? openSession?.contextUsage?.cacheTtlSecs
+    : undefined;
+  const cacheWarmUntil = useMemo(() => {
+    if (!cacheTtlSecs) return null;
+    const lastReplyAt = Math.max(0, ...allMessages.map((message) => message.role === "assistant" ? message.completedAt ?? 0 : 0));
+    return lastReplyAt ? lastReplyAt + cacheTtlSecs * 1000 : null;
+  }, [allMessages, cacheTtlSecs]);
+  const [cacheCold, setCacheCold] = useState(false);
+  useEffect(() => {
+    const wait = cacheWarmUntil === null ? null : cacheWarmUntil - Date.now();
+    setCacheCold(wait !== null && wait <= 0);
+    if (wait === null || wait <= 0) return;
+    const timer = window.setTimeout(() => setCacheCold(true), wait);
+    return () => window.clearTimeout(timer);
+  }, [cacheWarmUntil]);
+  const [fullContextSessionId, setFullContextSessionId] = useState<string | null>(null);
+  const fullContext = fullContextSessionId === activeId;
+
   const canFork = !busy && !!activeHarness?.agentReady;
   const hasPendingTailTool = busy && streamTailTool(messages) != null;
   const hasStreamingText = busy && streamTailIsText(messages);
@@ -6368,6 +6393,8 @@ export function ChatPanel({
     const takeover = openSession && effective && (effective.harness !== openSession.harness
       || (effective.profile ?? null) !== (openSession.profile ?? null)) ? effective : undefined;
     const mode = retry ? retry.mode : busy && steering && !queue && !takeover && !planRequested && !goalRequested ? "steer" : null;
+    // The compaction holds the turn, so the message parks behind it and runs on the compacted chat.
+    const compactFirst = autoCompactOffered && !fullContext && !retry && !takeover;
     const turnOpts = retry?.options ?? (effective ? {
       agent: takeover,
       model: effective.model,
@@ -6383,6 +6410,7 @@ export function ChatPanel({
       if (inSourceScope()) {
         if (turnOpts.agent) setSessionOverride({});
         setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
+        setFullContextSessionId(null);
         if (retry) {
           setUnconfirmedSend(null);
           composerLiveRef.current = { ...composerLiveRef.current, unconfirmedSend: null };
@@ -6410,7 +6438,7 @@ export function ChatPanel({
       setAttachError(null);
       setImageRefusedFor(null);
     };
-    if (busy || turnOpts.agent) {
+    if (busy || turnOpts.agent || compactFirst) {
       // A turn is already running. Steering hands the message to it now, and
       // the delivered text comes back inline on the assistant message. Parking
       // (no steering support, or the queue chord) instead runs it when the turn
@@ -6444,6 +6472,12 @@ export function ChatPanel({
       let submitted = false;
       try {
         const sendBusy = async () => {
+          if (compactFirst) {
+            const { message } = await mutCompactChatSession.runAsHeadlessPromise(workspace, sid, {});
+            dispatch({ type: "upsertMessage", sessionId: sid, message, onlyIfMissing: true });
+            // Compacting unarchives the session, so the archived filter would hide it.
+            if (inSourceScope() && sessionFilter === "archived") setSessionFilter("active");
+          }
           await persistMessageGoal(sid);
           submitted = true;
           return sendChatMessage(
@@ -6886,6 +6920,7 @@ export function ChatPanel({
 
   const questions = useQuestions(activeId, pendingQuestions, respond);
   const asking = questions.part !== null;
+  const autoCompactOffered = cacheCold && !busy && !asking && !bashMode && !!activeHarness?.supportsCompaction;
   const showQuestion = questions.show;
   const searchedPartId = focusedMessage?.sessionId === activeId ? focusedMessage.partId : undefined;
   useEffect(() => {
@@ -8524,6 +8559,21 @@ export function ChatPanel({
                       e.target.value = ""; // let the same file be re-picked
                     }}
                   />
+                  {autoCompactOffered && (
+                    <Tooltip interactive content={fullContext ? m.chat_full_context_tooltip() : m.chat_auto_compact_tooltip()}>
+                      <Button
+                        type="button"
+                        role="switch"
+                        aria-checked={!fullContext}
+                        variant={fullContext ? "default" : "warning"}
+                        className="rounded-full"
+                        onClick={() => setFullContextSessionId(fullContext ? null : activeId)}
+                      >
+                        <Minimize2 size={16} />
+                        {fullContext ? m.chat_full_context() : m.chat_auto_compact()}
+                      </Button>
+                    </Tooltip>
+                  )}
                   {!asking && (
                     <Tooltip interactive content={m.chat_panel_attach_files()}>
                       <IconButton

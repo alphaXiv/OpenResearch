@@ -1302,6 +1302,10 @@ pub struct ContextUsage {
     /// say or has auto-compaction off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compact_at: Option<u64>,
+    /// How long the provider keeps this chat's prompt cache, as the harness
+    /// last reported it; absent when the harness doesn't say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_ttl_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2515,11 +2519,12 @@ impl ChatHost {
         Ok(())
     }
 
-    /// Compacts the chat before a flag wakes its agent, when its context is past
-    /// [`WAKE_COMPACT_SHARE`] of its window, in the turn slot the wake has already claimed, so no
-    /// queued message runs between the two. A failure shows on the compaction's row and the wake
-    /// goes ahead with the history intact. Unknown usage compacts nothing.
-    async fn compact_before_wake(self: &Arc<Self>, session_id: &str) {
+    /// Compacts the chat before orx resumes it on its own, in the turn slot the caller already
+    /// holds, so no queued message runs between the two: once the agent's prompt cache has gone
+    /// cold, and before a flag's wake once its context is past [`WAKE_COMPACT_SHARE`] of its
+    /// window. A failure shows on the compaction's row and the resume goes ahead with the history
+    /// intact. Unknown usage compacts nothing.
+    async fn compact_before_resume(self: &Arc<Self>, session_id: &str, flag_wake: bool) {
         let Ok(store) = Store::open() else { return };
         let Ok(Some(session)) = store.get_chat_session(session_id) else {
             return;
@@ -2527,16 +2532,35 @@ impl ChatHost {
         if session.archived {
             return;
         }
-        let usage = session
+        let Some(usage) = session
             .context_usage_json
             .as_deref()
-            .and_then(|json| serde_json::from_str::<ContextUsage>(json).ok());
-        let Some((used, window)) = usage
-            .and_then(|usage| Some((usage.used_tokens, usage.context_window.filter(|w| *w > 0)?)))
+            .and_then(|json| serde_json::from_str::<ContextUsage>(json).ok())
         else {
             return;
         };
-        if (used as f64) < WAKE_COMPACT_SHARE * window as f64 {
+        let crowded = flag_wake
+            && usage
+                .context_window
+                .filter(|window| *window > 0)
+                .is_some_and(|window| {
+                    usage.used_tokens as f64 >= WAKE_COMPACT_SHARE * window as f64
+                });
+        let cold = usage.used_tokens >= COLD_COMPACT_MIN_TOKENS
+            && usage.cache_ttl_secs.is_some_and(|ttl| {
+                let last_reply = store
+                    .list_chat_messages(session_id)
+                    .ok()
+                    .and_then(|messages| {
+                        messages
+                            .iter()
+                            .filter(|message| message.role == "assistant")
+                            .filter_map(|message| message.completed_at)
+                            .max()
+                    });
+                last_reply.is_some_and(|at| at + ttl as i64 * 1000 <= now_ms())
+            });
+        if !crowded && !cold {
             return;
         }
         let supported = crate::local::harness::session_harness(&session.harness, session_id)
@@ -2557,7 +2581,7 @@ impl ChatHost {
             Err(error) => Some(error),
         };
         if let Some(error) = &settled {
-            eprintln!("orx up: compacting chat {session_id} before a flag's wake: {error:#}");
+            eprintln!("orx up: compacting chat {session_id} before resuming it: {error:#}");
         }
         let (status, detail) = match settled {
             Some(error) => ("error", Some(error.to_string())),
@@ -10397,8 +10421,8 @@ impl TurnCtx {
     }
 
     /// Record the latest context-window usage a harness reported and stream it
-    /// live over `chat.usage`. Merging: a report that omits `context_window`
-    /// or `compact_at` inherits the previously-known value (an `assistant`
+    /// live over `chat.usage`. Merging: a report that omits `context_window`,
+    /// `compact_at` or `cache_ttl_secs` inherits the previously-known value (an `assistant`
     /// event carries the token count but not the window; the `result` event
     /// fills the window).
     pub fn report_usage(&mut self, mut usage: ContextUsage) {
@@ -10408,6 +10432,9 @@ impl TurnCtx {
             }
             if usage.compact_at.is_none() {
                 usage.compact_at = prev.compact_at;
+            }
+            if usage.cache_ttl_secs.is_none() {
+                usage.cache_ttl_secs = prev.cache_ttl_secs;
             }
         }
         self.publish_usage(usage);
@@ -11188,6 +11215,9 @@ fn materialize_unfinished_turns(
 
 /// The share of its context window past which a chat is compacted before a flag wakes it.
 const WAKE_COMPACT_SHARE: f64 = 0.70;
+/// Below this context, rereading a cold chat costs less than compacting it; Claude Code's own
+/// idle compaction uses the same floor. The composer's `COLD_COMPACT_MIN_TOKENS` matches it.
+const COLD_COMPACT_MIN_TOKENS: u64 = 200_000;
 
 #[derive(Debug)]
 struct PermanentRunNoticeError(String);
@@ -11400,12 +11430,11 @@ async fn process_run_notices(
             continue;
         }
         let flagged = notices[0].is_flag_wake();
-        if flagged
-            && store
-                .get_chat_turn_by_client_id(&session_id, &notices[0].client_turn_id)?
-                .is_none()
+        if store
+            .get_chat_turn_by_client_id(&session_id, &notices[0].client_turn_id)?
+            .is_none()
         {
-            chat.compact_before_wake(&session_id).await;
+            chat.compact_before_resume(&session_id, flagged).await;
         }
         match send_run_notice_batch(chat, &session_id, &notices, guard).await {
             Ok(submission @ (TurnSubmission::Started(_) | TurnSubmission::Existing(_))) => {
@@ -13879,6 +13908,57 @@ mod bridge_tests {
             created_at: 1,
             updated_at: 1,
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn orx_compacts_a_large_chat_it_resumes_only_once_its_cache_went_cold() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let host = Arc::new(test_host());
+        let store = Store::open().unwrap();
+        let compactions = |id: &str| {
+            store
+                .list_chat_messages(id)
+                .unwrap()
+                .iter()
+                .filter(|message| message.parts_json.contains(COMPACTED_TOOL))
+                .count()
+        };
+        for (id, used, replied_ago_ms) in [
+            ("cold", 200_000, 301_000),
+            ("warm", 200_000, 1_000),
+            ("small", 199_999, 301_000),
+        ] {
+            let usage = format!(r#"{{"usedTokens":{used},"cacheTtlSecs":300}}"#);
+            let mut session = bare_session();
+            session.id = id.into();
+            store.create_chat_session(&session).unwrap();
+            store.set_chat_session_context_usage(id, &usage).unwrap();
+            for (message, role, parent) in [("u", "user", None), ("a", "assistant", Some("u"))] {
+                let at = now_ms() - replied_ago_ms;
+                store
+                    .upsert_chat_message_on_branch(&StoredChatMessage {
+                        id: format!("{id}-{message}"),
+                        session_id: id.into(),
+                        role: role.into(),
+                        parts_json: serde_json::to_string(&vec![WirePart::text("text", "hi")])
+                            .unwrap(),
+                        created_at: at,
+                        completed_at: Some(at),
+                        parent_id: parent.map(|parent| format!("{id}-{parent}")),
+                        base_native_session_id: None,
+                        result_native_session_id: None,
+                        result_native_message_id: None,
+                        native_harness: None,
+                    })
+                    .unwrap();
+            }
+            host.compact_before_resume(id, false).await;
+        }
+        assert_eq!(compactions("cold"), 1);
+        assert_eq!(compactions("warm"), 0);
+        assert_eq!(compactions("small"), 0);
     }
 
     #[tokio::test(flavor = "current_thread")]
