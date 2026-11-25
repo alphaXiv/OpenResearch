@@ -4,8 +4,7 @@ import { autoDir } from "../../i18n";
 import { m } from "../../paraglide/messages.js";
 import type { RunModel } from "../../runMonitor/model";
 import type { TabOpenIntent } from "../../tabPreview";
-import { useWorkspace } from "../../workspace";
-import { Button, Tooltip } from "../ui";
+import { Tooltip } from "../ui";
 import { cn } from "../ui/cn";
 import { Controls } from "./Controls";
 import { Delta } from "./Delta";
@@ -43,9 +42,7 @@ export interface RunLabel {
 }
 
 /** The collapsed run: one sentence, how it compares, the time left. The bar is its underline. A `label` puts it among several. */
-export function RunLine({ model, agent, label, onToggle, onOpenRunPage, expanded = false, expandable = true, children }: { expandable?: boolean; expanded?: boolean; children?: ReactNode; model: RunModel; agent: string | null; label?: RunLabel; onToggle: () => void; onOpenRunPage?: (run: Run, intent: TabOpenIntent) => void }) {
-  const { requestHostConnect } = useWorkspace().events;
-  const host = model.connectHost;
+export function RunLine({ model, agent, label, actions, error, onToggle, onOpenRunPage, expanded = false, expandable = true, children }: { actions?: ReactNode; error?: string | null; expandable?: boolean; expanded?: boolean; children?: ReactNode; model: RunModel; agent: string | null; label?: RunLabel; onToggle: () => void; onOpenRunPage?: (run: Run, intent: TabOpenIntent) => void }) {
   const state = expanded && model.flag?.record ? null : model.flag?.state;
   const editing = model.tone === "revising";
   const name = autoDir(agent ?? m.chat_the_agent());
@@ -64,6 +61,7 @@ export function RunLine({ model, agent, label, onToggle, onOpenRunPage, expanded
   const { text, title } = label ?? { text: model.name, title: model.name };
   // Under the sentence, the time starts where the sentence does: past the mark and the gap.
   const under = cn("@max-[30rem]:order-last", model.tone === "flag" ? "@max-[30rem]:ms-[22px]" : "@max-[30rem]:ms-[15px]");
+  const besideMark = model.tone === "flag" ? "ms-[22px]" : "ms-[15px]";
   return (
     <div data-run-frame={label ? undefined : ""} role="group" aria-label={title} className={label ? cn("relative", model.needsChoice && "bg-accent-amber-subtle") : runFrame(model)}>
       <div className="flex min-h-9 min-w-0 items-center gap-x-2 py-1 ps-3 pe-1.5 @max-[30rem]:flex-wrap @max-[30rem]:items-start">
@@ -71,8 +69,8 @@ export function RunLine({ model, agent, label, onToggle, onOpenRunPage, expanded
         <RunStatus model={model} label={label ? text : undefined} descriptionId={time?.why ? whyId : undefined} onOpenRunPage={onOpenRunPage} expanded={expanded} />
         {working && <span className={cn("shrink-0 whitespace-nowrap @max-[40rem]:hidden", editing || state === "agent_looking" ? "tool-running-shimmer" : "text-ink-subtext")}>{working}</span>}
         {!expanded && <Headline model={model} />}
-        {host && <Button size="small" onClick={() => requestHostConnect(host)}>{m.settings_connect()}</Button>}
-        {time && <span aria-hidden="true" className="hidden basis-full @max-[30rem]:order-last @max-[30rem]:block" />}
+        {(time || actions) && <span aria-hidden="true" className="hidden basis-full @max-[30rem]:order-last @max-[30rem]:block" />}
+        {actions && <div className={cn("shrink-0", under)}>{actions}</div>}
         {time && (time.why ? (
           <Tooltip content={time.tip} className={cn("shrink-0 rounded-xs", under)}>
             <span className="whitespace-nowrap tabular-nums text-ink-subtext">{time.text}</span>
@@ -81,6 +79,7 @@ export function RunLine({ model, agent, label, onToggle, onOpenRunPage, expanded
         ) : <span className={cn("whitespace-nowrap tabular-nums text-ink-subtext", under, stale ? "max-w-3/5 shrink-0 truncate" : "shrink-0")}>{time.text}</span>)}
         <Controls model={model} expandable={expandable} expanded={expanded} onToggle={onToggle} />
       </div>
+      {error && <p role="alert" className={cn("m-0 ps-3 pe-3 pb-2 text-xs text-accent-red wrap-anywhere", besideMark)}>{error}</p>}
       {children}
       <Rail model={model} kind="edge" />
     </div>

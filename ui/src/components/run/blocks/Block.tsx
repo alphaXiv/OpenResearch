@@ -1,9 +1,10 @@
-import { Component, memo, type ReactNode } from "react";
+import { memo, type ReactNode } from "react";
 import { autoDir } from "../../../i18n";
 import { m } from "../../../paraglide/messages.js";
 import { getLocale } from "../../../paraglide/runtime.js";
 import type { Tone } from "../../../runMonitor/model";
 import type { RunMonitor, ViewBlock } from "../../../runMonitor/types";
+import { Boundary } from "../../ui/Boundary";
 import { Bars } from "./Bars";
 import { Cells } from "./Cells";
 import { Chart } from "./Chart";
@@ -44,21 +45,9 @@ function titleOf(block: ViewBlock, monitor: RunMonitor): string | null {
 }
 
 /** A block that throws says so in its place and the rest of the view keeps drawing. A newer revision tries it again. */
-export class Boundary extends Component<{ title: string; rev: number; children: ReactNode }, { failed: boolean }> {
-  state = { failed: false };
-  static getDerivedStateFromError() {
-    return { failed: true };
-  }
-  componentDidCatch(error: unknown) {
-    console.error("run view block failed to draw", error);
-  }
-  componentDidUpdate(previous: { rev: number }) {
-    if (previous.rev !== this.props.rev && this.state.failed) this.setState({ failed: false });
-  }
-  render() {
-    if (!this.state.failed) return this.props.children;
-    return <p className="m-0 text-xs text-ink-subtext">{m.run_block_failed({ title: autoDir(this.props.title) })}</p>;
-  }
+export function BlockBoundary({ title, rev, children }: { title: string; rev: number; children: ReactNode }) {
+  const failed = <p className="m-0 text-xs text-ink-subtext">{m.run_block_failed({ title: autoDir(title) })}</p>;
+  return <Boundary name="run view block" rev={rev} fallback={failed}>{children}</Boundary>;
 }
 
 /** Stats and text are the page's alone: at smaller sizes the headline is the number and the sentence the words. */
@@ -94,7 +83,7 @@ export const Block = memo(function Block(props: BlockProps) {
   const named = title ?? m.run_block_this();
   const body = <Body {...props} title={named} />;
   return (
-    <Boundary title={named} rev={props.monitor.rev}>
+    <BlockBoundary title={named} rev={props.monitor.rev}>
       {props.size === "strip" || title === null ? body : (
         <section aria-label={title}>
           <div className="mb-2.5 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
@@ -104,6 +93,6 @@ export const Block = memo(function Block(props: BlockProps) {
           {body}
         </section>
       )}
-    </Boundary>
+    </BlockBoundary>
   );
 });

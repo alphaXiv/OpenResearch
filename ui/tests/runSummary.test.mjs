@@ -134,7 +134,10 @@ test("who needs attention comes first, before any leader", () => {
   const choice = model("d", summary({ tone: "flag", flag: { id: "f", state: "waiting", text: "Loss went to **NaN**." } }));
   assert.match(said([...models, choice]).text, /^d · Flagged: Loss went to \*\*NaN\*\*\.$/);
   const lost = model("e", summary(), { contact: { type: "unreachable", since: now - 60_000, cause: "timed out" }, host: "lab-a40", backend: { kind: "ssh_job" } });
-  assert.match(said([model("a", scored(1.3)), lost]).text, /^e · /);
+  const withLost = [model("a", scored(1.3)), lost];
+  assert.match(said(withLost).text, /Can't reach lab-a40/);
+  const opened = summarize(withLost, shortLabels(["a", "e"]), null, now, true);
+  assert.equal(opened.parts[0].text, "", "the run row already has the contact message");
   const byUser = model("f", summary({ tone: "stopped" }), { status: "cancelled", endedAt: now, outcome: { by: "user", at: now } });
   const byRule = model("g", summary({ tone: "stopped" }), { status: "cancelled", endedAt: now, outcome: { by: "rule", at: now, rule: { id: "r", name: "nan", text: "Loss went to NaN.", does: "stop" } } });
   assert.doesNotMatch(said([model("a", summary()), byUser]).text, /^f · /);
