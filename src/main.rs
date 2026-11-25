@@ -167,6 +167,10 @@ enum Command {
     /// to its maintainers. Filed by the agent; see the `orx-feedback` skill.
     Feedback(FeedbackArgs),
 
+    /// Tell the status report orx keeps for the user that a result changed the plan. Runs from
+    /// an OpenResearch chat; orx writes the report itself.
+    Milestone(MilestoneArgs),
+
     /// Internal: the Claude plan-mode `PreToolUse` hook body. Reads the hook
     /// payload on stdin and prints an allow decision for read-only `orx`
     /// inspection; not a user command.
@@ -1084,6 +1088,13 @@ pub struct FeedbackArgs {
     pub quote: Option<String>,
 }
 
+#[derive(Args, Debug)]
+pub struct MilestoneArgs {
+    /// What changed, in at most 500 characters, such as "-0.3 BLEU against the baseline".
+    #[arg(allow_hyphen_values = true)]
+    pub note: String,
+}
+
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[value(rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
@@ -1707,6 +1718,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Up(_) => "up",
         Command::Telemetry(_) => "telemetry",
         Command::Feedback(_) => "feedback",
+        Command::Milestone(_) => "milestone",
         Command::PlanGate => "plan-gate",
         Command::InvocationGate => "invocation-gate",
         Command::Mcp => "mcp",
@@ -1777,6 +1789,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         }
         Command::Telemetry(args) => commands::telemetry::run(args).await,
         Command::Feedback(args) => commands::feedback::run(args).await,
+        Command::Milestone(args) => commands::milestone::run(args).await,
         // Handled before dispatch (fast path, no telemetry/update check).
         Command::PlanGate => commands::plan_gate::run().await,
         Command::InvocationGate => unreachable!("handled before dispatch"),

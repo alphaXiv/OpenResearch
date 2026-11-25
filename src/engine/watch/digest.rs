@@ -299,7 +299,7 @@ pub(super) fn credentials<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<Optio
 
 /// Takes out of `value` every string, and every entry whose name, holds what looks like a
 /// credential, telling `found` the kind of each.
-fn scrub(value: &mut Value, found: &mut dyn FnMut(&'static str)) {
+pub(super) fn scrub(value: &mut Value, found: &mut dyn FnMut(&'static str)) {
     match value {
         Value::String(text) => {
             if let Some(kind) = crate::local::share::find_secret(text) {

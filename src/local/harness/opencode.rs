@@ -34,8 +34,8 @@ use super::options::{
     HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
 };
 use super::{
-    Adoption, CompactCtx, CompactOutcome, Harness, OneShot, ResumeAction, TurnFailure, TurnOutcome,
-    TurnResult,
+    Adoption, CompactCtx, CompactOutcome, Harness, OneShot, OneShotReply, ResumeAction,
+    TurnFailure, TurnOutcome, TurnResult,
 };
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
@@ -184,11 +184,25 @@ impl Harness for OpenCode {
     }
 
     async fn run_one_shot(&self, request: OneShot<'_>) -> Result<String> {
+        Ok(self.one_shot_without_tools(request).await?.text)
+    }
+
+    /// OpenCode's generate route sends the model one request that declares no tools, and runs no
+    /// agent loop that could call one; a model that answers with a tool call anyway answers no text.
+    fn runs_without_tools(&self) -> bool {
+        true
+    }
+
+    async fn one_shot_without_tools(&self, request: OneShot<'_>) -> Result<OneShotReply> {
         let _in_use = super::managed::OPENCODE_IN_USE.read().await;
         let model = selected_generation_model(request.model)?.to_owned();
         let binary = crate::local::opencode::resolve_binary().await?;
         let message = format!("{}\n\n{}", request.system, request.prompt);
-        v2::generate(binary, Some(model), message, request.timeout).await
+        let text = v2::generate(binary, Some(model.clone()), message, request.timeout).await?;
+        if text.trim().is_empty() {
+            return Err(anyhow!("{model} answered with no text"));
+        }
+        Ok(OneShotReply { text, usage: None })
     }
 
     async fn detect(&self) -> Option<HarnessInfo> {
@@ -627,7 +641,14 @@ pub(crate) fn delete_found_provider(id: &str) -> Result<()> {
         })?;
     }
     if found.sources.contains(&"auth") {
-        if let Some(path) = opencode_auth_path() {
+        native_store::opencode_database::sign_out_everywhere(
+            &native_store::opencode_db(NativeStore::Isolated),
+            &native_store::opencode_db(NativeStore::Legacy),
+            id,
+        )?;
+        if let Some(path) =
+            opencode_auth_path().filter(|_| auth_json_providers().iter().any(|p| p == id))
+        {
             rewrite_json(&path, Some(0o600), |auth| {
                 if let Some(auth) = auth.as_object_mut() {
                     auth.retain(|key, _| key != id);
@@ -739,8 +760,24 @@ pub(crate) fn free_models_offered() -> bool {
         .map_or(true, |state| state.opencode_free_models)
 }
 
-/// Providers opencode is signed into (its auth.json is `{provider: {type}}`).
+/// Providers the user's own OpenCode is signed into: OpenCode 1's auth.json and OpenCode 2's database.
 fn opencode_providers() -> Vec<String> {
+    let mut ids = auth_json_providers();
+    let db = native_store::opencode_db(NativeStore::Legacy);
+    match native_store::opencode_database::credential_integrations(&db) {
+        Ok(found) => ids.extend(found),
+        Err(error) => eprintln!(
+            "orx up: could not read OpenCode's sign-ins in {}: {error:#}",
+            db.display()
+        ),
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// Providers signed in through auth.json, which is `{provider: {type}}`.
+fn auth_json_providers() -> Vec<String> {
     let Some(auth) = opencode_auth_path().and_then(read_json) else {
         return Vec::new();
     };
@@ -1088,6 +1125,136 @@ mod tests {
         }
     }
 
+    /// The real OpenCode, its config holding an MCP server, against a provider that answers with
+    /// a tool call: the one request declares no tools and nothing runs.
+    #[tokio::test]
+    #[ignore = "needs OpenCode 2 on PATH, which fetches its provider package; run explicitly"]
+    async fn a_one_shot_declares_no_tools_and_runs_none_a_model_calls() {
+        use axum::{extract::State, response::IntoResponse, routing::post, Json, Router};
+        use std::sync::{Arc, Mutex};
+
+        if !crate::config::in_test_child(&["OPENCODE_CONFIG_CONTENT"]) {
+            return;
+        }
+        let path = std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+            .map(|dir| {
+                dir.join(if cfg!(windows) {
+                    "opencode.exe"
+                } else {
+                    "opencode"
+                })
+            })
+            .find(|path| path.is_file());
+        let binary = match path {
+            Some(path) => crate::local::opencode::resolve_binary_at(path).await.ok(),
+            None => None,
+        };
+        let Some(binary) = binary else {
+            return crate::config::skip_without_tool("no OpenCode 2 on PATH");
+        };
+        let ran = crate::config::home_dir().unwrap().join("ran");
+        let call = json!({"id": "call_1", "type": "function", "function": {
+            "name": "bash", "arguments": json!({"command": format!("touch {}", ran.display())}).to_string(),
+        }});
+        let chunks = [
+            json!({"choices": [{"index": 0, "delta": {"role": "assistant", "content": "Running it."}}]}),
+            json!({"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": call["id"], "type": "function", "function": call["function"]}]}}]}),
+            json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+        ];
+        let stream: String = chunks
+            .iter()
+            .map(|chunk| {
+                let chunk = json!({"id": "x", "object": "chat.completion.chunk", "created": 1, "model": "fake", "choices": chunk["choices"]});
+                format!("data: {chunk}\n\n")
+            })
+            .chain(["data: [DONE]\n\n".to_owned()])
+            .collect();
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let provider = Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(
+                    |State((requests, stream)): State<(Arc<Mutex<Vec<Value>>>, String)>,
+                     Json(body): Json<Value>| async move {
+                        requests.lock().unwrap().push(body);
+                        ([("content-type", "text/event-stream")], stream)
+                    },
+                ),
+            )
+            .with_state((requests.clone(), stream));
+        let listed = Arc::new(Mutex::new(false));
+        let mcp = Router::new()
+            .route(
+                "/mcp",
+                post(
+                    |State(listed): State<Arc<Mutex<bool>>>, Json(message): Json<Value>| async move {
+                        let result = match message["method"].as_str() {
+                            Some("initialize") => json!({
+                                "protocolVersion": message["params"]["protocolVersion"],
+                                "capabilities": {"tools": {}},
+                                "serverInfo": {"name": "shell", "version": "1"},
+                            }),
+                            Some("tools/list") => {
+                                *listed.lock().unwrap() = true;
+                                json!({"tools": [{"name": "bash", "description": "Runs a shell command",
+                                    "inputSchema": {"type": "object", "properties": {"command": {"type": "string"}}}}]})
+                            }
+                            _ => json!({}),
+                        };
+                        match message.get("id") {
+                            Some(id) => Json(json!({"jsonrpc": "2.0", "id": id, "result": result}))
+                                .into_response(),
+                            None => axum::http::StatusCode::ACCEPTED.into_response(),
+                        }
+                    },
+                ),
+            )
+            .with_state(listed.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, provider.merge(mcp)).await.unwrap() });
+        let config = json!({
+            "provider": {"fake": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Fake",
+                "options": {"baseURL": format!("http://127.0.0.1:{port}/v1"), "apiKey": "key"},
+                "models": {"model": {"name": "Fake", "limit": {"context": 8000, "output": 1000}}},
+            }},
+            "mcp": {"shell": {"type": "remote", "url": format!("http://127.0.0.1:{port}/mcp")}},
+        });
+        std::env::set_var("OPENCODE_CONFIG_CONTENT", config.to_string());
+
+        let prompt = format!("Run `touch {}` with your bash tool.", ran.display());
+        let reply = v2::generate(
+            binary,
+            Some("fake/model".into()),
+            prompt,
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            1,
+            "one request, no agent loop: {requests:?}"
+        );
+        assert!(
+            requests[0].get("tools").is_none() && requests[0].get("tool_choice").is_none(),
+            "{}",
+            requests[0]
+        );
+        assert_eq!(reply.trim(), "Running it.");
+        assert!(!ran.exists(), "the model's tool call ran");
+        assert!(
+            *listed.lock().unwrap(),
+            "OpenCode read the MCP server's tools"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn v2_invalid_model_fails_before_launch() {
@@ -1293,6 +1460,30 @@ mod tests {
                 0o600
             );
         }
+        // OpenCode 2 keeps sign-ins in its database, and orx's holds a copy of them.
+        let databases = [NativeStore::Legacy, NativeStore::Isolated].map(native_store::opencode_db);
+        for db in &databases {
+            std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+            rusqlite::Connection::open(db)
+                .unwrap()
+                .execute_batch(
+                    "CREATE TABLE credential (id TEXT PRIMARY KEY, integration_id TEXT);
+                     INSERT INTO credential VALUES ('c1', 'groq');",
+                )
+                .unwrap();
+        }
+        let groq = found_providers([], &integrations)
+            .into_iter()
+            .find(|found| found.id == "groq")
+            .unwrap();
+        assert_eq!((groq.sources, groq.removable), (vec!["auth"], true));
+        delete_found_provider("groq").unwrap();
+        for db in &databases {
+            assert!(native_store::opencode_database::credential_integrations(db)
+                .unwrap()
+                .is_empty());
+        }
+
         let broken = dir.join("broken.json");
         std::fs::write(&broken, "{ not json").unwrap();
         std::env::set_var("OPENCODE_CONFIG", &broken);
