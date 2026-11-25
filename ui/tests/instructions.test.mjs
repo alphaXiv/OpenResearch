@@ -124,8 +124,29 @@ test("a save that finishes after leaving Settings leaves no stale draft behind",
   await settle();
   await type(first.container.querySelector("textarea"), "Mine.");
   await act(async () => find("button", m.common_save()).click());
-  first.unmount();
+  await first.unmount();
   await act(async () => finish());
   await settle();
   assert.equal(first.workspace.instructionsDraft.current, null);
+});
+
+test("a slow save doesn't erase edits made after it", async () => {
+  let finish;
+  serve((url, init) => {
+    if (url === "/api/user-skills") return { skills: [] };
+    if (url === "/api/latex-templates") return { templates: [] };
+    if (url !== "/api/settings/instructions") return;
+    if (init.method !== "PUT") return file("Saved.", "v1");
+    return new Promise((resolve) => { finish = () => resolve(file("Mine.", "v2")); });
+  });
+  const first = await render(createElement(SkillsTab));
+  await settle();
+  await type(first.container.querySelector("textarea"), "Mine.");
+  await act(async () => find("button", m.common_save()).click());
+  await first.unmount();
+  const newer = { content: "Newer.", base: "v1" };
+  first.workspace.instructionsDraft.current = newer;
+  await act(async () => finish());
+  await settle();
+  assert.equal(first.workspace.instructionsDraft.current, newer);
 });
