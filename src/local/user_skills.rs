@@ -480,6 +480,9 @@ pub struct SkillDiscovery {
     status: SkillRootStatus,
     accepted: usize,
     skipped: Vec<SkippedSkill>,
+    /// A skill in the root couldn't be read, so what was found is not the whole catalog.
+    #[serde(skip)]
+    partial: bool,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -559,6 +562,7 @@ fn collect_mirrored(
         status: SkillRootStatus::Scanned,
         accepted: 0,
         skipped: Vec::new(),
+        partial: false,
     };
     // A plugin can name one skill folder instead of a folder of skills.
     let only = (plugin && dir.join("SKILL.md").is_file()).then_some(dir);
@@ -577,6 +581,7 @@ fn collect_mirrored(
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
+                report.partial = true;
                 report.skip(dir, format!("unreadable entry ({:?})", error.kind()));
                 continue;
             }
@@ -589,6 +594,7 @@ fn collect_mirrored(
             Ok(metadata) if !metadata.is_dir() => continue,
             Ok(_) => {}
             Err(error) => {
+                report.partial |= error.kind() != std::io::ErrorKind::NotFound;
                 report.skip(&path, format!("unreadable entry ({:?})", error.kind()));
                 continue;
             }
@@ -604,6 +610,7 @@ fn collect_mirrored(
                 let reason = if error.kind() == std::io::ErrorKind::NotFound {
                     "no SKILL.md".to_string()
                 } else {
+                    report.partial = true;
                     format!("unreadable SKILL.md ({:?})", error.kind())
                 };
                 report.skip(&path, reason);
@@ -690,6 +697,45 @@ fn list_uploaded_in(root: &Path) -> Vec<UserSkill> {
 
 pub fn list_for_harness(harness: Option<&str>) -> Vec<UserSkill> {
     list_in(&root(), &native_skills(harness))
+}
+
+/// The catalog a harness loads at startup: uploads plus its own native skills dirs, by
+/// name and description. `None` when any of it can't be read, which is not a change.
+pub fn fingerprint(harness: &str) -> Option<u64> {
+    let roots = super::harness::chat_harness(harness)
+        .map(|agent| agent.native_skill_roots())
+        .unwrap_or_default();
+    fingerprint_in(&root(), harness, &roots)
+}
+
+fn fingerprint_in(root: &Path, harness: &str, native_roots: &[PathBuf]) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let mut native = Vec::new();
+    for dir in native_roots {
+        let report = collect_mirrored(dir, harness, harness, false, 0, &mut native);
+        if report.status == SkillRootStatus::Unreadable || report.partial {
+            return None;
+        }
+    }
+    native.sort_by(|a, b| (&a.name, &a.dir).cmp(&(&b.name, &b.dir)));
+    let uploads = match fs::read_dir(store_dir(root)) {
+        Ok(_) => list_uploaded_in(root),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => return None,
+    };
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for skill in uploads {
+        (skill.name, skill.description).hash(&mut hasher);
+    }
+    for skill in native {
+        (skill.name, skill.description).hash(&mut hasher);
+    }
+    Some(hasher.finish())
+}
+
+/// Whether an agent started with skill catalog `started` should respawn for `current`.
+pub fn changed(started: Option<u64>, current: Option<u64>) -> bool {
+    current.is_some() && current != started
 }
 
 pub fn list_project_skills(repo: &Path, harness: Option<&str>) -> Vec<UserSkill> {
@@ -1501,6 +1547,49 @@ mod tests {
         collect_mirrored(&skill, "Claude Code", "claude", false, 0, &mut native);
         assert!(native.is_empty());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fingerprint_changes_with_the_catalog_an_agent_loads() {
+        let root = temp_root();
+        let agent = temp_root();
+        let alpha = agent.join("alpha");
+        mirrored_skill("Codex", &alpha, &skill_md("alpha"), &[]);
+        let roots = [agent.clone(), agent.join("missing")];
+        let initial = fingerprint_in(&root, "codex", &roots);
+        assert!(initial.is_some());
+        assert_eq!(fingerprint_in(&root, "codex", &roots), initial);
+
+        save_skill_md_in(&root, skill_md("beta").as_bytes()).unwrap();
+        assert_ne!(fingerprint_in(&root, "codex", &roots), initial);
+        delete_in(&root, "beta").unwrap();
+        assert_eq!(fingerprint_in(&root, "codex", &roots), initial);
+
+        fs::write(alpha.join("cache.pyc"), "written by the skill's script").unwrap();
+        assert_eq!(fingerprint_in(&root, "codex", &roots), initial);
+
+        fs::write(
+            alpha.join("SKILL.md"),
+            skill_md_desc("alpha", "Rewritten. Use when testing."),
+        )
+        .unwrap();
+        assert_ne!(fingerprint_in(&root, "codex", &roots), initial);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let md = alpha.join("SKILL.md");
+            let permissions = fs::metadata(&md).unwrap().permissions();
+            fs::set_permissions(&md, fs::Permissions::from_mode(0o000)).unwrap();
+            let denied = fs::read_to_string(&md).unwrap_err();
+            let unknown = fingerprint_in(&root, "codex", &roots);
+            fs::set_permissions(&md, permissions).unwrap();
+            assert_eq!(denied.kind(), std::io::ErrorKind::PermissionDenied);
+            assert_eq!(unknown, None);
+        }
+
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(agent).unwrap();
     }
 
     #[test]

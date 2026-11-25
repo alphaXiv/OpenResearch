@@ -478,6 +478,9 @@ struct Resident {
     config: Option<String>,
     native_store: NativeStore,
     alphaxiv_signed_in: bool,
+    /// [`crate::local::user_skills::fingerprint`] of the catalog the server loaded.
+    #[serde(default)]
+    skills: Option<u64>,
     binary: ResolvedBinary,
     database: PathBuf,
     base_url: String,
@@ -555,6 +558,7 @@ async fn sessions_at_work(endpoint: &AgentEndpoint) -> std::result::Result<bool,
 
 /// Spawn `opencode serve` in the session's worktree and wait for it to come
 /// up healthy.
+#[expect(clippy::too_many_arguments)]
 async fn spawn_agent(
     project: &LocalProject,
     model: Option<&str>,
@@ -563,6 +567,7 @@ async fn spawn_agent(
     native_store: NativeStore,
     binary: ResolvedBinary,
     database: native_store::opencode_database::DatabaseLease,
+    skills: Option<u64>,
 ) -> Result<AgentChild> {
     // The clone/worktree setup inside can hit the network; keep it off the
     // async workers.
@@ -617,6 +622,7 @@ async fn spawn_agent(
         config,
         native_store,
         alphaxiv_signed_in: crate::alphaxiv::signed_in(),
+        skills,
         database: database.path().to_path_buf(),
         binary,
         base_url: endpoint.base_url.clone(),
@@ -1226,6 +1232,12 @@ impl AgentHost {
         let mut current = crate::process::tokio_command(&binary.path);
         prepare_chat_env(&mut current, model, session_id)?;
         let config = launch_config(&current);
+        let skills = tokio::task::spawn_blocking(|| {
+            use crate::local::harness::Harness;
+            crate::local::user_skills::fingerprint(crate::local::harness::opencode::OpenCode.id())
+        })
+        .await
+        .map_err(|error| anyhow!("skill catalog task failed: {error}"))?;
         {
             let mut guard = self.inner.lock().await;
             if let Some(agent) = guard.get_mut(session_id) {
@@ -1233,6 +1245,7 @@ impl AgentHost {
                 let resident = &agent.resident;
                 if resident.project_id == project.id
                     && resident.alphaxiv_signed_in == crate::alphaxiv::signed_in()
+                    && !crate::local::user_skills::changed(resident.skills, skills)
                     && resident.native_store == native_store
                     && resident.binary == binary
                     && agent.database.path() == database_path
@@ -1286,6 +1299,7 @@ impl AgentHost {
             native_store,
             binary,
             database,
+            skills,
         )
         .await?;
         let mut inner = self.inner.lock().await;
@@ -1408,6 +1422,7 @@ impl Resident {
             config: None,
             native_store: NativeStore::Isolated,
             alphaxiv_signed_in: false,
+            skills: crate::local::user_skills::fingerprint(HARNESS),
             binary,
             database: native_store::opencode_database::normalize_path(database).unwrap(),
             base_url: format!("http://127.0.0.1:{port}"),

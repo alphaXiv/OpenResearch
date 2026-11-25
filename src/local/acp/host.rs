@@ -70,6 +70,7 @@ impl SessionIo {
 
 pub struct Client {
     alphaxiv_signed_in: bool,
+    skills: Option<u64>,
     launch: Definition,
     configuration_lock: tokio::sync::Mutex<()>,
     pub connection: ConnectionTo<Agent>,
@@ -614,6 +615,11 @@ impl Host {
         cwd: &Path,
     ) -> Result<Arc<Client>> {
         self.start_reaper();
+        let id = definition.id.clone();
+        let skills =
+            tokio::task::spawn_blocking(move || crate::local::user_skills::fingerprint(&id))
+                .await
+                .map_err(|error| anyhow!("skill catalog task failed: {error}"))?;
         let slot = self
             .clients
             .lock()
@@ -625,6 +631,8 @@ impl Host {
         if let Some(client) = saved.as_ref().filter(|client| {
             client.closed.borrow().is_none()
                 && client.alphaxiv_signed_in == crate::alphaxiv::signed_in()
+                && (!crate::local::user_skills::changed(client.skills, skills)
+                    || client.running_a_command())
                 && client.launch == *definition
         }) {
             *client.idle_since.lock().unwrap() = None;
@@ -639,6 +647,7 @@ impl Host {
             session_id,
             self.events.clone(),
             self.up_port.get().copied(),
+            skills,
         )
         .await?;
         *client.idle_since.lock().unwrap() = None;
@@ -812,6 +821,7 @@ pub(super) async fn spawn(
     session_id: &str,
     events: Option<tokio::sync::broadcast::Sender<(&'static str, Value)>>,
     up_port: Option<u16>,
+    skills: Option<u64>,
 ) -> Result<Arc<Client>> {
     let (mut command, executable) = command(definition, cwd)?;
     if up_port.is_some() {
@@ -822,7 +832,7 @@ pub(super) async fn spawn(
             up_port,
         )?;
     }
-    let owner = owner(definition, cwd, session_id);
+    let owner = owner(definition, cwd, session_id, skills);
     let stderr = StderrLog::at(stderr_path(definition, session_id), false);
     let kept = crate::keep::spawn(crate::keep::Keep {
         command: command.as_std(),
@@ -858,7 +868,7 @@ pub(super) async fn spawn_here(
     let stderr = StderrLog::at(path, true);
     let kept = crate::keep::spawn_here(&mut command, Some(&stderr.path))
         .map_err(|error| start_error(definition, &executable, error))?;
-    let owner = owner(definition, cwd, session_id);
+    let owner = owner(definition, cwd, session_id, None);
     connect(
         definition, cwd, session_id, None, None, kept, owner, None, stderr,
     )
@@ -932,11 +942,11 @@ impl Drop for StderrLog {
     }
 }
 
-fn owner(definition: &Definition, cwd: &Path, session_id: &str) -> Value {
+fn owner(definition: &Definition, cwd: &Path, session_id: &str, skills: Option<u64>) -> Value {
     crate::keep::Owner::Agent {
         harness: definition.id.clone(),
         session_id: session_id.to_owned(),
-        state: json!({"definition": definition, "cwd": cwd, "alphaxiv_signed_in": crate::alphaxiv::signed_in(), "id_base": 0}),
+        state: json!({"definition": definition, "cwd": cwd, "alphaxiv_signed_in": crate::alphaxiv::signed_in(), "skills": skills, "id_base": 0}),
     }
     .to_value()
 }
@@ -991,6 +1001,7 @@ async fn connect(
 ) -> Result<Arc<Client>> {
     let alphaxiv_signed_in: bool =
         serde_json::from_value(owner["state"]["alphaxiv_signed_in"].clone())?;
+    let skills = owner["state"]["skills"].as_u64();
     let saved_initialized = owner["state"].get("initialized").cloned();
     let saved_native_id = owner["state"]["native_id"].as_str().map(str::to_owned);
     let io = Arc::new(SessionIo::default());
@@ -1329,6 +1340,7 @@ async fn connect(
             wire.persist()?;
             return Ok(Arc::new(Client {
                 alphaxiv_signed_in,
+                skills,
                 launch: definition.clone(),
                 configuration_lock: tokio::sync::Mutex::new(()),
                 connection,
@@ -2056,6 +2068,36 @@ mod tests {
         turn(&client, "end-detached").await;
         host.reap_idle_at(later, IdlePolicy::DEFAULT).await;
         assert!(!kept(), "kept after its detached command exited");
+        assert!(client.closed.borrow().is_some());
+        host.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn changed_skills_respawn_an_agent_only_once_its_detached_command_ends() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let host = Arc::new(Host::default());
+        let (cwd, launch) = (std::env::temp_dir(), definition("normal"));
+        let get = || host.get("skills", &launch, &cwd);
+        let client = get().await.unwrap();
+        let response = client
+            .request("session/new", json!({"cwd": cwd, "mcpServers": []}))
+            .await
+            .unwrap();
+        client
+            .set_native_id(response["sessionId"].as_str().unwrap())
+            .unwrap();
+        turn(&client, "detached").await;
+        crate::local::user_skills::save_skill_md(
+            b"---\nname: added\ndescription: Added mid-chat. Use when testing.\n---\nbody\n",
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(&get().await.unwrap(), &client));
+
+        turn(&client, "end-detached").await;
+        assert!(!Arc::ptr_eq(&get().await.unwrap(), &client));
         assert!(client.closed.borrow().is_some());
         host.shutdown().await;
     }

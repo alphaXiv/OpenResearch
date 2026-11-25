@@ -310,6 +310,8 @@ pub struct SpawnSpec {
     /// session holding `resume`'s history up to it.
     pub fork_at: Option<String>,
     pub config: SpawnConfig,
+    /// [`crate::local::user_skills::fingerprint`] of the catalog this turn loads.
+    pub skills: Option<u64>,
 }
 
 /// A segment a child started on its own, routed to the turn that records it.
@@ -400,6 +402,9 @@ struct Record {
     /// The model in the child's `ORX_INVOCATION_CONTEXT`.
     #[serde(default)]
     invocation_model: Option<String>,
+    /// [`crate::local::user_skills::fingerprint`] of the catalog the child loaded.
+    #[serde(default)]
+    skills: Option<u64>,
 }
 
 impl Record {
@@ -456,6 +461,7 @@ pub struct ClaudeClient {
     config: std::sync::Mutex<SpawnConfig>,
     /// The inherited model stays fixed even when the catalog resolves its alias differently.
     invocation_model: Option<String>,
+    skills: Option<u64>,
     gate: Option<String>,
     auth: AuthIdentity,
     auth_generation: AtomicU64,
@@ -511,6 +517,7 @@ impl ClaudeClient {
             turn: std::sync::Mutex::new(turn),
             config: std::sync::Mutex::new(record.config),
             invocation_model: record.invocation_model,
+            skills: record.skills,
             gate: record.gate,
             auth: record.auth,
             auth_generation: AtomicU64::new(auth_generation),
@@ -531,6 +538,7 @@ impl ClaudeClient {
             started_at_ms: self.started_at_ms,
             background: self.turn.lock().unwrap().background.clone(),
             invocation_model: self.invocation_model.clone(),
+            skills: self.skills,
         }
         .owner(&self.session_id)
     }
@@ -1221,6 +1229,7 @@ async fn spawn_client(
         started_at_ms: crate::store::now_ms(),
         background: BTreeMap::new(),
         invocation_model,
+        skills: spec.skills,
     };
     let kept = keep::spawn(keep::Keep {
         command: cmd.as_std(),
@@ -1708,6 +1717,12 @@ impl ClaudeHost {
             } else if !profile && !unverified && !live.matches_auth(&auth) {
                 self.inner.lock().await.remove(&session);
                 stop_client(live, "authentication-changed").await;
+            } else if crate::local::user_skills::changed(live.skills, spec.skills)
+                && live.turn.lock().unwrap().idle(Instant::now())
+            {
+                // Only an idle child: a skills change must not cost running background work.
+                self.inner.lock().await.remove(&session);
+                stop_client(live, "skills-changed").await;
             } else if live.config() == spec.config && runs_selection(&live) {
                 let latest = self.auth_snapshot();
                 // Unbound is a child a previous server kept, never checked against this one's.
@@ -2102,6 +2117,7 @@ pub(crate) mod tests {
             started_at_ms: crate::store::now_ms(),
             background: BTreeMap::new(),
             invocation_model: None,
+            skills: None,
         }
     }
 
@@ -2405,6 +2421,7 @@ done
                         resume: None,
                         fork_at: None,
                         config,
+                        skills: None,
                     },
                     tx,
                 )
@@ -2480,6 +2497,7 @@ done
                 resume: None,
                 fork_at: None,
                 config,
+                skills: None,
             };
             let host = host.clone();
             async move { (host.acquire_turn(spec, tx).await, rx) }
@@ -2665,6 +2683,7 @@ done
                     resume: Some("saved-native-id".into()),
                     fork_at: None,
                     config: client.config(),
+                    skills: None,
                 },
                 Duration::from_millis(10),
             )
@@ -2938,6 +2957,43 @@ done
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn changed_skills_spare_a_busy_worker_and_respawn_an_idle_one() {
+        let host = ready_host();
+        let chat = Arc::new(crate::local::chat::ChatHost::new(
+            Arc::new(crate::local::opencode::AgentHost::new(None)),
+            Arc::new(crate::local::codex::CodexHost::new()),
+            host.clone(),
+        ));
+        let spec = |session: &str| SpawnSpec {
+            chat: chat.clone(),
+            session_id: session.into(),
+            repo: PathBuf::new(),
+            playbook: PathBuf::new(),
+            resume: None,
+            fork_at: None,
+            config: cfg(None, None, None, false),
+            skills: Some(2),
+        };
+
+        let busy = chat_echo_worker(&host, "busy", Weak::new()).await;
+        emit(
+            &busy,
+            &[json!({"type": "system", "subtype": "task_started", "task_id": "shell"})],
+        )
+        .await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        host.acquire_turn(spec("busy"), tx).await.unwrap();
+        assert!(!busy.terminated.load(Ordering::Acquire));
+
+        let idle = chat_echo_worker(&host, "idle", Weak::new()).await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let _ = host.acquire_turn(spec("idle"), tx).await;
+        assert!(idle.terminated.load(Ordering::Acquire));
+        host.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn reaper_keeps_active_stale_worker_then_reaps_it_after_release() {
         let now = Instant::now();
         let host = ClaudeHost::new();
@@ -3117,6 +3173,7 @@ done
                     resume: None,
                     fork_at: None,
                     config: cfg(None, None, None, false),
+                    skills: None,
                 },
                 tx,
             )
@@ -3397,6 +3454,7 @@ done
             resume: None,
             fork_at: None,
             config,
+            skills: None,
         };
         // The first server knows what the alias resolves to; a successor's catalog starts empty.
         *spec.chat.harnesses.lock().await = Some((
@@ -3551,6 +3609,7 @@ esac
                 resume: None,
                 fork_at: None,
                 config,
+                skills: None,
             };
             // As the dashboard's first catalog fill does at startup.
             let reserving = tokio::task::spawn_blocking({

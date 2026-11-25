@@ -220,6 +220,7 @@ pub struct CodexClient {
     native_store: NativeStore,
     pub(crate) profile: Option<String>,
     alphaxiv_signed_in: bool,
+    skills: Option<u64>,
     /// The executable this child runs; once detection picks another, the next turn respawns it.
     bin: PathBuf,
     session_id: String,
@@ -242,6 +243,8 @@ struct ClientState {
     profile: Option<String>,
     bin: PathBuf,
     alphaxiv_signed_in: bool,
+    #[serde(default)]
+    skills: Option<u64>,
     initialize: Option<Value>,
     offset: u64,
     models: Vec<((String, String), String)>,
@@ -537,6 +540,14 @@ impl CodexClient {
 
     fn touch(&self) {
         *self.last_active.lock().unwrap() = Instant::now();
+    }
+
+    /// A background terminal outlives its turn, and a skills respawn must not end it.
+    async fn running_a_command(&self) -> bool {
+        let pid = self.child.pid();
+        tokio::task::spawn_blocking(move || crate::local::chat::runs_a_detached_command(pid))
+            .await
+            .unwrap_or(true)
     }
 
     /// When this child was last used, or `None` while a turn or request is in flight.
@@ -992,6 +1003,7 @@ async fn spawn_client(
     profile: Option<String>,
     bin: PathBuf,
     codex_home: PathBuf,
+    skills: Option<u64>,
 ) -> Result<Arc<CodexClient>> {
     let mut cmd = crate::process::tokio_command(&bin);
     cmd.arg("app-server");
@@ -1012,6 +1024,7 @@ async fn spawn_client(
         profile: profile.clone(),
         bin: bin.clone(),
         alphaxiv_signed_in: crate::alphaxiv::signed_in(),
+        skills,
         next_id: 1,
         ..Default::default()
     };
@@ -1073,6 +1086,7 @@ fn client_from_kept(
         },
         profile: state.profile.clone(),
         alphaxiv_signed_in: state.alphaxiv_signed_in,
+        skills: state.skills,
         bin: state.bin.clone(),
         session_id: session_id.into(),
         turn_models: std::sync::Mutex::new(state.models.iter().cloned().collect()),
@@ -1206,9 +1220,15 @@ impl CodexHost {
     ) -> Result<Arc<CodexClient>> {
         let profile = profile.map(str::to_string);
         let preparing_profile = profile.clone();
-        let codex_home = tokio::task::spawn_blocking(move || match preparing_profile {
-            Some(id) => crate::local::agent_profiles::prepare(&id, "codex"),
-            None => native_store::prepare_codex(native_store),
+        let (codex_home, skills) = tokio::task::spawn_blocking(move || {
+            use crate::local::harness::Harness;
+            let skills =
+                crate::local::user_skills::fingerprint(crate::local::harness::codex::Codex.id());
+            match preparing_profile {
+                Some(id) => crate::local::agent_profiles::prepare(&id, "codex"),
+                None => native_store::prepare_codex(native_store),
+            }
+            .map(|home| (home, skills))
         })
         .await
         .map_err(|error| anyhow!("Codex config preparation failed: {error}"))?
@@ -1217,21 +1237,29 @@ impl CodexHost {
         let session = session_id.to_string();
         let spawn_profile = profile.clone();
         let selected = find_codex();
-        self.ensure_with_spawn(session_id, native_store, profile, selected, async move {
-            let bin =
-                find_codex_required().map_err(|e| SetupFailure::tag("codex_setup_binary", e))?;
-            Ok(move || async move {
-                spawn_client(
-                    &session,
-                    host.up_port.get().copied(),
-                    native_store,
-                    spawn_profile,
-                    bin,
-                    codex_home,
-                )
-                .await
-            })
-        })
+        self.ensure_with_spawn(
+            session_id,
+            native_store,
+            profile,
+            selected,
+            skills,
+            async move {
+                let bin = find_codex_required()
+                    .map_err(|e| SetupFailure::tag("codex_setup_binary", e))?;
+                Ok(move || async move {
+                    spawn_client(
+                        &session,
+                        host.up_port.get().copied(),
+                        native_store,
+                        spawn_profile,
+                        bin,
+                        codex_home,
+                        skills,
+                    )
+                    .await
+                })
+            },
+        )
         .await
     }
 
@@ -1241,6 +1269,7 @@ impl CodexHost {
         native_store: NativeStore,
         profile: Option<String>,
         bin: Option<PathBuf>,
+        skills: Option<u64>,
         prepare: impl std::future::Future<Output = Result<F>>,
     ) -> Result<Arc<CodexClient>>
     where
@@ -1250,7 +1279,13 @@ impl CodexHost {
         {
             let _spawning = self.spawn_lock.lock().await;
             if let Some(existing) = self
-                .reusable_client(session_id, native_store, profile.as_deref(), bin.as_deref())
+                .reusable_client(
+                    session_id,
+                    native_store,
+                    profile.as_deref(),
+                    bin.as_deref(),
+                    skills,
+                )
                 .await
             {
                 return Ok(existing);
@@ -1268,7 +1303,13 @@ impl CodexHost {
             }
             // Another caller may have completed startup during preparation.
             if let Some(existing) = host
-                .reusable_client(&session, native_store, profile.as_deref(), bin.as_deref())
+                .reusable_client(
+                    &session,
+                    native_store,
+                    profile.as_deref(),
+                    bin.as_deref(),
+                    skills,
+                )
                 .await
             {
                 let _ = ready_tx.send(Ok(existing));
@@ -1325,17 +1366,19 @@ impl CodexHost {
         native_store: NativeStore,
         profile: Option<&str>,
         bin: Option<&Path>,
+        skills: Option<u64>,
     ) -> Option<Arc<CodexClient>> {
-        let guard = self.inner.lock().await;
-        let client = guard.get(session_id)?;
+        let client = self.inner.lock().await.get(session_id)?.clone();
         if client.native_store() == native_store
             && client.profile.as_deref() == profile
             && bin.is_none_or(|bin| bin == client.bin)
             && client.alphaxiv_signed_in == crate::alphaxiv::signed_in()
+            && (!crate::local::user_skills::changed(client.skills, skills)
+                || client.running_a_command().await)
             && client.child.try_wait().is_none()
         {
             client.touch();
-            Some(client.clone())
+            Some(client)
         } else {
             None
         }
@@ -1665,6 +1708,7 @@ pub(crate) mod tests {
                 "chat",
                 NativeStore::Isolated,
                 Some("codex-012345abcd"),
+                None,
                 None
             )
             .await
@@ -1674,14 +1718,39 @@ pub(crate) mod tests {
                 "chat",
                 NativeStore::Isolated,
                 Some("codex-abcdefghij"),
+                None,
                 None
             )
             .await
             .is_none());
         assert!(host
-            .reusable_client("chat", NativeStore::Isolated, None, None)
+            .reusable_client("chat", NativeStore::Isolated, None, None, None)
             .await
             .is_none());
+        host.kill_session("chat").await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn client_reuse_requires_the_same_known_skills() {
+        let host = Arc::new(CodexHost::new());
+        let mut client = idle_test_client(Instant::now()).await;
+        Arc::get_mut(&mut client).unwrap().skills = Some(1);
+        host.inner
+            .lock()
+            .await
+            .insert("chat".into(), client.clone());
+        let reuse = |skills| {
+            let host = host.clone();
+            async move {
+                host.reusable_client("chat", NativeStore::Isolated, None, None, skills)
+                    .await
+                    .is_some()
+            }
+        };
+        assert!(reuse(Some(1)).await);
+        assert!(reuse(None).await);
+        assert!(!reuse(Some(2)).await);
         host.kill_session("chat").await;
     }
 
@@ -1698,9 +1767,15 @@ pub(crate) mod tests {
         let reusable = |bin: &'static str| {
             let host = host.clone();
             async move {
-                host.reusable_client("chat", NativeStore::Isolated, None, Some(Path::new(bin)))
-                    .await
-                    .is_some()
+                host.reusable_client(
+                    "chat",
+                    NativeStore::Isolated,
+                    None,
+                    Some(Path::new(bin)),
+                    None,
+                )
+                .await
+                .is_some()
             }
         };
         assert!(reusable("/user/codex").await);
@@ -1764,14 +1839,14 @@ pub(crate) mod tests {
         let spawned = client.clone();
         let ensured = tokio::time::timeout(
             Duration::from_secs(2),
-            host.ensure_with_spawn("compact", NativeStore::Isolated, None, None, async {
+            host.ensure_with_spawn("compact", NativeStore::Isolated, None, None, None, async {
                 Ok(move || async move { Ok(spawned) })
             }),
         )
         .await;
         let reused = tokio::time::timeout(
             Duration::from_secs(2),
-            host.ensure_with_spawn("compact", NativeStore::Isolated, None, None, async {
+            host.ensure_with_spawn("compact", NativeStore::Isolated, None, None, None, async {
                 Ok(|| async { panic!("initialized client must be reused") })
             }),
         )
@@ -1794,21 +1869,28 @@ pub(crate) mod tests {
         let operation_host = host.clone();
         let operation = tokio::spawn(async move {
             operation_host
-                .ensure_with_spawn("compact", NativeStore::Isolated, None, None, async move {
-                    let _ = started_tx.send(());
-                    let _ = release_rx.await;
-                    Ok(move || async move {
-                        spawn_flag.store(true, Ordering::Release);
-                        Ok(idle_test_client(Instant::now()).await)
-                    })
-                })
+                .ensure_with_spawn(
+                    "compact",
+                    NativeStore::Isolated,
+                    None,
+                    None,
+                    None,
+                    async move {
+                        let _ = started_tx.send(());
+                        let _ = release_rx.await;
+                        Ok(move || async move {
+                            spawn_flag.store(true, Ordering::Release);
+                            Ok(idle_test_client(Instant::now()).await)
+                        })
+                    },
+                )
                 .await
         });
         started_rx.await.unwrap();
         // A stalled preparation neither blocks reuse nor another cold startup.
         let reused = tokio::time::timeout(
             Duration::from_secs(2),
-            host.ensure_with_spawn("warm", NativeStore::Isolated, None, None, async {
+            host.ensure_with_spawn("warm", NativeStore::Isolated, None, None, None, async {
                 Ok(|| async { panic!("a warm client must not be spawned again") })
             }),
         )
@@ -1818,7 +1900,7 @@ pub(crate) mod tests {
         assert!(Arc::ptr_eq(&reused, &warm));
         let cold = tokio::time::timeout(
             Duration::from_secs(2),
-            host.ensure_with_spawn("other", NativeStore::Isolated, None, None, async {
+            host.ensure_with_spawn("other", NativeStore::Isolated, None, None, None, async {
                 Err::<fn() -> std::future::Ready<Result<Arc<CodexClient>>>, _>(anyhow!(
                     "preparation reached"
                 ))
@@ -1839,7 +1921,7 @@ pub(crate) mod tests {
         let operation_host = host.clone();
         let operation = tokio::spawn(async move {
             operation_host
-                .ensure_with_spawn("compact", NativeStore::Isolated, None, None, async {
+                .ensure_with_spawn("compact", NativeStore::Isolated, None, None, None, async {
                     Ok(move || async move { Ok(spawned) })
                 })
                 .await
@@ -2074,7 +2156,7 @@ pub(crate) mod tests {
             assert!(Arc::ptr_eq(
                 &client,
                 &host
-                    .reusable_client("chat", NativeStore::Isolated, None, None)
+                    .reusable_client("chat", NativeStore::Isolated, None, None, None)
                     .await
                     .unwrap()
             ));

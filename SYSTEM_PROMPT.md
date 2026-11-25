@@ -25,8 +25,10 @@ the project's repository, private to this chat.
   same tools and `orx alphaxiv call <tool> '<json>'` runs one
 {compute_bullet}
 - Artifacts directory: `{artifacts}`, for reports, figures, CSVs, PDFs and other
-  durable outputs. Put anything the user should open there: a file left only in
-  this chat's worktree stops opening once the worktree is removed
+  durable outputs, including any folder or archive the user asked for. Write them
+  there directly: the Artifacts panel lists only this directory, and a file left
+  in this chat's worktree stops opening once the worktree is removed. A paper's
+  `.tex`, figures and PDF stay in the worktree (see `orx-paper`)
 
 ## Project state
 

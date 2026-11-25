@@ -1559,10 +1559,12 @@ impl Harness for ClaudeCode {
         let project = ctx.project.clone();
         let session_id = ctx.session_id.clone();
         let skills_dir = self.session_skills_dir();
-        let (repo, playbook) =
-            tokio::task::spawn_blocking(move || ensure_playbook(&project, &session_id, skills_dir))
-                .await
-                .map_err(|error| anyhow!("playbook task failed: {error}"))??;
+        let (skills, (repo, playbook)) = tokio::task::spawn_blocking(move || {
+            let skills = crate::local::user_skills::fingerprint(ClaudeCode.id());
+            ensure_playbook(&project, &session_id, skills_dir).map(|paths| (skills, paths))
+        })
+        .await
+        .map_err(|error| anyhow!("playbook task failed: {error}"))??;
         let spec = SpawnSpec {
             chat: ctx.host.clone(),
             session_id: ctx.session_id.clone(),
@@ -1581,6 +1583,7 @@ impl Harness for ClaudeCode {
                     && ctx.host.up_port().is_some(),
                 bin: find_claude(),
             },
+            skills,
         };
         ctx.host
             .claude
@@ -3644,10 +3647,12 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     // playbook only on respawn, same tradeoff as codex (see opencode.rs's
     // playbook-freshness comment).
     let skills_dir = ClaudeCode.session_skills_dir();
-    let (repo, playbook) =
-        tokio::task::spawn_blocking(move || ensure_playbook(&project, &session_id, skills_dir))
-            .await
-            .map_err(|e| anyhow!("playbook task failed: {e}"))??;
+    let (skills, (repo, playbook)) = tokio::task::spawn_blocking(move || {
+        let skills = crate::local::user_skills::fingerprint(ClaudeCode.id());
+        ensure_playbook(&project, &session_id, skills_dir).map(|paths| (skills, paths))
+    })
+    .await
+    .map_err(|e| anyhow!("playbook task failed: {e}"))??;
 
     let plan_mode = ctx.permission_mode == Some(PermissionMode::Plan);
     // Clear any bridge-card flag a previous aborted turn left behind so it can't
@@ -3692,6 +3697,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         resume: resume.clone(),
         fork_at,
         config: spawn_config(ctx, native_store),
+        skills,
     };
     let mut retry_count = 0;
     let mut state;
@@ -3876,6 +3882,7 @@ mod tests {
             resume: None,
             fork_at: None,
             config: client.config(),
+            skills: None,
         };
         let attempt =
             tokio::time::timeout(Duration::from_secs(5), run_attempt(&mut ctx, spec)).await;
@@ -3909,6 +3916,7 @@ mod tests {
             resume: None,
             fork_at: None,
             config: client.config(),
+            skills: None,
         }
     }
 
@@ -4160,6 +4168,7 @@ mod tests {
             resume: None,
             fork_at: None,
             config: spawn_config(&ctx, NativeStore::Isolated),
+            skills: None,
         };
         assert!(run_attempt(&mut ctx, spec).await.is_err());
         let (kind, local_message) = ctx.terminal_error.as_ref().unwrap();
@@ -4216,6 +4225,7 @@ mod tests {
                 bridge_active: false,
                 bin: None,
             },
+            skills: None,
         };
 
         let started = tokio::time::Instant::now();

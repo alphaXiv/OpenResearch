@@ -3,7 +3,7 @@ name: orx-reports
 description: "Write files meant to outlast the chat into the artifacts directory. Use before writing a report, a summary or any other artifact."
 ---
 
-An artifact is a project-wide deliverable that a human researcher will read and analyze. This can include reports, figures, and HTML pages, and more. Written files become project artifacts immediately.
+An artifact is a project-wide deliverable that a human researcher will read and analyze. This can include reports, figures, and HTML pages, and more. Written files become project artifacts immediately. The Artifacts panel lists only the artifacts directory, never your worktree. If a script builds a deliverable in the worktree, such as a folder or a zip, move it into the artifacts directory before the handoff, or copy it if Git tracks it.
 
 Keep the artifacts directory clean; avoid model checkpoints, rollouts, activations, etc. that are not project-wide that will bloat the artifacts directory.
 
