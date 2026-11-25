@@ -1146,11 +1146,6 @@
   "model_picker_speed_flex": "弹性",
   "model_picker_speed_ultrafast": "超快",
   "model_picker_ultracode_description": "超高推理强度，并启用动态工作流。",
-  "model_picker_autonomy": "自主程度",
-  "model_picker_autonomy_agentic": "独立",
-  "model_picker_autonomy_agentic_description": "独立推进研究，必要时再与你确认。",
-  "model_picker_autonomy_copilot": "协作",
-  "model_picker_autonomy_copilot_description": "解释思路，行动前先征得你的同意。",
   "model_picker_not_available": "不可用",
   "service_tier_standard": "标准",
   "service_tier_default_speed": "默认速度",
@@ -1358,7 +1353,6 @@
   "chat_attachments_total_too_large": "附件总大小超过 {size} 限制 — 请移除一个附件后重试。",
   "chat_model_no_image_input": "{model} 无法查看图片。请移除图片，或切换到支持图片的模型。",
   "chat_update_permissions_failed": "无法更新权限。请重试。",
-  "chat_update_autonomy_failed": "无法更新自主程度。请重试。",
   "chat_exit_plan_failed": "无法退出计划模式。请重试。",
   "chat_toggle_plan_failed": "无法切换计划模式。请重试。",
   "chat_asked_about_selection": "已询问所选文本",
@@ -2615,6 +2609,5 @@
   "lit_sources_save_title": "保存为默认",
   "lit_sources_save_project": "为此项目保存",
   "lit_sources_save_all": "为所有项目保存",
-  "lit_sources_revert": "使用项目的来源",
-  "project_settings_autonomy_title": "新对话的自主程度"
+  "lit_sources_revert": "使用项目的来源"
 }

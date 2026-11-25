@@ -26,7 +26,7 @@ function setup() {
   return { workspace, replies, seed, read };
 }
 
-const uiState = { workspace: null, onboardingCompleted: true, tourCompleted: false, preferredAgent: null, preferredAutonomy: null, nestedDelegation: false };
+const uiState = { workspace: null, onboardingCompleted: true, tourCompleted: false, preferredAgent: null, nestedDelegation: false };
 
 test("a preference picked twice in a row is not undone by the first reply", async () => {
   const { workspace, replies, seed, read } = setup();

@@ -1152,11 +1152,6 @@
   "model_picker_speed_flex": "플렉스",
   "model_picker_speed_ultrafast": "초고속",
   "model_picker_ultracode_description": "매우 높은 추론 수준과 동적 워크플로.",
-  "model_picker_autonomy": "자율성",
-  "model_picker_autonomy_agentic": "독립 실행",
-  "model_picker_autonomy_agentic_description": "스스로 연구를 진행하고 필요할 때 확인을 요청합니다.",
-  "model_picker_autonomy_copilot": "협업",
-  "model_picker_autonomy_copilot_description": "추론을 설명하고 행동하기 전에 묻습니다.",
   "model_picker_not_available": "사용할 수 없음",
   "service_tier_standard": "표준",
   "service_tier_default_speed": "기본 속도",
@@ -1364,7 +1359,6 @@
   "chat_attachments_total_too_large": "첨부 파일의 총 크기가 {size}를 초과합니다. 하나를 제거한 뒤 다시 시도하세요.",
   "chat_model_no_image_input": "{model}은(는) 이미지를 볼 수 없습니다. 이미지를 제거하거나 이미지를 지원하는 모델로 전환하세요.",
   "chat_update_permissions_failed": "권한을 업데이트할 수 없습니다. 다시 시도하세요.",
-  "chat_update_autonomy_failed": "자율성을 업데이트할 수 없습니다. 다시 시도하세요.",
   "chat_exit_plan_failed": "계획 모드를 종료할 수 없습니다. 다시 시도하세요.",
   "chat_toggle_plan_failed": "계획 모드를 전환할 수 없습니다. 다시 시도하세요.",
   "chat_asked_about_selection": "선택한 텍스트에 대해 질문함",
@@ -2615,6 +2609,5 @@
   "lit_sources_save_title": "기본값으로 저장",
   "lit_sources_save_project": "이 프로젝트에 저장",
   "lit_sources_save_all": "모든 프로젝트에 저장",
-  "lit_sources_revert": "프로젝트의 소스 사용",
-  "project_settings_autonomy_title": "새 채팅의 자율성"
+  "lit_sources_revert": "프로젝트의 소스 사용"
 }

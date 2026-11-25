@@ -1178,11 +1178,6 @@
   "model_picker_speed_flex": "Esnek",
   "model_picker_speed_ultrafast": "Ultra hızlı",
   "model_picker_ultracode_description": "Dinamik iş akışlarıyla ekstra yüksek çaba.",
-  "model_picker_autonomy": "Özerklik",
-  "model_picker_autonomy_agentic": "Bağımsız",
-  "model_picker_autonomy_agentic_description": "Araştırmayı kendi başına yürütür ve gerektiğinde sizinle iletişime geçer.",
-  "model_picker_autonomy_copilot": "İş birliği",
-  "model_picker_autonomy_copilot_description": "Akıl yürütmesini açıklar ve harekete geçmeden önce sorar.",
   "model_picker_not_available": "Kullanılamıyor",
   "service_tier_standard": "Standart",
   "service_tier_default_speed": "Varsayılan hız",
@@ -1395,7 +1390,6 @@
   "chat_attachments_total_too_large": "Ekler {size} toplam sınırını aşıyor — birini kaldırıp yeniden deneyin.",
   "chat_model_no_image_input": "{model} görselleri görüntüleyemiyor. Görseli kaldırın veya görsel destekli bir modele geçin.",
   "chat_update_permissions_failed": "İzinler güncellenemedi. Yeniden deneyin.",
-  "chat_update_autonomy_failed": "Özerklik güncellenemedi. Yeniden deneyin.",
   "chat_exit_plan_failed": "Plan modundan çıkılamadı. Yeniden deneyin.",
   "chat_toggle_plan_failed": "Plan modu değiştirilemedi. Yeniden deneyin.",
   "chat_asked_about_selection": "Seçili metin hakkında soru sordu",
@@ -2615,6 +2609,5 @@
   "lit_sources_save_title": "Varsayılan olarak kaydet",
   "lit_sources_save_project": "Bu proje için kaydet",
   "lit_sources_save_all": "Tüm projeler için kaydet",
-  "lit_sources_revert": "Projenin kaynaklarını kullan",
-  "project_settings_autonomy_title": "Yeni sohbetlerin özerkliği"
+  "lit_sources_revert": "Projenin kaynaklarını kullan"
 }

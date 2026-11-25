@@ -1152,11 +1152,6 @@
   "model_picker_speed_flex": "फ़्लेक्स",
   "model_picker_speed_ultrafast": "अति तेज़",
   "model_picker_ultracode_description": "अतिरिक्त उच्च प्रयास स्तर, गतिशील वर्कफ़्लो के साथ।",
-  "model_picker_autonomy": "स्वायत्तता",
-  "model_picker_autonomy_agentic": "स्वतंत्र",
-  "model_picker_autonomy_agentic_description": "शोध खुद चलाता है और ज़रूरत पड़ने पर पूछता है।",
-  "model_picker_autonomy_copilot": "सहयोगी",
-  "model_picker_autonomy_copilot_description": "अपना तर्क समझाता है और कार्य करने से पहले अनुमति लेता है।",
   "model_picker_not_available": "उपलब्ध नहीं",
   "service_tier_standard": "स्टैंडर्ड",
   "service_tier_default_speed": "डिफ़ॉल्ट गति",
@@ -1364,7 +1359,6 @@
   "chat_attachments_total_too_large": "अटैचमेंट {size} की कुल सीमा से ज़्यादा हैं — एक हटाएं और फिर से कोशिश करें।",
   "chat_model_no_image_input": "{model} इमेज नहीं देख सकता। इमेज हटाएं या इमेज सपोर्ट वाले मॉडल पर स्विच करें।",
   "chat_update_permissions_failed": "अनुमतियाँ अपडेट नहीं हो सकीं। फिर से कोशिश करें।",
-  "chat_update_autonomy_failed": "स्वायत्तता अपडेट नहीं हो सकी। फिर से कोशिश करें।",
   "chat_exit_plan_failed": "प्लान मोड से बाहर नहीं निकला जा सका। फिर से कोशिश करें।",
   "chat_toggle_plan_failed": "प्लान मोड टॉगल नहीं हो सका। फिर से कोशिश करें।",
   "chat_asked_about_selection": "चयनित टेक्स्ट के बारे में पूछा",
@@ -2615,6 +2609,5 @@
   "lit_sources_save_title": "डिफ़ॉल्ट के रूप में सहेजें",
   "lit_sources_save_project": "इस प्रोजेक्ट के लिए सहेजें",
   "lit_sources_save_all": "सभी प्रोजेक्ट के लिए सहेजें",
-  "lit_sources_revert": "प्रोजेक्ट के स्रोत इस्तेमाल करें",
-  "project_settings_autonomy_title": "नई चैट की स्वायत्तता"
+  "lit_sources_revert": "प्रोजेक्ट के स्रोत इस्तेमाल करें"
 }

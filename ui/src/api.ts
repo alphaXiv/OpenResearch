@@ -203,7 +203,6 @@ export interface UiState {
   onboardingCompleted: boolean;
   tourCompleted: boolean;
   preferredAgent: AgentSelection | null;
-  preferredAutonomy: Autonomy | null;
   /** Whether sub-agents may start their own unless a delegation says otherwise. */
   nestedDelegation: boolean;
   /** Whether OpenCode's free models are offered beside the user's own. */
@@ -280,9 +279,6 @@ export interface ChatReportRoute {
 /** What writes a chat's status: the chat's own model, or one of its listed routes. */
 export type ChatReportChoice = { same: true } | ChatReportRoute;
 
-/** How much of the research the agent owns before checking in. */
-export type Autonomy = "copilot" | "agentic";
-export const DEFAULT_AUTONOMY: Autonomy = "agentic";
 
 export interface ProjectPathStatus {
   gitVersion: string | null;
@@ -1024,8 +1020,6 @@ export interface ProjectSettings {
   /** The agent new chats in the project start with. */
   agent?: AgentSelection;
   disabledLitSources?: LitSource[];
-  /** The autonomy new chats in the project start with. */
-  autonomy?: Autonomy;
   /** `#SBATCH` defaults over the machine's Slurm settings; each absent one follows them. */
   slurm?: SlurmDefaults;
   k8sNamespace?: string;
@@ -1904,7 +1898,6 @@ export interface ChatSession {
   planMode: boolean;
   /** What `/goal` asked the agent to keep working toward; null when unset. */
   goal?: string | null;
-  autonomy: Autonomy;
   reasoningLevel: string | null;
   /** Hidden from the default Recents list, but fully intact and resumable. */
   archived: boolean;
@@ -1957,7 +1950,6 @@ export interface ChatSessionPatch {
   planMode?: boolean;
   /** `null` clears the goal. */
   goal?: string | null;
-  autonomy?: Autonomy;
   agent?: AgentSelection;
   permissionMode?: string;
 }
@@ -2392,7 +2384,6 @@ export function createApi(
     workspace?: GlobalWorkspace;
     tourCompleted?: boolean;
     preferredAgent?: AgentSelection;
-    preferredAutonomy?: Autonomy;
     nestedDelegation?: boolean;
     opencodeFreeModels?: boolean;
     /** Empty for the chat's own. */
@@ -3316,7 +3307,7 @@ export function createApi(
   const createChatSession = (
     projectId: string,
     harness: HarnessId,
-    opts: TurnOptions & { autonomy?: Autonomy; profile?: string | null; disabledLitSources?: LitSource[] } = {},
+    opts: TurnOptions & { profile?: string | null; disabledLitSources?: LitSource[] } = {},
   ) =>
     post<{ session: ChatSession }>("/api/chat/sessions", { projectId, harness, ...opts }).then(
       (r) => r.session,

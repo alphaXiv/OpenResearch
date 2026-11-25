@@ -22,7 +22,7 @@ test("active workspace runs stay scoped to an existing chat and retain the run d
 
 test("an ended run with an open flag is listed until a newer run of its experiment replaces it", () => {
   const experiments = [{ id: "mine", chatSessionId: "chat" }];
-  const flag = { id: "f1", state: "waiting", mode: "copilot" };
+  const flag = { id: "f1", state: "waiting" };
   const first = { id: "first", experimentId: "mine", status: "done", createdAt: 1, monitor: { flag } };
   const rerun = { id: "rerun", experimentId: "mine", status: "done", createdAt: 2, monitor: { flag } };
   assert.deepEqual(activeWorkspaceRuns(experiments, [first], "chat").map(({ run }) => run.id), ["first"]);

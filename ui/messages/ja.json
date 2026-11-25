@@ -1152,11 +1152,6 @@
   "model_picker_speed_flex": "Flex",
   "model_picker_speed_ultrafast": "超高速",
   "model_picker_ultracode_description": "非常に高い推論レベルと動的ワークフロー。",
-  "model_picker_autonomy": "自律性",
-  "model_picker_autonomy_agentic": "自律型",
-  "model_picker_autonomy_agentic_description": "自律的に研究を進め、必要に応じて確認します。",
-  "model_picker_autonomy_copilot": "協調型",
-  "model_picker_autonomy_copilot_description": "推論を説明し、実行前に確認します。",
   "model_picker_not_available": "利用できません",
   "service_tier_standard": "標準",
   "service_tier_default_speed": "既定の速度",
@@ -1364,7 +1359,6 @@
   "chat_attachments_total_too_large": "添付ファイルの合計が上限の {size} を超えています。1 つ削除して再試行してください。",
   "chat_model_no_image_input": "{model} は画像を読み取れません。画像を削除するか、画像に対応したモデルに切り替えてください。",
   "chat_update_permissions_failed": "権限を更新できませんでした。再試行してください。",
-  "chat_update_autonomy_failed": "自律性を更新できませんでした。再試行してください。",
   "chat_exit_plan_failed": "計画モードを終了できませんでした。再試行してください。",
   "chat_toggle_plan_failed": "計画モードを切り替えられませんでした。再試行してください。",
   "chat_asked_about_selection": "選択したテキストについて質問しました",
@@ -2615,6 +2609,5 @@
   "lit_sources_save_title": "既定値として保存",
   "lit_sources_save_project": "このプロジェクトに保存",
   "lit_sources_save_all": "すべてのプロジェクトに保存",
-  "lit_sources_revert": "プロジェクトのソースを使う",
-  "project_settings_autonomy_title": "新しいチャットの自律性"
+  "lit_sources_revert": "プロジェクトのソースを使う"
 }

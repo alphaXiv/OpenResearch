@@ -1152,11 +1152,6 @@
   "model_picker_speed_flex": "ఫ్లెక్స్",
   "model_picker_speed_ultrafast": "అల్ట్రాఫాస్ట్",
   "model_picker_ultracode_description": "డైనమిక్ వర్క్‌ఫ్లోలతో అదనపు అధిక ప్రయత్నం.",
-  "model_picker_autonomy": "స్వయంప్రతిపత్తి",
-  "model_picker_autonomy_agentic": "స్వతంత్ర",
-  "model_picker_autonomy_agentic_description": "పరిశోధనను సొంతంగా నడిపిస్తుంది, అవసరమైనప్పుడు మిమ్మల్ని సంప్రదిస్తుంది.",
-  "model_picker_autonomy_copilot": "సహకార",
-  "model_picker_autonomy_copilot_description": "తన ఆలోచనా విధానాన్ని వివరిస్తుంది, ఏదైనా చేసే ముందు మిమ్మల్ని అడుగుతుంది.",
   "model_picker_not_available": "అందుబాటులో లేదు",
   "service_tier_standard": "స్టాండర్డ్",
   "service_tier_default_speed": "డిఫాల్ట్ వేగం",
@@ -1364,7 +1359,6 @@
   "chat_attachments_total_too_large": "అటాచ్‌మెంట్‌లు మొత్తం {size} పరిమితిని మించాయి — ఒకటి తీసివేసి మళ్లీ ప్రయత్నించండి.",
   "chat_model_no_image_input": "{model}కి చిత్రాలకు మద్దతు లేదు. చిత్రాన్ని తీసివేయండి లేదా చిత్రాలకు మద్దతు ఉన్న మోడల్‌కు మారండి.",
   "chat_update_permissions_failed": "అనుమతులను అప్‌డేట్ చేయలేకపోయాము. మళ్లీ ప్రయత్నించండి.",
-  "chat_update_autonomy_failed": "స్వయంప్రతిపత్తిని అప్‌డేట్ చేయలేకపోయాము. మళ్లీ ప్రయత్నించండి.",
   "chat_exit_plan_failed": "ప్లాన్ మోడ్ నుండి నిష్క్రమించలేకపోయాము. మళ్లీ ప్రయత్నించండి.",
   "chat_toggle_plan_failed": "ప్లాన్ మోడ్‌ను ఆన్ లేదా ఆఫ్ చేయలేకపోయాము. మళ్లీ ప్రయత్నించండి.",
   "chat_asked_about_selection": "ఎంచుకున్న టెక్స్ట్ గురించి అడిగారు",
@@ -2614,6 +2608,5 @@
   "lit_sources_save_title": "డిఫాల్ట్‌గా సేవ్ చేయండి",
   "lit_sources_save_project": "ఈ ప్రాజెక్ట్ కోసం సేవ్ చేయండి",
   "lit_sources_save_all": "అన్ని ప్రాజెక్ట్‌ల కోసం సేవ్ చేయండి",
-  "lit_sources_revert": "ప్రాజెక్ట్ మూలాలను ఉపయోగించండి",
-  "project_settings_autonomy_title": "కొత్త చాట్‌ల స్వయంప్రతిపత్తి"
+  "lit_sources_revert": "ప్రాజెక్ట్ మూలాలను ఉపయోగించండి"
 }

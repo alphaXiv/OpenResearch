@@ -6,7 +6,7 @@ import { serve } from "./render.mjs";
 
 const deferred = () => { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; };
 const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
-const row = (id, title) => ({ id, projectId: "p", title, archived: false, autonomy: "agentic", planMode: false, updatedAt: 1 });
+const row = (id, title) => ({ id, projectId: "p", title, archived: false, planMode: false, updatedAt: 1 });
 
 function setup() {
   const workspace = createWorkspace("mutations");
@@ -54,7 +54,7 @@ test("a message sent after a setting waits for it", async () => {
 test("a message sent while two settings are pending waits for both", async () => {
   const { workspace, reply, requests } = setup();
   const first = mutPatchChatSession.runAsHeadlessPromise(workspace, row("s", "Old"), { permissionMode: "auto" }, {});
-  const second = mutPatchChatSession.runAsHeadlessPromise(workspace, row("s", "Old"), { autonomy: "copilot" }, {});
+  const second = mutPatchChatSession.runAsHeadlessPromise(workspace, row("s", "Old"), { planMode: true }, {});
   const sent = workspace.chat.serialize(async () => { requests.push("send"); });
   reply.resolve({ session: row("s", "Old") });
   await Promise.all([first, second, sent]);
@@ -64,7 +64,7 @@ test("a message sent while two settings are pending waits for both", async () =>
 test("a refused setting still lets the next message through", async () => {
   const { workspace, reply, requests } = setup();
   const first = mutPatchChatSession.runAsHeadlessPromise(workspace, row("s", "Old"), { title: " " }, {});
-  const second = mutPatchChatSession.runAsHeadlessPromise(workspace, row("s", "Old"), { autonomy: "copilot" }, {});
+  const second = mutPatchChatSession.runAsHeadlessPromise(workspace, row("s", "Old"), { planMode: true }, {});
   const sent = workspace.chat.serialize(async () => { requests.push("send"); });
   reply.resolve(Response.json({ error: "A chat needs a title." }, { status: 400 }));
   await assert.rejects(first);
