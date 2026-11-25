@@ -627,12 +627,11 @@ pub(crate) fn delete_found_provider(id: &str) -> Result<()> {
         })?;
     }
     if found.sources.contains(&"auth") {
-        // orx's copy goes first: while the user's sign-in remains, a failed removal can be retried.
-        for store in [NativeStore::Isolated, NativeStore::Legacy] {
-            let db = native_store::opencode_db(store);
-            native_store::opencode_database::delete_credentials(&db, id)
-                .map_err(|error| anyhow!("Could not sign {id} out of {}: {error}", db.display()))?;
-        }
+        native_store::opencode_database::sign_out_everywhere(
+            &native_store::opencode_db(NativeStore::Isolated),
+            &native_store::opencode_db(NativeStore::Legacy),
+            id,
+        )?;
         if let Some(path) =
             opencode_auth_path().filter(|_| auth_json_providers().iter().any(|p| p == id))
         {

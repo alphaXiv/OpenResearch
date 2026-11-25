@@ -173,6 +173,9 @@ pub(super) fn has_session(path: &Path, id: &str) -> Result<bool> {
     }
 }
 
+/// Keeps a copy from landing between the two deletes of [`sign_out_everywhere`].
+static CREDENTIALS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 const CREDENTIAL_COLUMNS: &str =
     "id, integration_id, label, value, connector_id, method_id, active, time_created, time_updated";
 
@@ -180,6 +183,9 @@ const CREDENTIAL_COLUMNS: &str =
 /// whichever side was updated last, so a token either side refreshed survives; a provider orx
 /// already has its own sign-in for is left alone. Returns how many rows changed.
 pub fn copy_credentials(user: &Path, orx: &Path) -> Result<usize> {
+    let _copying = CREDENTIALS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let columns: Vec<&str> = CREDENTIAL_COLUMNS.split(", ").collect();
     if !std::fs::exists(user)? || !has_columns(&open_readonly(user)?, "credential", &columns)? {
         return Ok(0);
@@ -233,8 +239,24 @@ pub fn credential_integrations(path: &Path) -> Result<Vec<String>> {
     Ok(ids.collect::<rusqlite::Result<_>>()?)
 }
 
-/// Signs `integration` out of an OpenCode 2 database.
-pub fn delete_credentials(path: &Path, integration: &str) -> Result<()> {
+/// Signs `integration` out of orx's database and then the user's, so a failure leaves the user's
+/// sign-in to retry from.
+pub fn sign_out_everywhere(orx: &Path, user: &Path, integration: &str) -> Result<()> {
+    let _removing = CREDENTIALS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for path in [orx, user] {
+        delete_credentials(path, integration).map_err(|error| {
+            anyhow!(
+                "Could not sign {integration} out of {}: {error}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn delete_credentials(path: &Path, integration: &str) -> Result<()> {
     if !std::fs::exists(path)? {
         return Ok(());
     }
