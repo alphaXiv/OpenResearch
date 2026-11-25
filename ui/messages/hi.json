@@ -2610,5 +2610,19 @@
   "lit_sources_save_title": "डिफ़ॉल्ट के रूप में सहेजें",
   "lit_sources_save_project": "इस प्रोजेक्ट के लिए सहेजें",
   "lit_sources_save_all": "सभी प्रोजेक्ट के लिए सहेजें",
-  "lit_sources_revert": "प्रोजेक्ट के स्रोत इस्तेमाल करें"
+  "lit_sources_revert": "प्रोजेक्ट के स्रोत इस्तेमाल करें",
+  "instructions_title": "OpenResearch निर्देश",
+  "instructions_description": "हर OpenResearch प्रोजेक्ट में हर एजेंट जिनका पालन करता है, जैसे रन का नाम कैसे रखें या नतीजे कैसे बताएँ। एजेंट बदलाव प्रस्तावित कर सकते हैं, जिन्हें आप मंज़ूर करते हैं।",
+  "instructions_placeholder": "रन का नाम उस आइडिया पर रखें जिसे वह परखता है। नतीजे टेबल में बताएँ।",
+  "instructions_saved_in": "{path} में सेव है",
+  "instructions_changed": "ये निर्देश इस पेज के बाहर बदल गए। सेव किया गया वर्ज़न नीचे है, और आपके बदलाव अभी भी एडिटर में हैं।",
+  "instructions_keep_mine": "मेरे बदलाव रखें",
+  "instructions_use_saved": "सेव किया वर्ज़न इस्तेमाल करें",
+  "chat_instructions_title": "अपने OpenResearch निर्देश बदलें?",
+  "chat_instructions_note": "नई चैट इनके साथ शुरू होती हैं। पहले से खुली चैट अपने एजेंट के दोबारा शुरू होने तक पुराने निर्देश रख सकती हैं।",
+  "chat_instructions_stale": "एजेंट के यह प्रस्ताव देने के बाद आपके निर्देश बदल गए। इसे अस्वीकार करें और एजेंट से फिर से प्रस्ताव देने को कहें।",
+  "chat_instructions_approve": "मंज़ूर करें",
+  "chat_instructions_decline": "अस्वीकार करें",
+  "chat_instructions_approved": "निर्देशों में बदलाव मंज़ूर किया",
+  "chat_instructions_declined": "निर्देशों में बदलाव अस्वीकार किया"
 }

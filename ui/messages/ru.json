@@ -2610,5 +2610,19 @@
   "lit_sources_save_title": "Сохранить по умолчанию",
   "lit_sources_save_project": "Сохранить для этого проекта",
   "lit_sources_save_all": "Сохранить для всех проектов",
-  "lit_sources_revert": "Использовать источники проекта"
+  "lit_sources_revert": "Использовать источники проекта",
+  "instructions_title": "Инструкции OpenResearch",
+  "instructions_description": "То, чему следует каждый агент в каждом проекте OpenResearch: например, как называть запуски или сообщать о результатах. Агенты могут предлагать изменения, а вы их одобряете.",
+  "instructions_placeholder": "Называй запуски по идее, которую они проверяют. Сообщай результаты в таблице.",
+  "instructions_saved_in": "Сохранено в {path}",
+  "instructions_changed": "Эти инструкции изменились за пределами этой страницы. Сохранённая версия ниже, а ваши правки остались в редакторе.",
+  "instructions_keep_mine": "Оставить мои правки",
+  "instructions_use_saved": "Использовать сохранённую версию",
+  "chat_instructions_title": "Изменить инструкции OpenResearch?",
+  "chat_instructions_note": "Новые чаты начинаются с ними. Уже открытые чаты могут сохранять прежние инструкции, пока их агент не перезапустится.",
+  "chat_instructions_stale": "Инструкции изменились после того, как агент это предложил. Отклоните предложение и попросите агента предложить снова.",
+  "chat_instructions_approve": "Одобрить",
+  "chat_instructions_decline": "Отклонить",
+  "chat_instructions_approved": "Изменение инструкций одобрено",
+  "chat_instructions_declined": "Изменение инструкций отклонено"
 }

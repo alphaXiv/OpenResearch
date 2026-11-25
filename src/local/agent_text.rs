@@ -50,6 +50,27 @@ fn a_chat_without_a_project_is_told_how_to_make_one() {
     assert!(!project.contains("orx project create"));
 }
 
+#[test]
+fn the_users_instructions_end_the_playbook_only_when_they_have_content() {
+    let plain = playbook_md(&sample_project(), &ProjectState::default());
+    let mut blank = ProjectState::default();
+    blank.instructions = " \n\n".into();
+    assert_eq!(playbook_md(&sample_project(), &blank), plain);
+    let playbook = playbook_md(&sample_project(), &with_instructions());
+    let (before, section) = playbook
+        .split_once("## Your user's OpenResearch instructions")
+        .unwrap();
+    assert_eq!(before.trim_end(), plain.trim_end());
+    assert!(section.contains("orx instructions propose"));
+    assert!(section.trim_end().ends_with("Name runs after the idea."));
+}
+
+fn with_instructions() -> ProjectState {
+    let mut state = ProjectState::default();
+    state.instructions = "Name runs after the idea.\n".into();
+    state
+}
+
 /// Text rendered from a template at runtime, labelled for failure messages.
 fn rendered() -> Vec<(String, String)> {
     let mut local = sample_project();
@@ -67,6 +88,10 @@ fn rendered() -> Vec<(String, String)> {
         (
             "scratch playbook".into(),
             playbook_md(&scratch_project(), &ProjectState::default()),
+        ),
+        (
+            "playbook with instructions".into(),
+            playbook_md(&sample_project(), &with_instructions()),
         ),
     ];
     for skill in super::skills::CATALOG {
