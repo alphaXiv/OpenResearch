@@ -10,17 +10,11 @@ later stages are only unreached.
 
 ## When the user names a duration or a budget
 
-Run the estimate with the compute flags the launch will use, also when the user
-asks what a run will cost:
-
-```sh
-orx exp run <expId> --estimate --backend <backend> --flavor <flavor>
-```
-
+Size the run with the estimate `orx-compute` has you run before every launch.
 If the estimate falls below the user's requested window, add steps or data or
 run a short calibration before launching, and tell the user which you did.
 Resize the workload in the child's code or configuration and update its stage
 plan. Re-estimate until the total falls inside the user's range. If the
-estimate says "at least," report the floor and calibrate the untimed stages
-before promising a duration or cost. Before launching, give the estimate and its
-hardware assumption in one line.
+estimate says "at least" or "unknown," report that and calibrate the untimed
+stages before promising a duration or cost; an unknown total cannot be
+re-estimated into the range.

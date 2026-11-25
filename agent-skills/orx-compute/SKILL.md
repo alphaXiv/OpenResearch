@@ -1,6 +1,6 @@
 ---
 name: orx-compute
-description: "Launch, size and stop runs on any backend. Use before any launch or relaunch, when choosing or configuring compute, when a run OOMs, stalls or times out, or for a standalone machine."
+description: "Launch, size, price and stop runs on any backend. Use before any launch or relaunch, when choosing or configuring compute, when a run OOMs, stalls or times out, or for a standalone machine."
 ---
 
 Each run uses an immutable snapshot of the experiment branch's recorded commit.
@@ -25,6 +25,12 @@ orx metrics <runId> [<runId>…]         # what runs logged to Trackio
   configuration on child branches.
 - **Commit before launching.** Uncommitted files are excluded; no backend needs
   a GitHub push.
+- **Estimate before every launch,** unasked: run
+  `orx exp run <expId> --estimate` with the `--backend` and `--flavor` the
+  launch will use, and give the user its time, cost and hardware in one line
+  before launching, or in the plan when planning; name the hardware that timed
+  it when that differs from the launch's. Run it the same way when the user
+  asks what a run would cost on some compute.
 - `orx exp run` queues the run and returns immediately; follow the post-launch
   check in `orx-experiment-runs`. Without `--force`, `orx` rejects a launch
   while the experiment already has a run in flight; pass it only for a

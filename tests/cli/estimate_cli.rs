@@ -28,8 +28,8 @@ fn estimate_reads_parent_counts_without_launching_or_changing_the_command() {
          VALUES ('parent', 'project', 'parent', 'main', 'Measured baseline', 'echo parent', 'idle', 1, 1);
          INSERT INTO local_experiments (id, project_id, parent_experiment_id, slug, branch_name, run_command, agent_status, run_monitor_json, created_at, updated_at)
          VALUES ('child', 'project', 'parent', 'child', 'child', 'echo child', 'idle', '{\"plan\":[{\"phase\":\"download\"},{\"phase\":\"train\",\"of\":600,\"unit\":\"steps\"}]}', 1, 1);
-         INSERT INTO runs (id, experiment_id, project_id, status, backend_json, command, created_at, updated_at)
-         VALUES ('parent-run', 'parent', 'project', 'done', '{}', 'echo parent', 1, 1);"
+         INSERT INTO runs (id, experiment_id, project_id, status, backend_json, launch_spec, command, created_at, updated_at)
+         VALUES ('parent-run', 'parent', 'project', 'done', '{\"kind\":\"engine\"}', '{\"kind\":\"modal_job\",\"target\":null,\"options\":{\"gpu\":\"A100\",\"cpu\":null,\"memory\":null}}', 'echo parent', 1, 1);"
     ).unwrap();
     let mut snapshot = orx_signals::Snapshot::new("parent-run", "1-1", "generation");
     snapshot
@@ -71,7 +71,7 @@ fn estimate_reads_parent_counts_without_launching_or_changing_the_command() {
     );
     assert!(stdout.contains(&saved_command), "{stdout}");
     assert!(
-        stdout.contains("Measured baseline — parent-run"),
+        stdout.contains("Measured baseline — parent-run, on --backend modal --flavor A100"),
         "{stdout}"
     );
     assert!(
@@ -201,7 +201,10 @@ fn estimate_reads_parent_counts_without_launching_or_changing_the_command() {
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
-    assert!(stdout.contains("eval not timed"), "{stdout}");
+    assert!(
+        stdout.contains("Total: unknown (eval not timed)"),
+        "{stdout}"
+    );
 
     std::fs::write(checkpoint, "broken").unwrap();
     let output = command()

@@ -46,7 +46,7 @@ orx.plan(["install", {"phase": "train", "of": iterations, "unit": "steps"}, "eva
 
 A stage that recurs is listed again where it recurs, never twice in a row.
 
-- `references/timing.md` — when the user names a duration or a budget, asks what a run will cost, or a stage shows as unplanned, skipped or untimed
+- `references/timing.md` — when the user names a duration or a budget, or a stage shows as unplanned, skipped or untimed
 
 ## 3. Report progress
 
