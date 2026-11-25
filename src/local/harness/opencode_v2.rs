@@ -1388,7 +1388,6 @@ pub(super) async fn detect(
     binary: crate::local::opencode::ResolvedBinary,
     mut info: HarnessInfo,
 ) -> HarnessInfo {
-    info.supports_steering = true;
     info.configured_model = super::snapshot_config().0["model"]
         .as_str()
         .map(str::to_owned);
@@ -1406,13 +1405,16 @@ pub(super) async fn detect(
                     .ok_or_else(|| anyhow!("OpenCode database has no parent"))?,
             );
         let (mut child, endpoint) = crate::local::opencode::start_server(&binary, cmd).await?;
+        // A legacy V2 server can't steer, so its steers wait in orx's queue.
+        let steers = !endpoint.legacy_v2_api;
         let result = discover_models(&endpoint).await;
         let _ = child.kill().await;
-        result
+        result.map(|catalog| (catalog, steers))
     })
     .await;
     match &catalog {
-        Ok(Ok((models, integrations))) => {
+        Ok(Ok(((models, integrations), steers))) => {
+            info.supports_steering = *steers;
             let connected: HashSet<&str> = integrations["data"]
                 .as_array()
                 .into_iter()
@@ -1477,7 +1479,7 @@ pub(super) async fn detect(
     }
 
     let integrations = match &catalog {
-        Ok(Ok((_, integrations))) => integrations,
+        Ok(Ok(((_, integrations), _))) => integrations,
         _ => &Value::Null,
     };
     let catalog = info
