@@ -627,6 +627,12 @@ pub(crate) fn delete_found_provider(id: &str) -> Result<()> {
         })?;
     }
     if found.sources.contains(&"auth") {
+        // orx's copy goes first: while the user's sign-in remains, a failed removal can be retried.
+        for store in [NativeStore::Isolated, NativeStore::Legacy] {
+            let db = native_store::opencode_db(store);
+            native_store::opencode_database::delete_credentials(&db, id)
+                .map_err(|error| anyhow!("Could not sign {id} out of {}: {error}", db.display()))?;
+        }
         if let Some(path) =
             opencode_auth_path().filter(|_| auth_json_providers().iter().any(|p| p == id))
         {
@@ -635,12 +641,6 @@ pub(crate) fn delete_found_provider(id: &str) -> Result<()> {
                     auth.retain(|key, _| key != id);
                 }
             })?;
-        }
-        // orx's database holds a copy of the user's sign-in, which would otherwise outlive it.
-        for store in [NativeStore::Legacy, NativeStore::Isolated] {
-            let db = native_store::opencode_db(store);
-            native_store::opencode_database::delete_credentials(&db, id)
-                .map_err(|error| anyhow!("Could not sign {id} out of {}: {error}", db.display()))?;
         }
     }
     Ok(())

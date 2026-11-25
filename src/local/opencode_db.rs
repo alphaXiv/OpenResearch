@@ -181,7 +181,7 @@ const CREDENTIAL_COLUMNS: &str =
 /// already has its own sign-in for is left alone. Returns how many rows changed.
 pub fn copy_credentials(user: &Path, orx: &Path) -> Result<usize> {
     let columns: Vec<&str> = CREDENTIAL_COLUMNS.split(", ").collect();
-    if !user.is_file() || !has_columns(&open_readonly(user)?, "credential", &columns)? {
+    if !std::fs::exists(user)? || !has_columns(&open_readonly(user)?, "credential", &columns)? {
         return Ok(0);
     }
     let mut connection = Connection::open_with_flags(orx, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
@@ -219,7 +219,7 @@ pub fn copy_credentials(user: &Path, orx: &Path) -> Result<usize> {
 
 /// The providers an OpenCode 2 database holds sign-ins for.
 pub fn credential_integrations(path: &Path) -> Result<Vec<String>> {
-    if !path.is_file() {
+    if !std::fs::exists(path)? {
         return Ok(Vec::new());
     }
     let connection = open_readonly(path)?;
@@ -235,7 +235,7 @@ pub fn credential_integrations(path: &Path) -> Result<Vec<String>> {
 
 /// Signs `integration` out of an OpenCode 2 database.
 pub fn delete_credentials(path: &Path, integration: &str) -> Result<()> {
-    if !path.is_file() {
+    if !std::fs::exists(path)? {
         return Ok(());
     }
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
