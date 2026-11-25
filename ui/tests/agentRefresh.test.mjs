@@ -190,3 +190,33 @@ test("Re-check blocks Finish and keeps its result when models appear in the back
   assert.ok(find('[role="dialog"] [role="status"]', m.harness_refresh_complete()));
   assert.ok(find('[role="dialog"]', codex.models[0].parsed.label));
 });
+
+test("switching one provider keeps every provider's model count while the agents reload", async () => {
+  const opencode = {
+    id: "opencode", name: "OpenCode", installed: true, authenticated: true, authState: "ready", agentReady: true,
+    version: "1.14.0", models: [model("openai/gpt-6.1-sol", "GPT-6.1 Sol"), model("wandb/qwen-4", "Qwen 4")], options: {},
+  };
+  let reloads = 0;
+  let answer;
+  serveApp({
+    "GET /api/harnesses": () => reloads++ === 0 ? { harnesses: [opencode] } : new Promise((resolve) => { answer = resolve; }),
+    "GET /api/harnesses/setup/commands": () => ({}),
+    "GET /api/harnesses/acp": () => [],
+    "GET /api/harnesses/acp/presets": () => [],
+    "GET /api/opencode/providers": () => [{ id: "openai", kind: "key", name: "OpenAI" }, { id: "wandb", kind: "key", name: "Wandb" }],
+    "GET /api/local-models": () => [],
+  });
+  await render(createElement(AgentList, { remote: false }));
+  await settle();
+  const count = m.settings_models_available_one({ count: 1 });
+  assert.ok(document.body.textContent.includes(count));
+
+  await click(document.querySelector(`button[aria-label="${m.settings_agent_use({ name: "Wandb" })}"]`));
+  assert.equal(reloads, 2, "the switch reloads the agents");
+  assert.ok(!document.body.textContent.includes(m.common_checking()), "no row reads as checking during the reload");
+  assert.ok(document.body.textContent.includes(count));
+
+  await act(async () => answer({ harnesses: [opencode] }));
+  await settle();
+  assert.ok(document.body.textContent.includes(count));
+});

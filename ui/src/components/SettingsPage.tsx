@@ -457,7 +457,7 @@ export function AgentList({ remote, onboarding, onOpenEnvVar }: {
   const { workspaceKey, queryClient, api } = workspace;
 
   const harnessesOptions = getHarnessesQuery();
-  const { data: harnesses = null, error: harnessesError, isFetching: harnessesFetching } = useQuery(harnessesOptions);
+  const { data: harnesses = null, error: harnessesError } = useQuery(harnessesOptions);
   const refresh = useAgentRefresh();
   const providersOptions = getOpenCodeProvidersQuery();
   const providers = useQuery(providersOptions);
@@ -780,11 +780,11 @@ export function AgentList({ remote, onboarding, onOpenEnvVar }: {
     const kind = provider.kind === "oauth" ? m.add_agent_signed_in() : key ? keyKind(key) : m.add_agent_api_key();
     const installs = !opencode?.installed && !remote && opencode && setupCommands.data?.opencode;
     const models = opencode?.models.filter((model) => model.id.startsWith(`${provider.id}/`)) ?? [];
-    const missing = Boolean(opencode?.installed && !opencode.catalogPending && !harnessesFetching && models.length === 0);
+    const missing = Boolean(opencode?.installed && !opencode.catalogPending && models.length === 0);
     const lineCount = agentModelLines("opencode", models).length;
     const remove = () => confirmRemove(provider.name, () => api.removeOpenCodeProvider(provider.id));
     const detail = !opencode?.installed ? m.settings_needs_opencode()
-      : opencode.catalogPending || harnessesFetching ? m.common_checking()
+      : opencode.catalogPending ? m.common_checking()
         : lineCount > 0 ? modelsAvailable(lineCount)
           : m.settings_no_models();
     return (
@@ -830,7 +830,7 @@ export function AgentList({ remote, onboarding, onOpenEnvVar }: {
       connection={connection}
       harnessReady={opencode?.agentReady ?? false}
       availableModels={opencode?.models.map((model) => model.id) ?? []}
-      checking={harnessesFetching || (opencode?.catalogPending ?? false)}
+      checking={opencode?.catalogPending ?? false}
       unknown={Boolean(harnessesError)}
       disabled={remote}
       off={turnedOff.has(`opencode:${connection.id}`)}
@@ -852,7 +852,7 @@ export function AgentList({ remote, onboarding, onOpenEnvVar }: {
       : has("auth") ? m.settings_found_signed_in()
         : has("env") && envVar ? m.settings_found_env({ name: ltr(envVar) })
           : m.settings_found_opencode();
-    const count = opencode?.catalogPending || harnessesFetching ? m.common_checking()
+    const count = opencode?.catalogPending ? m.common_checking()
       : lineCount > 0 ? modelsAvailable(lineCount) : m.settings_no_models();
     const file = provider.configPath && <code className="wrap-anywhere">{provider.configPath}</code>;
     const remove = provider.removable && !remote && !opencode?.catalogPending
