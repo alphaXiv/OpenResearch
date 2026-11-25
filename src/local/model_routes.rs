@@ -285,18 +285,32 @@ fn read(name: &str, spells: bool, variant: &mut Variant) -> Reading {
     reading
 }
 
-fn id_variant(harness: &str, id: &str) -> Variant {
+/// `id` without the effort, speed and thinking words Cursor and Antigravity spell into it, so usage names the model
+/// the way other agents report it.
+pub fn without_variant<'a>(harness: &str, id: &'a str) -> &'a str {
+    match id_variant(harness, id).1 {
+        0 => id,
+        kept => id
+            .match_indices('-')
+            .nth(kept - 1)
+            .map_or(id, |(at, _)| &id[..at]),
+    }
+}
+
+/// The variant `id` spells and how many of its `-` parts name the model.
+fn id_variant(harness: &str, id: &str) -> (Variant, usize) {
     let mut variant = Variant::default();
+    let all = id.split('-').count();
     if harness == "claude-code" {
         variant.context = id
             .strip_suffix(']')
             .and_then(|rest| rest.rsplit_once('['))
             .map(|(_, context)| context.to_ascii_lowercase())
             .filter(|context| is_context(context));
-        return variant;
+        return (variant, all);
     }
     if !spells_variants(harness) {
-        return variant;
+        return (variant, all);
     }
     let lower = id.to_ascii_lowercase();
     let mut parts: Vec<&str> = lower.split('-').collect();
@@ -317,7 +331,7 @@ fn id_variant(harness: &str, id: &str) -> Variant {
         }
         parts.pop();
     }
-    variant
+    (variant, parts.len())
 }
 
 /// `name` less the account a second key names after ` · `, `[1m]`, `(asides)`, `with 1M context`, zero-width
@@ -399,7 +413,7 @@ pub fn parse(
 ) -> ModelName {
     let free = free(id);
     let spells = spells_variants(harness);
-    let mut variant = id_variant(harness, id);
+    let mut variant = id_variant(harness, id).0;
     if display_name.is_some_and(|name| name.to_ascii_lowercase().contains("(thinking)")) {
         variant.thinking = true;
     }
@@ -1015,6 +1029,24 @@ mod tests {
             ("deepseek flash v@4.1", "DeepSeek V4.1 Flash")
         );
         assert_eq!(harness.key, flash.key);
+    }
+
+    #[test]
+    fn usage_names_a_spelled_variant_by_its_model() {
+        for (id, model) in [
+            ("gemini-4-neon-xhigh", "gemini-4-neon"),
+            ("gemini-3.8-flash-high", "gemini-3.8-flash"),
+            ("claude-opus-5-5-extra-high", "claude-opus-5-5"),
+            ("claude-opus-4-6-thinking", "claude-opus-4-6"),
+            ("gemini-4-carbon", "gemini-4-carbon"),
+            ("extra-high", "extra-high"),
+        ] {
+            assert_eq!(without_variant("antigravity", id), model);
+        }
+        assert_eq!(
+            without_variant("codex", "gpt-6-luna-high"),
+            "gpt-6-luna-high"
+        );
     }
 
     #[test]
