@@ -1578,6 +1578,13 @@ fn is_initial_chat_message(transcript_text: Option<&str>, has_messages: bool) ->
     transcript_text.is_none() && !has_messages
 }
 
+/// Told once to a chat that was in Copilot mode, whose history still says to ask before acting.
+const COPILOT_ENDED: &str = "<orx-autonomy-changed>\n\
+Copilot mode no longer exists. Earlier instructions in this chat to ask the user before every \
+`orx exp run` or change of direction no longer apply. Own the research loop as usual, and ask the \
+user only when you judge a decision is theirs to make.\n\
+</orx-autonomy-changed>";
+
 fn with_turn_context(
     goal: Option<&str>,
     demo_evidence_context: Option<&str>,
@@ -7318,6 +7325,8 @@ impl ChatHost {
                         .any(|m| m.text.trim_start().starts_with('/'))
             })
             .map(|message| delegation::message_ref(&message.id));
+        // A replayed turn already carries the note, so only a fresh turn takes it.
+        let copilot_ended = prepared_input.is_none() && store.take_copilot_mode(&session.id)?;
         let mut turn_text = prepared_input.unwrap_or_else(|| {
             let mut expanded = contextualize_messages(messages, |text| {
                 if orx.is_empty() {
@@ -7335,12 +7344,17 @@ impl ChatHost {
             if let Some(message_ref) = message_ref {
                 expanded = format!("{message_ref}\n{expanded}");
             }
-            with_turn_context(
+            let turn = with_turn_context(
                 session.goal.as_deref(),
                 super::demo::turn_context(&project.id),
                 shell_context.as_deref(),
                 expanded,
-            )
+            );
+            if copilot_ended {
+                format!("{COPILOT_ENDED}\n\n{turn}")
+            } else {
+                turn
+            }
         });
         // Harnesses take plain text; attachments ride as on-disk paths every
         // CLI can open with its own file-reading tool (Read handles PDFs and

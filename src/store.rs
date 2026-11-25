@@ -5381,6 +5381,15 @@ impl Store {
         Ok(())
     }
 
+    /// Whether the chat was in the removed Copilot mode, clearing it so its agent is told once.
+    pub fn take_copilot_mode(&self, id: &str) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE chat_sessions SET autonomy = NULL WHERE id = ?1 AND autonomy = 'copilot'",
+            params![id],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// Cleared after a compaction: the pre-compaction total would otherwise be
     /// inherited by the next turn and keep the meter pinned high.
     pub fn clear_chat_session_context_usage(&self, id: &str) -> Result<()> {
@@ -12035,6 +12044,27 @@ pub(crate) mod tests {
         assert!(!dir.join("local-runs/run").exists());
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_chat_an_older_orx_left_in_copilot_mode_is_taken_once() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-copilot-ended").unwrap();
+        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        store
+            .create_local_project(&local_project_fixture("project"))
+            .unwrap();
+        store.put_chat_session("copilot", "claude-code");
+        store.put_chat_session("agentic", "claude-code");
+        store
+            .conn
+            .execute(
+                "UPDATE chat_sessions SET autonomy = 'copilot' WHERE id = 'copilot'",
+                [],
+            )
+            .unwrap();
+        assert!(store.take_copilot_mode("copilot").unwrap());
+        assert!(!store.take_copilot_mode("copilot").unwrap());
+        assert!(!store.take_copilot_mode("agentic").unwrap());
     }
 
     #[test]
