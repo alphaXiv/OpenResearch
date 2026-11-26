@@ -6,7 +6,7 @@ import { askBeforeRestarting, stoppedByRestart } from "../closeDialog";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { RefreshCw, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { type Changes, type UpdateStatus } from "../api";
 import type { Workspace } from "../workspace";
@@ -279,14 +279,33 @@ export function ServerStopped({ workspace }: { workspace: Workspace }) {
  *
  *  Deliberately not shown for a merely *available* update — that is the
  *  updater's job, and a banner for something already in hand is noise. */
+let bannerHeld = false;
+const bannerHeldListeners = new Set<() => void>();
+
+/** Keeps a newly ready update's banner back while the version popup is open: it shows the same
+ *  update, and the banner landing above the sidebar would shove the popup down. */
+export function holdUpdateBanner(held: boolean) {
+  bannerHeld = held;
+  bannerHeldListeners.forEach((listener) => listener());
+}
+
 export function UpdateBanner({ status, hasSidebar = false }: { status: UpdateStatus | null; hasSidebar?: boolean }) {
   const [dismissed, setDismissed] = useState<string | null>(null);
+  const [revealed, setRevealed] = useState<string | null>(null);
+  const held = useSyncExternalStore(
+    (listener) => {
+      bannerHeldListeners.add(listener);
+      return () => bannerHeldListeners.delete(listener);
+    },
+    () => bannerHeld,
+  );
 
   // `installedVersion`, not `latest`: a release can land between the install and
   // the restart, and the banner must name what is actually on disk.
   const version = status?.restartRequired ? status.installedVersion : null;
   const { restarting, error, restart } = useRestartApp(status);
-  if (!version || dismissed === version) return null;
+  if (version && !held && revealed !== version) setRevealed(version);
+  if (!version || revealed !== version || dismissed === version) return null;
 
   const canary = status?.installedTag?.startsWith("canary-");
   const changes = describeChanges(status?.changes ?? null);

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
 import { act, createElement } from "react";
-import { ServerStopped, UpdateHandoff } from "../src/components/UpdateBanner.tsx";
+import { holdUpdateBanner, ServerStopped, UpdateBanner, UpdateHandoff } from "../src/components/UpdateBanner.tsx";
 import { createWorkspace } from "../src/workspace.tsx";
 import { m } from "../src/paraglide/messages.js";
 import { find, render, renderApp, serve, serveApp, settle } from "./render.mjs";
@@ -201,4 +201,22 @@ test("on Windows the overlay draws the caption buttons it covers, and so does th
   assert.equal(caption(m.window_maximize()), null);
   await act(() => caption(m.window_restore()).click());
   assert.deepEqual(sent, ["titlebar:close", "titlebar:minimize", "titlebar:zoom"]);
+});
+
+test("an update that lands while the version popup is open waits for it to close, and one already shown stays", async () => {
+  serve(() => undefined);
+  const ready = { ...status("1.0.0"), restartRequired: true, installedVersion: "2.0.0", installedTag: "v2.0.0", canRestart: true };
+  const banner = () => document.querySelector(".update-banner");
+
+  holdUpdateBanner(true);
+  const view = await render(createElement(UpdateBanner, { status: ready }));
+  assert.equal(banner(), null);
+
+  await act(() => holdUpdateBanner(false));
+  assert.ok(banner());
+
+  await act(() => holdUpdateBanner(true));
+  await view.rerender(createElement(UpdateBanner, { status: ready }));
+  assert.ok(banner(), "opening the popup over a shown banner keeps it");
+  await act(() => holdUpdateBanner(false));
 });
