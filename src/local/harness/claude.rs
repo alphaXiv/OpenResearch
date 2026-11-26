@@ -2849,10 +2849,14 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
             let usage = event.pointer("/message/usage");
             if let Some(used) = claude_used_tokens(usage) {
                 state.had_activity |= used > 0;
+                let cache_ttl_secs = claude_cache_ttl_secs(usage);
+                let cache_warmed_at = (cache_ttl_secs.is_some() || claude_cache_touched(usage))
+                    .then(crate::store::now_ms);
                 ctx.report_usage(ContextUsage {
                     used_tokens: used,
                     context_window: None,
-                    cache_ttl_secs: claude_cache_ttl_secs(usage),
+                    cache_ttl_secs,
+                    cache_warmed_at,
                     ..Default::default()
                 });
             }
@@ -3155,6 +3159,18 @@ fn claude_cache_ttl_secs(usage: Option<&Value>) -> Option<u64> {
     }
 }
 
+/// Whether this request wrote or read the prompt cache, resetting its TTL.
+fn claude_cache_touched(usage: Option<&Value>) -> bool {
+    ["cache_creation_input_tokens", "cache_read_input_tokens"]
+        .into_iter()
+        .any(|key| {
+            usage
+                .and_then(|u| u.get(key))
+                .and_then(Value::as_u64)
+                .is_some_and(|tokens| tokens > 0)
+        })
+}
+
 /// Fold the terminal `result` event's usage into the meter: `modelUsage` reports
 /// the context window (keyed by model id — pick the turn's model, else the
 /// largest entry, so subagent models don't win); occupancy comes from the
@@ -3182,21 +3198,38 @@ fn report_result_usage(ctx: &mut TurnCtx, event: &Value) -> Option<u64> {
         .and_then(Value::as_u64);
     // Prefer usage already captured from an `assistant` event; else fall back to
     // the LAST iteration (the aggregate overstates a multi-iteration context).
-    let iteration_used = event
+    let last_usage = event
         .pointer("/usage/iterations")
         .and_then(Value::as_array)
         .and_then(|it| it.last())
-        .and_then(|last| claude_used_tokens(Some(last)));
-    let event_used = iteration_used.or_else(|| claude_used_tokens(event.get("usage")));
+        .filter(|last| claude_used_tokens(Some(last)).is_some())
+        .or_else(|| event.get("usage"));
+    let event_used = last_usage.and_then(|usage| claude_used_tokens(Some(usage)));
     let used = ctx
         .context_usage
         .as_ref()
         .map(|u| u.used_tokens)
         .or(event_used);
     if let Some(used) = used {
+        let already_warmed = ctx
+            .context_usage
+            .as_ref()
+            .and_then(|u| u.cache_warmed_at)
+            .is_some();
+        let cache_ttl_secs = ctx
+            .context_usage
+            .as_ref()
+            .and_then(|u| u.cache_ttl_secs)
+            .or_else(|| event_used.and_then(|_| claude_cache_ttl_secs(last_usage)));
+        let cache_warmed_at = (!already_warmed
+            && event_used.is_some()
+            && (cache_ttl_secs.is_some() || claude_cache_touched(last_usage)))
+        .then(crate::store::now_ms);
         ctx.report_usage(ContextUsage {
             used_tokens: used,
             context_window,
+            cache_ttl_secs,
+            cache_warmed_at,
             ..Default::default()
         });
     }
@@ -5660,6 +5693,7 @@ mod tests {
             .unwrap()
         };
         let ttl = |ctx: &TurnCtx| ctx.context_usage.as_ref().unwrap().cache_ttl_secs;
+        let warmed_at = |ctx: &TurnCtx| ctx.context_usage.as_ref().unwrap().cache_warmed_at;
 
         apply_event(
             &mut ctx,
@@ -5667,16 +5701,25 @@ mod tests {
             &assistant(r#"{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":900}"#),
         );
         assert_eq!(ttl(&ctx), Some(3600));
+        assert!(warmed_at(&ctx).is_some());
 
-        apply_event(
-            &mut ctx,
-            &mut TurnState::default(),
-            &assistant(r#"{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}"#),
-        );
+        // Backdate the stored warm time so a pure cache hit proves it refreshes the clock.
+        ctx.context_usage.as_mut().unwrap().cache_warmed_at = Some(1);
+        let pure_hit: Value = serde_json::from_str(
+            r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"hi"}],
+                 "usage":{"input_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":100,"output_tokens":4,
+                   "cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}}}"#,
+        )
+        .unwrap();
+        apply_event(&mut ctx, &mut TurnState::default(), &pure_hit);
         assert_eq!(
             ttl(&ctx),
             Some(3600),
             "a pure cache hit keeps the known lifetime"
+        );
+        assert!(
+            warmed_at(&ctx).is_some_and(|at| at > 1),
+            "a pure cache hit refreshes cache_warmed_at"
         );
 
         apply_event(

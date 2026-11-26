@@ -1306,6 +1306,10 @@ pub struct ContextUsage {
     /// last reported it; absent when the harness doesn't say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_ttl_secs: Option<u64>,
+    /// Unix-ms timestamp of the latest model response that warmed or refreshed
+    /// the prompt cache; absent when the harness doesn't track cache lifetime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_warmed_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2516,29 +2520,31 @@ impl ChatHost {
             store.set_chat_session_native_id(session_id, None)?;
         }
         store.clear_chat_session_context_usage(session_id)?;
+        self.emit(
+            "chat.usage",
+            json!({ "sessionId": session_id, "usage": serde_json::Value::Null }),
+        );
         Ok(())
     }
 
-    /// Compacts the chat before orx resumes it on its own, in the turn slot the caller already
-    /// holds, so no queued message runs between the two: once the agent's prompt cache has gone
-    /// cold, and before a flag's wake once its context is past [`WAKE_COMPACT_SHARE`] of its
-    /// window. A failure shows on the compaction's row and the resume goes ahead with the history
-    /// intact. Unknown usage compacts nothing.
-    async fn compact_before_resume(self: &Arc<Self>, session_id: &str, flag_wake: bool) {
-        let Ok(store) = Store::open() else { return };
-        let Ok(Some(session)) = store.get_chat_session(session_id) else {
-            return;
-        };
+    /// Decides synchronously whether `session_id` should be compacted before orx
+    /// resumes it on its own: once its prompt cache has gone cold on a large
+    /// chat, and before a flag's wake once its context is past
+    /// [`WAKE_COMPACT_SHARE`] of its window. Unknown usage compacts nothing.
+    pub(super) fn plan_resume_compaction(
+        &self,
+        store: &Store,
+        session_id: &str,
+        flag_wake: bool,
+    ) -> Option<ResumeCompaction> {
+        let session = store.get_chat_session(session_id).ok()??;
         if session.archived {
-            return;
+            return None;
         }
-        let Some(usage) = session
+        let usage = session
             .context_usage_json
             .as_deref()
-            .and_then(|json| serde_json::from_str::<ContextUsage>(json).ok())
-        else {
-            return;
-        };
+            .and_then(|json| serde_json::from_str::<ContextUsage>(json).ok())?;
         let crowded = flag_wake
             && usage
                 .context_window
@@ -2547,51 +2553,130 @@ impl ChatHost {
                     usage.used_tokens as f64 >= WAKE_COMPACT_SHARE * window as f64
                 });
         let cold = usage.used_tokens >= COLD_COMPACT_MIN_TOKENS
-            && usage.cache_ttl_secs.is_some_and(|ttl| {
-                let last_reply = store
-                    .list_chat_messages(session_id)
-                    .ok()
-                    .and_then(|messages| {
-                        messages
-                            .iter()
-                            .filter(|message| message.role == "assistant")
-                            .filter_map(|message| message.completed_at)
-                            .max()
-                    });
-                last_reply.is_some_and(|at| at + ttl as i64 * 1000 <= now_ms())
-            });
+            && usage
+                .cache_warmed_at
+                .zip(usage.cache_ttl_secs)
+                .is_some_and(|(at, ttl)| at + ttl as i64 * 1000 <= now_ms());
         if !crowded && !cold {
-            return;
+            return None;
         }
         let supported = crate::local::harness::session_harness(&session.harness, session_id)
             .is_some_and(|harness| harness.supports_compaction());
         let snapshot = crate::local::harness::compaction_snapshot(session_id).unwrap_or_default();
         if !supported || snapshot.trim().is_empty() {
-            return;
+            return None;
         }
-        let Ok(marker) = self.publish_compaction_marker(&store, session_id, None, "running", None)
-        else {
-            return;
+        Some(ResumeCompaction {
+            session_id: session_id.to_string(),
+            session,
+            snapshot,
+        })
+    }
+
+    /// Compacts `plan` in a background task that owns `guard`'s turn slot, then
+    /// hands that same slot straight to `resume` so no queued message runs
+    /// between the two — without blocking the watcher loop, turn-lease
+    /// heartbeats, or `data_dir_gate`. A compaction failure shows on its row
+    /// and `resume` still goes ahead with history intact. Returns `Err(guard)`
+    /// if the progress row could not be recorded so the caller can resume now.
+    pub(super) async fn spawn_resume_compaction<F, Fut>(
+        self: &Arc<Self>,
+        plan: ResumeCompaction,
+        guard: TurnGuard,
+        resume: F,
+    ) -> std::result::Result<(), TurnGuard>
+    where
+        F: FnOnce(Arc<Self>, TurnGuard) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let (marker, delegator) = {
+            let Ok(store) = Store::open() else {
+                return Err(guard);
+            };
+            let Ok(marker) =
+                self.publish_compaction_marker(&store, &plan.session_id, None, "running", None)
+            else {
+                return Err(guard);
+            };
+            (marker, Self::delegator(&store, &plan.session_id))
         };
-        let settled = match self
-            .compaction_outcome(session_id, &session, &snapshot)
-            .await
-        {
-            Ok(reseed) => self.apply_compaction(&store, session_id, reseed).err(),
-            Err(error) => Some(error),
-        };
-        if let Some(error) = &settled {
-            eprintln!("orx up: compacting chat {session_id} before resuming it: {error:#}");
+        let mut turns = self.turns.lock().await;
+        if !matches!(
+            turns.get(&plan.session_id),
+            Some(TurnState::Reserved { .. })
+        ) {
+            drop(turns);
+            if let Ok(store) = Store::open() {
+                let _ = self.publish_compaction_marker(
+                    &store,
+                    &plan.session_id,
+                    Some(&marker),
+                    "error",
+                    Some("Compaction stopped".into()),
+                );
+            }
+            guard.defuse();
+            return Ok(());
         }
-        let (status, detail) = match settled {
-            Some(error) => ("error", Some(error.to_string())),
-            None => ("completed", None),
-        };
-        if let Err(error) =
-            self.publish_compaction_marker(&store, session_id, Some(&marker), status, detail)
-        {
-            eprintln!("orx up: recording chat {session_id}'s compaction: {error:#}");
-        }
+        let host = self.clone();
+        let session_id = plan.session_id.clone();
+        let owned_marker = marker.clone();
+        let handle = tokio::spawn(async move {
+            let outcome = host
+                .compaction_outcome(&session_id, &plan.session, &plan.snapshot)
+                .await;
+            if !host.owns_compaction(&session_id, &owned_marker.id).await {
+                return;
+            }
+            if let Ok(store) = Store::open() {
+                let settled = match outcome {
+                    Ok(reseed) => host.apply_compaction(&store, &session_id, reseed).err(),
+                    Err(error) => Some(error),
+                };
+                if let Some(error) = &settled {
+                    eprintln!("orx up: compacting chat {session_id} before resuming it: {error:#}");
+                }
+                let (status, detail) = match settled {
+                    Some(error) => ("error", Some(error.to_string())),
+                    None => ("completed", None),
+                };
+                if host.owns_compaction(&session_id, &owned_marker.id).await {
+                    if let Err(error) = host.publish_compaction_marker(
+                        &store,
+                        &session_id,
+                        Some(&owned_marker),
+                        status,
+                        detail,
+                    ) {
+                        eprintln!("orx up: recording chat {session_id}'s compaction: {error:#}");
+                    }
+                }
+            }
+            let guard = {
+                let mut turns = host.turns.lock().await;
+                if !matches!(
+                    turns.get(&session_id),
+                    Some(TurnState::Active(active)) if active.message_id == owned_marker.id
+                ) {
+                    return;
+                }
+                turns.insert(session_id.clone(), TurnState::Reserved { turn_id: None });
+                TurnGuard::adopt(&host, &session_id)
+            };
+            resume(host, guard).await;
+        });
+        turns.insert(
+            plan.session_id.clone(),
+            TurnState::Active(ActiveTurn {
+                handle,
+                message_id: marker.id.clone(),
+                turn_id: format!("compact_{}", marker.id),
+            }),
+        );
+        self.emit_busy(&plan.session_id, true, delegator);
+        drop(turns);
+        guard.defuse();
+        Ok(())
     }
 
     async fn owns_compaction(&self, session_id: &str, message_id: &str) -> bool {
@@ -4081,6 +4166,13 @@ mod persisted_queue_delay_tests {
             Duration::from_millis(500)
         );
     }
+}
+
+/// A planned compaction to run in the background before an automatic resume.
+pub(super) struct ResumeCompaction {
+    session_id: String,
+    session: StoredChatSession,
+    snapshot: String,
 }
 
 /// Reserves a session's turn slot for the duration of `send_message`'s setup.
@@ -10422,9 +10514,9 @@ impl TurnCtx {
 
     /// Record the latest context-window usage a harness reported and stream it
     /// live over `chat.usage`. Merging: a report that omits `context_window`,
-    /// `compact_at` or `cache_ttl_secs` inherits the previously-known value (an `assistant`
-    /// event carries the token count but not the window; the `result` event
-    /// fills the window).
+    /// `compact_at`, `cache_ttl_secs` or `cache_warmed_at` inherits the
+    /// previously-known value (an `assistant` event carries the token count
+    /// but not the window; the `result` event fills the window).
     pub fn report_usage(&mut self, mut usage: ContextUsage) {
         if let Some(prev) = &self.context_usage {
             if usage.context_window.is_none() {
@@ -10435,6 +10527,9 @@ impl TurnCtx {
             }
             if usage.cache_ttl_secs.is_none() {
                 usage.cache_ttl_secs = prev.cache_ttl_secs;
+            }
+            if usage.cache_warmed_at.is_none() {
+                usage.cache_warmed_at = prev.cache_warmed_at;
             }
         }
         self.publish_usage(usage);
@@ -11390,11 +11485,91 @@ fn run_notice_request(
     Ok(request)
 }
 
+/// Delivers one claimed batch of run notices and records the outcome.
+/// Returns `true` when the caller should track `session_id` in its held set.
+async fn deliver_run_notice_batch(
+    chat: &Arc<ChatHost>,
+    session_id: &str,
+    notices: &[crate::store::RunNotice],
+    guard: TurnGuard,
+) -> Result<bool> {
+    let flagged = notices[0].is_flag_wake();
+    let result = send_run_notice_batch(chat, session_id, notices, guard).await;
+    let store = Store::open()?;
+    match result {
+        Ok(submission @ (TurnSubmission::Started(_) | TurnSubmission::Existing(_))) => {
+            if let Err(error) = crate::engine::watch::report::after_turn(&store, session_id) {
+                eprintln!("orx up: report: marking chat {session_id}'s results: {error:#}");
+            }
+            if let Some(turn) =
+                store.get_chat_turn_by_client_id(session_id, &notices[0].client_turn_id)?
+            {
+                if !flagged && turn.delivery_state == "accepted" {
+                    store.mark_run_notice_batch_delivered(
+                        session_id,
+                        &notices[0].client_turn_id,
+                        now_ms(),
+                    )?;
+                } else if (flagged && turn.delivery_state == "accepted")
+                    || turn.state == "interrupted"
+                    || (turn.state == "failed" && turn.delivery_state == "unknown")
+                {
+                    let reason = if flagged && turn.delivery_state == "accepted" {
+                        crate::store::FLAG_DELIVERY_UNCONFIRMED
+                    } else if turn.state == "interrupted" {
+                        "Notice delivery was interrupted before confirmation"
+                    } else {
+                        turn.error_message
+                            .as_deref()
+                            .unwrap_or("Notice delivery could not be confirmed")
+                    };
+                    store.record_run_notice_failure(
+                        session_id,
+                        &notices[0].client_turn_id,
+                        reason,
+                        true,
+                        now_ms(),
+                    )?;
+                } else {
+                    return Ok(false);
+                }
+                // Reconciling an existing reply releases a reservation without emitting busy.
+                if matches!(submission, TurnSubmission::Existing(_)) {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        Ok(TurnSubmission::NotStarted) if flagged => Ok(true),
+        Ok(_) => Ok(false),
+        Err(err) => {
+            let permanent = is_client_turn_conflict(&err)
+                || err.downcast_ref::<PermanentRunNoticeError>().is_some();
+            if let Some(failures) = store.record_run_notice_failure(
+                session_id,
+                &notices[0].client_turn_id,
+                &err.to_string(),
+                permanent,
+                now_ms(),
+            )? {
+                if failures == 1 {
+                    eprintln!(
+                        "orx up: run notices: batch {}: {err}",
+                        notices[0].client_turn_id
+                    );
+                }
+                return Ok(true);
+            }
+            Ok(false)
+        }
+    }
+}
+
 /// Returns the chats whose turn slot was taken; whoever holds it reports `chat.busy` false on release.
 async fn process_run_notices(
     chat: &Arc<ChatHost>,
     store: Store,
-    data_dir_move_in_progress: &std::sync::atomic::AtomicBool,
+    data_dir_move_in_progress: &Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<Vec<String>> {
     let mut held = Vec::new();
     if data_dir_move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
@@ -11434,72 +11609,47 @@ async fn process_run_notices(
             .get_chat_turn_by_client_id(&session_id, &notices[0].client_turn_id)?
             .is_none()
         {
-            chat.compact_before_resume(&session_id, flagged).await;
-        }
-        match send_run_notice_batch(chat, &session_id, &notices, guard).await {
-            Ok(submission @ (TurnSubmission::Started(_) | TurnSubmission::Existing(_))) => {
-                if let Err(error) = crate::engine::watch::report::after_turn(&store, &session_id) {
-                    eprintln!("orx up: report: marking chat {session_id}'s results: {error:#}");
-                }
-                if let Some(turn) =
-                    store.get_chat_turn_by_client_id(&session_id, &notices[0].client_turn_id)?
-                {
-                    if !flagged && turn.delivery_state == "accepted" {
-                        store.mark_run_notice_batch_delivered(
-                            &session_id,
-                            &notices[0].client_turn_id,
-                            now_ms(),
-                        )?;
-                    } else if (flagged && turn.delivery_state == "accepted")
-                        || turn.state == "interrupted"
-                        || (turn.state == "failed" && turn.delivery_state == "unknown")
-                    {
-                        let reason = if flagged && turn.delivery_state == "accepted" {
-                            crate::store::FLAG_DELIVERY_UNCONFIRMED
-                        } else if turn.state == "interrupted" {
-                            "Notice delivery was interrupted before confirmation"
-                        } else {
-                            turn.error_message
-                                .as_deref()
-                                .unwrap_or("Notice delivery could not be confirmed")
+            if let Some(plan) = chat.plan_resume_compaction(&store, &session_id, flagged) {
+                let session = session_id.clone();
+                let moving = data_dir_move_in_progress.clone();
+                match chat
+                    .spawn_resume_compaction(plan, guard, move |chat, mut guard| async move {
+                        if moving.load(std::sync::atomic::Ordering::SeqCst) {
+                            guard.release().await;
+                            return;
+                        }
+                        let notices = match Store::open()
+                            .and_then(|store| store.run_notice_batch(&session))
+                        {
+                            Ok(notices) if !notices.is_empty() => notices,
+                            Ok(_) => {
+                                guard.release().await;
+                                return;
+                            }
+                            Err(err) => {
+                                eprintln!("orx up: run notices: {err}");
+                                guard.release().await;
+                                return;
+                            }
                         };
-                        store.record_run_notice_failure(
-                            &session_id,
-                            &notices[0].client_turn_id,
-                            reason,
-                            true,
-                            now_ms(),
-                        )?;
-                    } else {
+                        if let Err(err) =
+                            deliver_run_notice_batch(&chat, &session, &notices, guard).await
+                        {
+                            eprintln!("orx up: run notices: {err}");
+                        }
+                    })
+                    .await
+                {
+                    Ok(()) => {
+                        held.push(session_id);
                         continue;
                     }
-                    // Reconciling an existing reply releases a reservation without emitting busy.
-                    if matches!(submission, TurnSubmission::Existing(_)) {
-                        held.push(session_id);
-                    }
+                    Err(returned_guard) => guard = returned_guard,
                 }
             }
-            Ok(TurnSubmission::NotStarted) if flagged => held.push(session_id),
-            Ok(_) => {}
-            Err(err) => {
-                let permanent = is_client_turn_conflict(&err)
-                    || err.downcast_ref::<PermanentRunNoticeError>().is_some();
-                if let Some(failures) = store.record_run_notice_failure(
-                    &session_id,
-                    &notices[0].client_turn_id,
-                    &err.to_string(),
-                    permanent,
-                    now_ms(),
-                )? {
-                    if failures == 1 {
-                        eprintln!(
-                            "orx up: run notices: batch {}: {err}",
-                            notices[0].client_turn_id
-                        );
-                    }
-                    held.push(session_id);
-                }
-            }
+        }
+        if deliver_run_notice_batch(chat, &session_id, &notices, guard).await? {
+            held.push(session_id);
         }
     }
     Ok(held)
@@ -11568,9 +11718,7 @@ pub async fn keep_turn_leases(
         }
         stop_turns_whose_lease_was_lost(&chat).await;
         let Ok(store) = Store::open() else { continue };
-        if let Err(err) =
-            news::deliver_news(&chat, store, Some(data_dir_move_in_progress.as_ref())).await
-        {
+        if let Err(err) = news::deliver_news(&chat, store, Some(&data_dir_move_in_progress)).await {
             eprintln!("orx up: news watcher: {err}");
         }
     }
@@ -13925,18 +14073,20 @@ mod bridge_tests {
                 .filter(|message| message.parts_json.contains(COMPACTED_TOOL))
                 .count()
         };
-        for (id, used, replied_ago_ms) in [
+        for (id, used, warmed_ago_ms) in [
             ("cold", 200_000, 301_000),
             ("warm", 200_000, 1_000),
             ("small", 199_999, 301_000),
         ] {
-            let usage = format!(r#"{{"usedTokens":{used},"cacheTtlSecs":300}}"#);
+            let warmed_at = now_ms() - warmed_ago_ms;
+            let usage = format!(
+                r#"{{"usedTokens":{used},"cacheTtlSecs":300,"cacheWarmedAt":{warmed_at}}}"#
+            );
             let mut session = bare_session();
             session.id = id.into();
             store.create_chat_session(&session).unwrap();
             store.set_chat_session_context_usage(id, &usage).unwrap();
             for (message, role, parent) in [("u", "user", None), ("a", "assistant", Some("u"))] {
-                let at = now_ms() - replied_ago_ms;
                 store
                     .upsert_chat_message_on_branch(&StoredChatMessage {
                         id: format!("{id}-{message}"),
@@ -13944,8 +14094,8 @@ mod bridge_tests {
                         role: role.into(),
                         parts_json: serde_json::to_string(&vec![WirePart::text("text", "hi")])
                             .unwrap(),
-                        created_at: at,
-                        completed_at: Some(at),
+                        created_at: warmed_at,
+                        completed_at: Some(warmed_at),
                         parent_id: parent.map(|parent| format!("{id}-{parent}")),
                         base_native_session_id: None,
                         result_native_session_id: None,
@@ -13954,11 +14104,56 @@ mod bridge_tests {
                     })
                     .unwrap();
             }
-            host.compact_before_resume(id, false).await;
         }
+        assert!(host.plan_resume_compaction(&store, "warm", false).is_none());
+        assert!(host
+            .plan_resume_compaction(&store, "small", false)
+            .is_none());
+        let plan = host
+            .plan_resume_compaction(&store, "cold", false)
+            .expect("cold large chat should plan compaction");
+        let guard = TurnGuard::claim_idle(&host, "cold", TurnState::Reserved { turn_id: None })
+            .await
+            .unwrap();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        host.spawn_resume_compaction(plan, guard, move |_host, mut guard| async move {
+            guard.release().await;
+            let _ = done_tx.send(());
+        })
+        .await
+        .ok()
+        .expect("compaction should spawn");
+        // The compaction runs in the background while keeping the turn slot busy.
+        assert!(host.is_busy("cold").await);
+        tokio::time::timeout(Duration::from_secs(5), done_rx)
+            .await
+            .expect("resume callback runs after compaction settles")
+            .unwrap();
         assert_eq!(compactions("cold"), 1);
         assert_eq!(compactions("warm"), 0);
         assert_eq!(compactions("small"), 0);
+        // The compaction failed (project missing), writing a fresh assistant error row,
+        // yet the expired cache clock must stay cold rather than resetting to now.
+        let plan = host
+            .plan_resume_compaction(&store, "cold", false)
+            .expect("a failed compaction row must not reset the cache clock");
+        let guard = TurnGuard::claim_idle(&host, "cold", TurnState::Reserved { turn_id: None })
+            .await
+            .unwrap();
+        let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel();
+        host.spawn_resume_compaction(plan, guard, move |_host, mut guard| async move {
+            guard.release().await;
+            let _ = stopped_tx.send(());
+        })
+        .await
+        .ok()
+        .expect("second compaction should spawn");
+        assert!(host.interrupt("cold").await.unwrap());
+        assert!(!host.is_busy("cold").await);
+        assert!(
+            stopped_rx.await.is_err(),
+            "Stop cancels the resume callback when aborting compaction"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -15291,7 +15486,7 @@ mod run_wakeup_tests {
         };
         let (outbox, phase) = child.split_once(':').unwrap();
         let store = Store::open().unwrap();
-        let moving = std::sync::atomic::AtomicBool::new(false);
+        let moving = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let insert = |dedupe: &str, body: &str| {
             if outbox == "flag_wakes" {
                 store
@@ -15581,7 +15776,7 @@ mod run_wakeup_tests {
 
     async fn settle_run_notices(
         chat: &Arc<ChatHost>,
-        moving: &std::sync::atomic::AtomicBool,
+        moving: &Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<()> {
         process_run_notices(chat, Store::open()?, moving).await?;
         if !chat.busy_sessions().await.is_empty() {
@@ -15647,7 +15842,7 @@ mod run_wakeup_tests {
             .unwrap();
         store.upsert_run(&run("done")).unwrap();
         let restarted = notice_host();
-        let moving = std::sync::atomic::AtomicBool::new(false);
+        let moving = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let count_turns = || {
             store
                 .begin()
@@ -15724,7 +15919,7 @@ for line in sys.stdin:
         let watcher = tokio::spawn(watch_run_notices(
             restarted.clone(),
             bus.subscribe(),
-            Arc::new(moving),
+            moving,
             Arc::new(Mutex::new(())),
         ));
         tokio::task::yield_now().await;
@@ -15820,7 +16015,7 @@ for line in sys.stdin:
         bus.publish(crate::engine::bus::RunEvent::Notices {
             chats: vec!["other".into()],
         });
-        let not_moving = std::sync::atomic::AtomicBool::new(false);
+        let not_moving = Arc::new(std::sync::atomic::AtomicBool::new(false));
         process_run_notices(&restarted, Store::open().unwrap(), &not_moving)
             .await
             .unwrap();
@@ -15921,7 +16116,7 @@ for line in sys.stdin:
         assert_eq!(reused[0].id, old_id);
         assert_ne!(reused[0].client_turn_id, old_client);
         let before = count_turns();
-        let moving = std::sync::atomic::AtomicBool::new(false);
+        let moving = Arc::new(std::sync::atomic::AtomicBool::new(false));
         settle_run_notices(&restarted, &moving).await.unwrap();
         assert_eq!(count_turns(), before + 1);
         assert!(store.run_notice_batch("other").unwrap().is_empty());
@@ -17621,7 +17816,7 @@ for line in sys.stdin:
 
     /// Delivers what the outbox has until the chat goes quiet.
     async fn settle_all(host: &Arc<ChatHost>) {
-        let moving = std::sync::atomic::AtomicBool::new(false);
+        let moving = Arc::new(std::sync::atomic::AtomicBool::new(false));
         for _ in 0..6 {
             settle_run_notices(host, &moving).await.unwrap();
         }
@@ -18116,7 +18311,7 @@ for line in sys.stdin:
         let store = Store::open().unwrap();
         let run = store.get_run("run_x").unwrap().unwrap();
         let host = notice_host();
-        let moving = std::sync::atomic::AtomicBool::new(false);
+        let moving = Arc::new(std::sync::atomic::AtomicBool::new(false));
         process_run_notices(&host, Store::open().unwrap(), &moving)
             .await
             .unwrap();

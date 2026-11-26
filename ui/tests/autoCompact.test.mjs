@@ -2,26 +2,26 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { act } from "react";
 import { m } from "../src/paraglide/messages.js";
-import { assistantMessage, composer, renderChat, session, userMessage } from "./chat.mjs";
+import { assistantMessage, composer, emit, renderChat, session, userMessage } from "./chat.mjs";
 
 const compactMarker = {
   id: "compact", role: "assistant", createdAt: 4, completedAt: null,
   parts: [{ id: "compacted", type: "tool", tool: "compacted", state: { status: "running" } }],
 };
 
-/** A chat holding `usedTokens` whose agent reported a five-minute cache, last replying `repliedAt`. */
-async function chat({ cacheTtlSecs = 300, repliedAt = 3, usedTokens = 200_000 } = {}) {
-  const reply = { ...assistantMessage("a1", "Hi.", "u1"), completedAt: repliedAt };
+/** A chat holding `usedTokens` whose agent reported a five-minute cache, last warmed at `warmedAt`. */
+async function chat({ cacheTtlSecs = 300, warmedAt = 3, usedTokens = 200_000, extraMessages = [] } = {}) {
+  const reply = { ...assistantMessage("a1", "Hi.", "u1"), completedAt: warmedAt };
   const view = await renderChat("/projects/p/tasks/s", {
-    sessions: [session("s", { contextUsage: { usedTokens, contextWindow: 1_000_000, cacheTtlSecs } })],
-    transcripts: { s: [userMessage("u1", "hello"), reply] },
+    sessions: [session("s", { contextUsage: { usedTokens, contextWindow: 1_000_000, cacheTtlSecs, cacheWarmedAt: warmedAt } })],
+    transcripts: { s: [userMessage("u1", "hello"), reply, ...extraMessages] },
     routes: {
       "POST /api/chat/sessions/s/compact": () => ({ message: compactMarker }),
       "POST /api/chat/sessions/s/message": () => ({ ok: true, turn: { turnId: "t", queued: true } }),
     },
   });
   const posts = () => view.requests.map(({ request }) => request).filter((request) => /\/(compact|message)$/.test(request));
-  return { posts };
+  return { posts, view };
 }
 
 const toggle = () => document.querySelector('[data-onboarding="composer"] button[role="switch"]');
@@ -46,8 +46,24 @@ test("switching to full context sends without compacting", async () => {
   assert.deepEqual(posts(), ["POST /api/chat/sessions/s/message"]);
 });
 
+test("a failed compaction row does not reset the expired cache clock", async () => {
+  const failedCompact = {
+    id: "compact-err", role: "assistant", createdAt: Date.now(), completedAt: Date.now(), parentId: "a1",
+    parts: [{ id: "compacted", type: "tool", tool: "compacted", state: { status: "error", error: "session not found" } }],
+  };
+  await chat({ extraMessages: [failedCompact] });
+  assert.equal(toggle()?.textContent, m.chat_auto_compact());
+});
+
+test("clearing usage after compaction hides auto-compact", async () => {
+  await chat();
+  assert.equal(toggle()?.textContent, m.chat_auto_compact());
+  await emit("chat.usage", { sessionId: "s", usage: null });
+  assert.equal(toggle(), null);
+});
+
 test("a warm cache offers no compaction", async () => {
-  await chat({ repliedAt: Date.now() });
+  await chat({ warmedAt: Date.now() });
   assert.equal(toggle(), null);
 });
 

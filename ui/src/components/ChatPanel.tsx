@@ -5873,16 +5873,13 @@ export function ChatPanel({
 
   const busy = activeId ? state.busySessions.has(activeId) : false;
 
-  // The agent's last request warmed its prompt cache; past the lifetime it reported, the next
-  // message would reread the whole chat at full price, so the composer offers to compact first.
-  const cacheTtlSecs = (openSession?.contextUsage?.usedTokens ?? 0) >= COLD_COMPACT_MIN_TOKENS
-    ? openSession?.contextUsage?.cacheTtlSecs
-    : undefined;
-  const cacheWarmUntil = useMemo(() => {
-    if (!cacheTtlSecs) return null;
-    const lastReplyAt = Math.max(0, ...allMessages.map((message) => message.role === "assistant" ? message.completedAt ?? 0 : 0));
-    return lastReplyAt ? lastReplyAt + cacheTtlSecs * 1000 : null;
-  }, [allMessages, cacheTtlSecs]);
+  // The agent's last model response warmed its prompt cache; past the lifetime it reported,
+  // the next message would reread the whole chat at full price, so the composer offers to compact first.
+  const contextUsage = openSession?.contextUsage;
+  const cacheWarmUntil = (contextUsage?.usedTokens ?? 0) >= COLD_COMPACT_MIN_TOKENS
+    && contextUsage?.cacheTtlSecs && contextUsage?.cacheWarmedAt
+    ? contextUsage.cacheWarmedAt + contextUsage.cacheTtlSecs * 1000
+    : null;
   const [cacheCold, setCacheCold] = useState(false);
   useEffect(() => {
     const wait = cacheWarmUntil === null ? null : cacheWarmUntil - Date.now();
