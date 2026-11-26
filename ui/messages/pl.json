@@ -928,6 +928,7 @@
   "settings_hf_namespace_org_plan": "{name} · plan {plan}",
   "settings_hf_namespace_env_override": "ORX_HF_NAMESPACE jest ustawione w środowisku procesu. Usuń je stamtąd, aby wybrać tutaj.",
   "settings_hf_namespace_use_personal": "Uruchamiaj w {name}",
+  "settings_hf_namespace_choose": "Wybierz konto",
   "settings_restart_version": "Zainstalowano wersję {installed}. To okno nadal działa w wersji {current}.",
   "settings_install_cli_title": "Zainstaluj polecenie {command}",
   "settings_install_cli_description": "Dodaje {command} do terminala i kieruje je do tej aplikacji, dzięki czemu CLI i aplikacja będą zawsze w tej samej wersji.",

@@ -3486,10 +3486,12 @@ export function HfSection({ remote }: { remote: boolean }) {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [namespaceSaving, setNamespaceSaving] = useState(false);
+  const namespaceLabelId = useId();
   const login = useCommandRun();
+  const busy = saving || refreshing || namespaceSaving;
 
   async function chooseNamespace(id: string) {
-    if (!settings?.username || namespaceSaving) return;
+    if (!settings?.username || busy) return;
     setNamespaceSaving(true);
     setError(null);
     try {
@@ -3502,7 +3504,7 @@ export function HfSection({ remote }: { remote: boolean }) {
   }
 
   async function refresh() {
-    if (saving || refreshing || (!settings && !loadError)) return;
+    if (busy || (!settings && !loadError)) return;
     setRefreshing(true);
     setError(null);
     try {
@@ -3516,7 +3518,7 @@ export function HfSection({ remote }: { remote: boolean }) {
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!token.trim() || saving || refreshing || (!settings && !loadError)) return;
+    if (!token.trim() || busy || (!settings && !loadError)) return;
     setSaving(true);
     setError(null);
     try {
@@ -3546,26 +3548,32 @@ export function HfSection({ remote }: { remote: boolean }) {
                 {settings.username}
               </dd>
             </div>}
-            {settings.username && settings.orgs && settings.orgs.length > 0 && <div className="flex items-center justify-between gap-4">
-              <dt className="font-medium text-subtext">{m.settings_hf_namespace()}</dt>
-              <dd className="m-0 min-w-0">
-                <OptionPicker
-                  choices={[
-                    { id: settings.username, label: m.settings_hf_namespace_personal({ name: settings.username }) },
-                    ...settings.orgs.map((org) => ({
-                      id: org.name,
-                      label: org.plan ? m.settings_hf_namespace_org_plan({ name: org.name, plan: org.plan }) : org.name,
-                    })),
-                  ]}
-                  value={settings.namespace ?? settings.username}
-                  variant="field"
-                  floating
-                  dropDown
-                  disabled={settings.namespaceSource === "env" || namespaceSaving || saving}
-                  onSelect={(id) => void chooseNamespace(id)}
-                />
-              </dd>
-            </div>}
+            {settings.username && settings.orgs && settings.orgs.length > 0 && !(settings.namespaceError && settings.namespaceSource === "env") && (
+              <div className="flex items-center justify-between gap-4">
+                <dt id={namespaceLabelId} className="font-medium text-subtext">{m.settings_hf_namespace()}</dt>
+                <dd className="m-0 min-w-0">
+                  <OptionPicker
+                    choices={[
+                      { id: settings.username, label: m.settings_hf_namespace_personal({ name: ltr(settings.username) }) },
+                      ...settings.orgs.map((org) => ({
+                        id: org.name,
+                        label: org.plan
+                          ? m.settings_hf_namespace_org_plan({ name: ltr(org.name), plan: ltr(org.plan) })
+                          : org.name,
+                      })),
+                    ]}
+                    value={settings.namespaceError ? null : (settings.namespace ?? settings.username)}
+                    placeholder={m.settings_hf_namespace_choose()}
+                    ariaLabelledBy={namespaceLabelId}
+                    variant="field"
+                    floating
+                    dropDown
+                    disabled={settings.namespaceSource === "env" || busy}
+                    onSelect={(id) => void chooseNamespace(id)}
+                  />
+                </dd>
+              </div>
+            )}
             {(settings.validationStatus === "missing" || settings.validationStatus === "invalid" ||
               (settings.validationStatus === "valid" && (settings.jobsWrite !== null || settings.sourceStaging === false))) && (
                 <div className="flex items-center justify-between gap-4">
@@ -3582,10 +3590,10 @@ export function HfSection({ remote }: { remote: boolean }) {
             <Button
               type="button"
               className="mt-2 self-start"
-              disabled={namespaceSaving || saving}
+              disabled={busy}
               onClick={() => void chooseNamespace(settings.username!)}
             >
-              {m.settings_hf_namespace_use_personal({ name: settings.username })}
+              {m.settings_hf_namespace_use_personal({ name: ltr(settings.username) })}
             </Button>
           )}
           {settings.namespaceSource === "env" && (
@@ -3599,7 +3607,7 @@ export function HfSection({ remote }: { remote: boolean }) {
               {m.settings_page_hf_token_is_set_in_the_environment_and()}
             </p>
           )}
-          {settings.validationStatus === "valid" && settings.jobsWrite === null && (
+          {settings.validationStatus === "valid" && settings.jobsWrite === null && !settings.namespaceError && (
             <RunnableNote
               note={m.settings_hf_token_help({ login: "`hf auth login`", url: ltr("huggingface.co/settings/tokens") })}
               className={SETTINGS_NOTE_CLASS_NAME}
@@ -3623,10 +3631,10 @@ export function HfSection({ remote }: { remote: boolean }) {
         </label>
         {error && <div className="error">{error}</div>}
         <div className="flex justify-end gap-2">
-          <Button type="button" disabled={saving || refreshing || (!settings && !loadError)} onClick={() => void refresh()}>
+          <Button type="button" disabled={busy || (!settings && !loadError)} onClick={() => void refresh()}>
             <RefreshCw size={14} /> {refreshing ? m.common_checking() : m.settings_check_again()}
           </Button>
-          <Button variant="primary" type="submit" disabled={!token.trim() || saving || refreshing || (!settings && !loadError)}>
+          <Button variant="primary" type="submit" disabled={!token.trim() || busy || (!settings && !loadError)}>
             {saving ? m.settings_validating() : m.common_save()}
           </Button>
         </div>

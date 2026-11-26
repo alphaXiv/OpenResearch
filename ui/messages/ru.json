@@ -928,6 +928,7 @@
   "settings_hf_namespace_org_plan": "{name} · тариф {plan}",
   "settings_hf_namespace_env_override": "ORX_HF_NAMESPACE задан в окружении процесса. Удалите его оттуда, чтобы выбрать здесь.",
   "settings_hf_namespace_use_personal": "Запускать в {name}",
+  "settings_hf_namespace_choose": "Выберите аккаунт",
   "settings_restart_version": "Установлена версия {installed}. В этом окне всё ещё работает {current}.",
   "settings_install_cli_title": "Установить команду {command}",
   "settings_install_cli_description": "Добавляет {command} в терминал с привязкой к этому приложению, чтобы версии CLI и приложения всегда совпадали.",

@@ -928,6 +928,7 @@
   "settings_hf_namespace_org_plan": "{name} · {plan} プラン",
   "settings_hf_namespace_env_override": "ORX_HF_NAMESPACE がプロセス環境で設定されています。ここで選ぶには、そちらから削除してください。",
   "settings_hf_namespace_use_personal": "{name} で実行",
+  "settings_hf_namespace_choose": "アカウントを選択",
   "settings_restart_version": "バージョン {installed} がインストールされています。このウィンドウではまだ {current} が動作しています。",
   "settings_install_cli_title": "{command} コマンドをインストール",
   "settings_install_cli_description": "このアプリを参照する {command} をターミナルに追加し、CLI とアプリのバージョンを常に揃えます。",

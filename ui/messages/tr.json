@@ -954,6 +954,7 @@
   "settings_hf_namespace_org_plan": "{name} · {plan} planı",
   "settings_hf_namespace_env_override": "ORX_HF_NAMESPACE işlem ortamında tanımlı. Burada seçmek için onu oradan kaldırın.",
   "settings_hf_namespace_use_personal": "{name} içinde başlat",
+  "settings_hf_namespace_choose": "Bir hesap seçin",
   "settings_restart_version": "{installed} sürümü yüklü. Bu pencere hâlâ {current} sürümünü çalıştırıyor.",
   "settings_install_cli_title": "{command} komutunu yükle",
   "settings_install_cli_description": "{command} komutunu terminalinize ekler ve bu uygulamayı işaret eder, böylece CLI ve uygulama her zaman aynı sürümde olur.",

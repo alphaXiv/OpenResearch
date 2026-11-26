@@ -928,6 +928,7 @@
   "settings_hf_namespace_org_plan": "{name} · {plan} ప్లాన్",
   "settings_hf_namespace_env_override": "ORX_HF_NAMESPACE ప్రాసెస్ ఎన్విరాన్‌మెంట్‌లో సెట్ అయింది. ఇక్కడ ఎంచుకోవడానికి దాన్ని అక్కడి నుండి తీసివేయండి.",
   "settings_hf_namespace_use_personal": "{name}లో నడపండి",
+  "settings_hf_namespace_choose": "ఖాతాను ఎంచుకోండి",
   "settings_restart_version": "వెర్షన్ {installed} ఇన్‌స్టాల్ చేయబడింది. ఈ విండోలో ఇంకా {current} రన్ అవుతోంది.",
   "settings_install_cli_title": "{command} కమాండ్‌ను ఇన్‌స్టాల్ చేయండి",
   "settings_install_cli_description": "ఈ యాప్‌ను సూచించే {command} కమాండ్‌ను మీ టెర్మినల్‌కు జోడిస్తుంది, కాబట్టి CLI మరియు యాప్ ఎప్పుడూ ఒకే వెర్షన్‌లో ఉంటాయి.",

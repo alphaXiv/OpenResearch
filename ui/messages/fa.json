@@ -922,6 +922,7 @@
   "settings_hf_namespace_org_plan": "{name} · طرح {plan}",
   "settings_hf_namespace_env_override": "ORX_HF_NAMESPACE در محیط فرایند تعیین شده است. برای انتخاب در اینجا، آن را از آنجا حذف کنید.",
   "settings_hf_namespace_use_personal": "اجرا در {name}",
+  "settings_hf_namespace_choose": "یک حساب انتخاب کنید",
   "settings_restart_version": "نسخهٔ {installed} نصب شده است. این پنجره هنوز نسخهٔ {current} را اجرا می‌کند.",
   "settings_install_cli_title": "نصب فرمان {command}",
   "settings_install_cli_description": "فرمان {command} را به ترمینال شما و با اشاره به این برنامه اضافه می‌کند تا CLI و برنامه همیشه یک نسخه باشند.",
