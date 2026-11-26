@@ -49,6 +49,7 @@ import {
   mutRetryEngineHost,
   mutSaveAcpHarness,
   mutSaveHfToken,
+  mutSaveHfNamespace,
   mutSaveK8sSettings,
   mutSaveModalToken,
   mutSaveRaySettings,
@@ -3472,7 +3473,7 @@ function HfStatusBadge({ settings }: { settings: HfSettings }) {
   return null;
 }
 
-function HfSection({ remote }: { remote: boolean }) {
+export function HfSection({ remote }: { remote: boolean }) {
   const workspace = useWorkspace();
   const { getHfSettingsQuery } = workspace.queries;
   const { queryClient } = workspace;
@@ -3484,10 +3485,26 @@ function HfSection({ remote }: { remote: boolean }) {
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [namespaceSaving, setNamespaceSaving] = useState(false);
+  const namespaceLabelId = useId();
   const login = useCommandRun();
+  const busy = saving || refreshing || namespaceSaving;
+
+  async function chooseNamespace(id: string) {
+    if (!settings?.username || busy) return;
+    setNamespaceSaving(true);
+    setError(null);
+    try {
+      await mutSaveHfNamespace.runAsHeadlessPromise(workspace, id === settings.username ? null : id, {});
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setNamespaceSaving(false);
+    }
+  }
 
   async function refresh() {
-    if (saving || refreshing || (!settings && !loadError)) return;
+    if (busy || (!settings && !loadError)) return;
     setRefreshing(true);
     setError(null);
     try {
@@ -3501,7 +3518,7 @@ function HfSection({ remote }: { remote: boolean }) {
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!token.trim() || saving || refreshing || (!settings && !loadError)) return;
+    if (!token.trim() || busy || (!settings && !loadError)) return;
     setSaving(true);
     setError(null);
     try {
@@ -3531,6 +3548,32 @@ function HfSection({ remote }: { remote: boolean }) {
                 {settings.username}
               </dd>
             </div>}
+            {settings.username && settings.orgs && settings.orgs.length > 0 && !(settings.namespaceError && settings.namespaceSource === "env") && (
+              <div className="flex items-center justify-between gap-4">
+                <dt id={namespaceLabelId} className="font-medium text-subtext">{m.settings_hf_namespace()}</dt>
+                <dd className="m-0 min-w-0">
+                  <OptionPicker
+                    choices={[
+                      { id: settings.username, label: m.settings_hf_namespace_personal({ name: ltr(settings.username) }) },
+                      ...settings.orgs.map((org) => ({
+                        id: org.name,
+                        label: org.plan
+                          ? m.settings_hf_namespace_org_plan({ name: ltr(org.name), plan: ltr(org.plan) })
+                          : org.name,
+                      })),
+                    ]}
+                    value={settings.namespaceError ? null : (settings.namespace ?? settings.username)}
+                    placeholder={m.settings_hf_namespace_choose()}
+                    ariaLabelledBy={namespaceLabelId}
+                    variant="field"
+                    floating
+                    dropDown
+                    disabled={settings.namespaceSource === "env" || busy}
+                    onSelect={(id) => void chooseNamespace(id)}
+                  />
+                </dd>
+              </div>
+            )}
             {(settings.validationStatus === "missing" || settings.validationStatus === "invalid" ||
               (settings.validationStatus === "valid" && (settings.jobsWrite !== null || settings.sourceStaging === false))) && (
                 <div className="flex items-center justify-between gap-4">
@@ -3542,6 +3585,20 @@ function HfSection({ remote }: { remote: boolean }) {
           {settings.validationStatus === "unreachable" && settings.validationError && (
             <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{settings.validationError}</p>
           )}
+          {settings.namespaceError && <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{settings.namespaceError}</p>}
+          {settings.namespaceError && settings.namespaceSource === "syncedEnv" && settings.username && (
+            <Button
+              type="button"
+              className="mt-2 self-start"
+              disabled={busy}
+              onClick={() => void chooseNamespace(settings.username!)}
+            >
+              {m.settings_hf_namespace_use_personal({ name: ltr(settings.username) })}
+            </Button>
+          )}
+          {settings.namespaceSource === "env" && (
+            <p className={SETTINGS_NOTE_CLASS_NAME}>{m.settings_hf_namespace_env_override()}</p>
+          )}
           {settings.sourceStaging === null && settings.sourceStagingError && (
             <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{settings.sourceStagingError}</p>
           )}
@@ -3550,7 +3607,7 @@ function HfSection({ remote }: { remote: boolean }) {
               {m.settings_page_hf_token_is_set_in_the_environment_and()}
             </p>
           )}
-          {settings.validationStatus === "valid" && settings.jobsWrite === null && (
+          {settings.validationStatus === "valid" && settings.jobsWrite === null && !settings.namespaceError && (
             <RunnableNote
               note={m.settings_hf_token_help({ login: "`hf auth login`", url: ltr("huggingface.co/settings/tokens") })}
               className={SETTINGS_NOTE_CLASS_NAME}
@@ -3574,10 +3631,10 @@ function HfSection({ remote }: { remote: boolean }) {
         </label>
         {error && <div className="error">{error}</div>}
         <div className="flex justify-end gap-2">
-          <Button type="button" disabled={saving || refreshing || (!settings && !loadError)} onClick={() => void refresh()}>
+          <Button type="button" disabled={busy || (!settings && !loadError)} onClick={() => void refresh()}>
             <RefreshCw size={14} /> {refreshing ? m.common_checking() : m.settings_check_again()}
           </Button>
-          <Button variant="primary" type="submit" disabled={!token.trim() || saving || refreshing || (!settings && !loadError)}>
+          <Button variant="primary" type="submit" disabled={!token.trim() || busy || (!settings && !loadError)}>
             {saving ? m.settings_validating() : m.common_save()}
           </Button>
         </div>

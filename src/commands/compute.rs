@@ -369,7 +369,7 @@ impl ConfigureArgs {
             ],
             "k8s" => &["context", "namespace"],
             "ray" => &["address"],
-            "hf" => &["token"],
+            "hf" => &["token", "namespace"],
             "tinker" => &["key"],
             "modal" => &["tokenId", "tokenSecret"],
             _ => return Err(anyhow!("{backend} has no editable settings.")),

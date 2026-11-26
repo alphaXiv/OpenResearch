@@ -590,6 +590,13 @@ export interface HfSettings {
   jobsWrite: boolean | null;
   sourceStaging: boolean | null;
   sourceStagingError: string | null;
+  /** Where jobs launch and are billed; the account itself unless an organization was chosen.
+   * Absent from servers older than the namespace choice, like the three fields after it. */
+  namespace?: string | null;
+  /** "env" when orx's own process environment chooses it, which overrides anything saved here. */
+  namespaceSource?: "env" | "syncedEnv" | null;
+  namespaceError?: string | null;
+  orgs?: { name: string; plan: string | null; canPay: boolean | null; role: string | null }[];
 }
 
 export interface TinkerSettings {
@@ -2772,6 +2779,8 @@ export function createApi(
   const getHfSettings = (signal?: AbortSignal) => get<HfSettings>("/api/settings/hf", signal);
 
   const saveHfToken = (token: string) => post<HfSettings>("/api/settings/hf", { token });
+  /** `null` launches jobs in the token's own account. */
+  const saveHfNamespace = (namespace: string | null) => post<HfSettings>("/api/settings/hf/namespace", { namespace });
 
   const getTinkerSettings = (signal?: AbortSignal) => get<TinkerSettings>("/api/settings/tinker", signal);
   const saveTinkerKey = (key: string) => post<TinkerSettings>("/api/settings/tinker", { key });
@@ -3635,6 +3644,7 @@ export function createApi(
     getSessionWorktree,
     getHfSettings,
     saveHfToken,
+    saveHfNamespace,
     getTinkerSettings,
     saveTinkerKey,
     getUpdateStatus,

@@ -1243,6 +1243,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             get(run_engine_settings).post(set_run_engine),
         )
         .route("/api/settings/hf", get(hf_settings).post(set_hf_token))
+        .route("/api/settings/hf/namespace", post(set_hf_namespace))
         .route(
             "/api/settings/tinker",
             get(tinker_settings).post(set_tinker_key),

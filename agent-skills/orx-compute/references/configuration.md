@@ -29,6 +29,7 @@ orx compute configure slurm --clear sbatch-arg --clear request-one-task
 orx compute connect slurm --host cluster
 orx compute configure k8s --context research --namespace experiments
 orx compute configure ray --address http://127.0.0.1:8265
+orx compute configure hf --namespace my-org                  # launch HF Jobs in an organization of the token
 orx compute default set slurm --flavor h100:1   # this chat's project only
 orx compute default clear                       # project follows the machine's default again
 orx compute default set modal --flavor A10G --machine   # every project without its own

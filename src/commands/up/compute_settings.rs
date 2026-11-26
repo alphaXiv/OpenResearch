@@ -18,6 +18,12 @@ pub(super) struct HfSettings {
     /// Whether the token can create or read the bucket staging uploads each run's source to.
     source_staging: Option<bool>,
     source_staging_error: Option<String>,
+    /// Where jobs launch; the account itself unless a namespace was chosen.
+    namespace: Option<String>,
+    /// `"env"` or `"syncedEnv"` for a chosen namespace, `None` for the account.
+    namespace_source: Option<&'static str>,
+    namespace_error: Option<String>,
+    orgs: Vec<crate::jobs::huggingface::OrgSummary>,
 }
 
 /// Never the full token: first 3 chars + ellipsis + last 4.
@@ -36,46 +42,76 @@ pub(super) fn mask_token(token: &str) -> String {
 /// Re-resolve the token and check it against whoami-v2. Uncached — cheap, and
 /// the UI calls it rarely.
 pub(super) async fn hf_token_status() -> HfSettings {
-    use crate::jobs::huggingface::{self, TokenSource};
-    let Ok((token, source)) = huggingface::resolve_token_with_source() else {
-        return HfSettings {
-            configured: false,
-            source: None,
-            masked_token: None,
-            validation_status: "missing",
-            validation_error: None,
-            username: None,
-            jobs_write: None,
-            source_staging: None,
-            source_staging_error: None,
-        };
+    let Ok((token, source)) = crate::jobs::huggingface::resolve_token_with_source() else {
+        return hf_missing();
     };
+    let who = crate::jobs::huggingface::who(&token).await;
+    hf_status(&token, source, who).await
+}
+
+fn hf_missing() -> HfSettings {
+    HfSettings {
+        configured: false,
+        source: None,
+        masked_token: None,
+        validation_status: "missing",
+        validation_error: None,
+        username: None,
+        jobs_write: None,
+        source_staging: None,
+        source_staging_error: None,
+        namespace: None,
+        namespace_source: None,
+        namespace_error: None,
+        orgs: Vec::new(),
+    }
+}
+
+/// The status of `token`, from a whoami-v2 answer the caller already has.
+async fn hf_status(
+    token: &str,
+    source: crate::jobs::huggingface::TokenSource,
+    who: Result<crate::jobs::huggingface::WhoAmI>,
+) -> HfSettings {
+    use crate::jobs::huggingface::{self, TokenSource};
+    let saved = huggingface::saved_namespace();
+    let namespace_source = saved.as_ref().map(|(_, source)| *source);
     let source = match source {
         TokenSource::Env => "env",
         TokenSource::OpenresearchEnv => "openresearchEnv",
         TokenSource::HfCache => "hfCache",
     };
-    match huggingface::whoami_details(&token).await {
-        Ok(details) => {
-            let (source_staging, source_staging_error) =
-                match huggingface::can_stage_source(&token, &details.name).await {
-                    Ok(true) => (Some(true), None),
-                    Ok(false) => (
-                        Some(false),
-                        Some(huggingface::staging_forbidden(&details.name)),
-                    ),
-                    Err(error) => (None, Some(error.to_string())),
+    match who {
+        Ok(who) => {
+            // The dialog shows the picker beside this error and its own note for a namespace
+            // set in the process env, so the error is only the refusal, with no CLI command.
+            let (namespace, namespace_error) =
+                match huggingface::pick_namespace(&who, saved.as_ref().map(|(n, _)| n.as_str())) {
+                    Ok(namespace) => (Some(namespace), None),
+                    Err(refused) => (None, Some(refused.to_string())),
                 };
+            let (source_staging, source_staging_error) = match &namespace {
+                None => (None, None),
+                Some(namespace) => match huggingface::can_stage_source(token, namespace).await {
+                    Ok(true) => (Some(true), None),
+                    Ok(false) => (Some(false), Some(huggingface::staging_forbidden(namespace))),
+                    Err(error) => (None, Some(error.to_string())),
+                },
+            };
             HfSettings {
                 configured: true,
                 source: Some(source),
-                masked_token: Some(mask_token(&token)),
+                masked_token: Some(mask_token(token)),
                 validation_status: "valid",
                 validation_error: None,
-                username: Some(details.name),
-                jobs_write: details.jobs_write,
+                jobs_write: namespace.as_deref().and_then(|ns| who.jobs_write(ns)),
+                username: Some(who.name),
                 source_staging,
                 source_staging_error,
+                namespace,
+                namespace_source,
+                namespace_error,
+                orgs: who.orgs,
             }
         }
         Err(error) => {
@@ -90,13 +126,17 @@ pub(super) async fn hf_token_status() -> HfSettings {
             HfSettings {
                 configured: true,
                 source: Some(source),
-                masked_token: Some(mask_token(&token)),
+                masked_token: Some(mask_token(token)),
                 validation_status,
                 validation_error: Some(error.to_string()),
                 username: None,
                 jobs_write: None,
                 source_staging: None,
                 source_staging_error: None,
+                namespace: None,
+                namespace_source,
+                namespace_error: None,
+                orgs: Vec::new(),
             }
         }
     }
@@ -169,19 +209,116 @@ pub(super) struct SetHfTokenReq {
 }
 
 pub(super) async fn set_hf_token(Json(req): Json<SetHfTokenReq>) -> ApiResult {
-    let token = req.token.trim().to_string();
-    if token.is_empty() {
-        return Err(bad_request("token is required"));
+    configure_hf(Some(req.token), None).await
+}
+
+#[derive(Deserialize)]
+pub(super) struct SetHfNamespaceReq {
+    /// An organization of the token's account; empty or absent launches in the account itself.
+    namespace: Option<String>,
+}
+
+pub(super) async fn set_hf_namespace(Json(req): Json<SetHfNamespaceReq>) -> ApiResult {
+    configure_hf(None, Some(req.namespace)).await
+}
+
+/// whoami-v2 answers already fetched in this request, by token. whoami-v2 is heavily
+/// rate-limited, so each distinct token is asked once per change.
+#[derive(Default)]
+struct HfIdentities(Vec<(String, crate::jobs::huggingface::WhoAmI)>);
+
+impl HfIdentities {
+    async fn get(&mut self, token: &str) -> Result<crate::jobs::huggingface::WhoAmI> {
+        if let Some((_, who)) = self.0.iter().find(|(known, _)| known == token) {
+            return Ok(who.clone());
+        }
+        let who = crate::jobs::huggingface::who(token).await?;
+        self.0.push((token.to_string(), who.clone()));
+        Ok(who)
     }
-    crate::jobs::huggingface::whoami_details(&token)
-        .await
-        .map_err(bad_request)?;
-    tokio::task::spawn_blocking(move || crate::config::write_synced_env_var("HF_TOKEN", &token))
-        .await
-        .map_err(|e| anyhow!("env write task failed: {e}"))??;
+}
+
+/// A token and/or namespace change, from the Settings dialog or `orx compute configure hf`.
+/// Everything is checked before anything is saved, both values are saved in one write, and the
+/// status afterwards reuses the same whoami-v2 answer and checks the staging bucket once.
+/// `namespace`: `None` leaves it; `Some(None)` or an empty name launches in the account itself.
+async fn configure_hf(token: Option<String>, namespace: Option<Option<String>>) -> ApiResult {
+    use crate::jobs::huggingface;
+    let token = match token.map(|t| t.trim().to_string()) {
+        Some(t) if t.is_empty() => return Err(bad_request("token is required")),
+        other => other,
+    };
+    let namespace = namespace.map(hf_namespace_choice);
+    if namespace.is_some() {
+        hf_namespace_locked()?;
+    }
+    let mut identities = HfIdentities::default();
+    if let Some(token) = &token {
+        identities.get(token).await.map_err(bad_request)?;
+    }
+    if let Some(Some(namespace)) = &namespace {
+        // Checked against the token launches will use once this is saved: HF_TOKEN in the
+        // process env wins over a saved one.
+        let effective = match (process_hf_token(), &token) {
+            (Some(process), _) => process,
+            (None, Some(token)) => token.clone(),
+            (None, None) => huggingface::resolve_token().map_err(bad_request)?,
+        };
+        let who = identities.get(&effective).await.map_err(bad_request)?;
+        who.check_member(namespace)
+            .map_err(|refused| bad_request(refused.to_string()))?;
+    }
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut writes = Vec::new();
+        if let Some(token) = &token {
+            writes.push(("HF_TOKEN", token.as_str()));
+        }
+        if let Some(Some(namespace)) = &namespace {
+            writes.push((huggingface::NAMESPACE, namespace.as_str()));
+        }
+        if !writes.is_empty() {
+            crate::config::write_synced_env_vars(&writes)?;
+        }
+        if let Some(None) = namespace {
+            crate::config::remove_synced_env_var(huggingface::NAMESPACE)?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| anyhow!("env write task failed: {e}"))??;
     // Freshly re-resolved: if HF_TOKEN is set in this process env, env still
     // wins over the file — source says "env" and the UI explains it.
-    Ok(Json(json!(hf_token_status().await)))
+    let Ok((token, source)) = huggingface::resolve_token_with_source() else {
+        return Ok(Json(json!(hf_missing())));
+    };
+    let who = identities.get(&token).await;
+    Ok(Json(json!(hf_status(&token, source, who).await)))
+}
+
+fn process_hf_token() -> Option<String> {
+    std::env::var("HF_TOKEN")
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+}
+
+fn hf_namespace_locked() -> Result<(), ApiError> {
+    use crate::jobs::huggingface;
+    if matches!(huggingface::saved_namespace(), Some((_, "env"))) {
+        return Err(bad_request(format!(
+            "{} is set in the process environment. Remove it there to choose where Hugging Face \
+             Jobs launch here.",
+            huggingface::NAMESPACE
+        )));
+    }
+    Ok(())
+}
+
+/// Empty or absent launches in the token's own account.
+fn hf_namespace_choice(namespace: Option<String>) -> Option<String> {
+    namespace
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
 }
 
 // --- vercel settings ----------------------------------------------------------
@@ -2017,7 +2154,13 @@ pub(crate) async fn configure(backend: &str, body: Value) -> Result<Value> {
             .map_err(ApiError::from),
         "ray" => set_ray_settings(Json(serde_json::from_value(body)?)).await,
         "k8s" => set_k8s_settings(Json(serde_json::from_value(body)?)).await,
-        "hf" => set_hf_token(Json(serde_json::from_value(body)?)).await,
+        "hf" => {
+            let namespace = body
+                .get("namespace")
+                .map(|namespace| namespace.as_str().map(str::to_string));
+            let token = body["token"].as_str().map(str::to_string);
+            configure_hf(token, namespace).await
+        }
         "modal" => set_modal_token(Json(serde_json::from_value(body)?)).await,
         "tinker" => set_tinker_key(Json(serde_json::from_value(body)?)).await,
         _ => {
@@ -2647,5 +2790,159 @@ mod hf_readiness_tests {
                 .contains("503"),
             "{value}"
         );
+    }
+}
+
+#[cfg(test)]
+mod hf_namespace_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    use std::sync::Arc;
+
+    /// A Hugging Face stand-in: `hf_ada` is ada, a member of pbai; `hf_bob` is bob, in no
+    /// organization. Counts whoami-v2 calls and staging-bucket creations.
+    async fn fake_hf() -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let (whoami, buckets) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (who_calls, bucket_calls) = (whoami.clone(), buckets.clone());
+        let upstream = Router::new()
+            .route(
+                "/api/whoami-v2",
+                get(move |headers: HeaderMap| async move {
+                    who_calls.fetch_add(1, SeqCst);
+                    match headers.get("authorization").and_then(|v| v.to_str().ok()) {
+                        Some("Bearer hf_ada") => (
+                            StatusCode::OK,
+                            Json(
+                                json!({"name": "ada", "orgs": [{"name": "pbai", "plan": "team"}],
+                                "auth": {"accessToken": {"role": "write"}}}),
+                            ),
+                        ),
+                        Some("Bearer hf_bob") => (
+                            StatusCode::OK,
+                            Json(
+                                json!({"name": "bob", "auth": {"accessToken": {"role": "write"}}}),
+                            ),
+                        ),
+                        _ => (StatusCode::UNAUTHORIZED, Json(json!({}))),
+                    }
+                }),
+            )
+            .route(
+                "/api/buckets/{namespace}/jobs-artifacts",
+                axum::routing::post(move || async move {
+                    bucket_calls.fetch_add(1, SeqCst);
+                    StatusCode::OK
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        std::env::set_var(
+            "HF_ENDPOINT",
+            format!("http://{}", listener.local_addr().unwrap()),
+        );
+        tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        (whoami, buckets)
+    }
+
+    fn saved(key: &str) -> Option<String> {
+        crate::config::synced_env_var(key)
+    }
+
+    /// `configure hf --token X --namespace Y`: one whoami-v2 call and one bucket check, and a
+    /// refusal leaves both values unsaved.
+    #[tokio::test]
+    async fn token_and_namespace_are_checked_together_then_saved_together() {
+        if !crate::config::in_test_child(&["HF_TOKEN", "HF_ENDPOINT", "ORX_HF_NAMESPACE"]) {
+            return;
+        }
+        let (whoami, buckets) = fake_hf().await;
+
+        let refused = configure_hf(Some("hf_bob".into()), Some(Some("pbai".into())))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+        assert!(refused.1.contains("Choose one of: bob."), "{}", refused.1);
+        assert_eq!(saved("HF_TOKEN"), None);
+        assert_eq!(saved("ORX_HF_NAMESPACE"), None);
+        assert_eq!(whoami.load(SeqCst), 1);
+
+        let Json(value) = configure_hf(Some("hf_ada".into()), Some(Some("pbai".into())))
+            .await
+            .unwrap();
+        assert_eq!(value["namespace"], "pbai", "{value}");
+        assert_eq!(value["sourceStaging"], true, "{value}");
+        assert_eq!(saved("HF_TOKEN").as_deref(), Some("hf_ada"));
+        assert_eq!(saved("ORX_HF_NAMESPACE").as_deref(), Some("pbai"));
+        assert_eq!(whoami.load(SeqCst), 2, "one whoami-v2 call for the change");
+        assert_eq!(buckets.load(SeqCst), 1, "one staging check for the change");
+    }
+
+    /// The Settings dialog's picker: a non-member organization is refused with the choices,
+    /// in the dialog's wording, and clearing launches in the account again.
+    #[tokio::test]
+    async fn a_non_member_namespace_is_refused_and_the_choice_can_be_cleared() {
+        if !crate::config::in_test_child(&["HF_TOKEN", "HF_ENDPOINT", "ORX_HF_NAMESPACE"]) {
+            return;
+        }
+        fake_hf().await;
+        crate::config::write_synced_env_var("HF_TOKEN", "hf_ada").unwrap();
+
+        let refused = set_hf_namespace(Json(SetHfNamespaceReq {
+            namespace: Some("acme".into()),
+        }))
+        .await
+        .unwrap_err();
+        assert!(
+            refused.1.contains("Choose one of: ada, pbai."),
+            "{}",
+            refused.1
+        );
+        assert!(!refused.1.contains("orx compute"), "{}", refused.1);
+        assert_eq!(saved("ORX_HF_NAMESPACE"), None);
+
+        let Json(chosen) = set_hf_namespace(Json(SetHfNamespaceReq {
+            namespace: Some("pbai".into()),
+        }))
+        .await
+        .unwrap();
+        assert_eq!(chosen["namespace"], "pbai", "{chosen}");
+        let Json(value) = set_hf_namespace(Json(SetHfNamespaceReq { namespace: None }))
+            .await
+            .unwrap();
+        assert_eq!(value["namespace"], "ada", "{value}");
+        assert_eq!(saved("ORX_HF_NAMESPACE"), None);
+    }
+
+    /// `ORX_HF_NAMESPACE` in orx's own process env overrides the saved choice: Settings can't
+    /// change it, the dialog's error has no CLI command, and launch errors tell agents to
+    /// remove it rather than to run a configure the lock would refuse.
+    #[tokio::test]
+    async fn a_namespace_in_the_process_env_locks_the_choice() {
+        if !crate::config::in_test_child(&["HF_TOKEN", "HF_ENDPOINT", "ORX_HF_NAMESPACE"]) {
+            return;
+        }
+        fake_hf().await;
+        std::env::set_var("HF_TOKEN", "hf_ada");
+        std::env::set_var("ORX_HF_NAMESPACE", "acme");
+
+        let refused = set_hf_namespace(Json(SetHfNamespaceReq {
+            namespace: Some("pbai".into()),
+        }))
+        .await
+        .unwrap_err();
+        assert!(refused.1.contains("process environment"), "{}", refused.1);
+        assert_eq!(saved("ORX_HF_NAMESPACE"), None);
+
+        let status = json!(hf_token_status().await);
+        assert_eq!(status["namespaceSource"], "env", "{status}");
+        let error = status["namespaceError"].as_str().unwrap();
+        assert!(error.contains("isn't acme"), "{error}");
+        assert!(!error.contains("orx compute"), "{error}");
+
+        let launch = crate::jobs::huggingface::jobs_namespace("hf_ada")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(launch.contains("Remove ORX_HF_NAMESPACE"), "{launch}");
+        assert!(!launch.contains("configure hf"), "{launch}");
     }
 }

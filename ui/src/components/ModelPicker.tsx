@@ -1,6 +1,7 @@
 import {
   useContext,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -981,6 +982,8 @@ export function OptionPicker({
   choices,
   value,
   defaultId,
+  placeholder,
+  ariaLabelledBy,
   header,
   align = "left",
   dropDown = false,
@@ -1005,6 +1008,10 @@ export function OptionPicker({
   /** The harness's default id — pinned at top of the menu and used when
    * `value` is null. */
   defaultId?: string | null;
+  /** Shown when no choice is selected instead of falling back to the first choice. */
+  placeholder?: string;
+  /** Id of an external label element paired with the trigger's value for screen readers. */
+  ariaLabelledBy?: string;
   /** Group header (e.g. "Mode"). */
   header?: string;
   align?: "left" | "right";
@@ -1024,6 +1031,7 @@ export function OptionPicker({
   className?: string;
 }) {
   const buttonRef = useRef<HTMLButtonElement>(null);
+  const valueId = useId();
   const { open, setOpen, ref } = usePopover(buttonRef);
   const menuRef = useRef<HTMLDivElement>(null);
   const [filter, setFilter] = useState("");
@@ -1061,7 +1069,7 @@ export function OptionPicker({
   }, [open, floating, dropDown, filter, choices.length, ref]);
   if (choices.length === 0 && !menuAction) return null;
 
-  const effectiveId = value ?? defaultId ?? choices[0]?.id ?? null;
+  const effectiveId = value ?? defaultId ?? (placeholder !== undefined ? null : choices[0]?.id ?? null);
   const current = choices.find((c) => c.id === effectiveId);
   const defaultChoice = choices.find((c) => c.id === defaultId);
   // Only the `default` sentinel gets pinned above a separator — it isn't a
@@ -1075,7 +1083,7 @@ export function OptionPicker({
       : undefined;
   const rest = pinned ? choices.filter((c) => c.id !== pinned.id) : choices;
   const visible = rest.filter((c) => `${c.label} ${c.id}`.toLowerCase().includes(filter.toLowerCase()));
-  const label = current?.label ?? choices[0]?.label ?? "";
+  const label = current?.label ?? placeholder ?? choices[0]?.label ?? "";
 
   const activateTrigger = () => {
     openedByHover.current = false;
@@ -1151,6 +1159,7 @@ export function OptionPicker({
           className,
         )}
         title={title}
+        aria-labelledby={ariaLabelledBy ? `${ariaLabelledBy} ${valueId}` : undefined}
         aria-haspopup="menu"
         aria-expanded={open}
         disabled={disabled}
@@ -1158,7 +1167,9 @@ export function OptionPicker({
       >
         <span className="inline-flex min-w-0 items-center gap-2">
           {current && renderIcon?.(current)}
-          <span className="truncate">{current ? renderLabel?.(current) ?? label : label}</span>
+          <span id={ariaLabelledBy ? valueId : undefined} className={cn("truncate", !current && placeholder && "text-muted")}>
+            {current ? renderLabel?.(current) ?? label : label}
+          </span>
         </span>
         <ChevronDown size={12} />
       </button>

@@ -291,7 +291,7 @@ pub(crate) const REDIRECT_VARS: [&str; 12] = [
 /// The credentials, endpoints and models agents and backends read, and the
 /// markers of an agent's shell; a test child sees only those its test sets.
 #[cfg(test)]
-pub(crate) const PROVIDER_VARS: [&str; 41] = [
+pub(crate) const PROVIDER_VARS: [&str; 42] = [
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
@@ -319,6 +319,7 @@ pub(crate) const PROVIDER_VARS: [&str; 41] = [
     "OPENCODE_PASSWORD",
     "HF_TOKEN",
     "HF_ENDPOINT",
+    "ORX_HF_NAMESPACE",
     "MODAL_PROFILE",
     "MODAL_TOKEN_ID",
     "MODAL_TOKEN_SECRET",

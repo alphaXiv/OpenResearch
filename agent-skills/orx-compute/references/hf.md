@@ -4,8 +4,13 @@ Use this backend only when the user explicitly requests Hugging Face Jobs or it
 is the configured default. A connected token only makes the backend available;
 it does not select it.
 
-Jobs run in the user's Hugging Face account and are billed there. Authentication
-uses `HF_TOKEN` from the environment.
+Jobs run in the token's Hugging Face account and are billed there, unless the
+user chose one of its organizations, such as one with a Team plan: then jobs and
+their staged source go to that organization, which is billed for them.
+Authentication uses `HF_TOKEN` from the environment. `orx compute show hf`
+reports the namespace jobs launch in; change it only when
+the user asks, with `orx compute configure hf --namespace <org>` or
+`--clear namespace`.
 
 ```sh
 orx exp run <expId> --backend hf --flavor a10g-small
