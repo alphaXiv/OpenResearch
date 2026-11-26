@@ -6126,7 +6126,11 @@ fn spawn_background_tasks(check_updates: bool) {
         tokio::spawn(async {
             loop {
                 updates::periodic_update_pass().await;
-                tokio::time::sleep(updates::PERIODIC_CHECK_INTERVAL).await;
+                // Re-read each minute, so flipping the channel or the Linear switch takes effect now.
+                let checked = tokio::time::Instant::now();
+                while checked.elapsed() < updates::periodic_check_interval() {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                }
             }
         });
     }

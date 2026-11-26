@@ -1393,9 +1393,22 @@ fn mutate_cache_at(path: &Path, legacy: &Path, f: impl FnOnce(&mut CheckCache)) 
 // Status, for long-lived processes (`orx up` and the desktop app)
 // ---------------------------------------------------------------------------
 
-/// How often a long-lived process re-checks. Short enough that a day-long
-/// session still lands the update, long enough to be invisible.
-pub const PERIODIC_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+/// How often a long-lived process re-checks. The team (the Linear bug-report
+/// switch) and canary get each build soon after it ships; stable a few times a day.
+pub fn periodic_check_interval() -> Duration {
+    let team = crate::config::linear_bug_reports().unwrap_or_else(|error| {
+        eprintln!("orx up: {error:#}; checking for updates on the channel's schedule");
+        false
+    });
+    let minutes = if team {
+        30
+    } else if crate::telemetry::update_channel() == ReleaseChannel::Canary {
+        3 * 60
+    } else {
+        6 * 60
+    };
+    Duration::from_secs(minutes * 60)
+}
 
 /// What the dashboard shows about updates. Derived entirely from the cache and
 /// the install channel, so it is the same answer whether the updater ran in this
@@ -1949,7 +1962,10 @@ pub async fn periodic_update_pass() {
                     cache.as_ref().map_or("", |c| &c.latest_tag),
                 )
         });
-    if outdated && attempt_due(cache.as_ref()) {
+    // The interval already paces this loop; the backoff floor is for the CLI's
+    // per-invocation check, and would leave a found release undownloaded for an hour.
+    let due = cache.as_ref().is_some_and(|c| c.failures == 0) || attempt_due(cache.as_ref());
+    if outdated && due {
         spawn_background_update();
     }
 }
@@ -2264,6 +2280,20 @@ mod tests {
     use std::ffi::OsString;
     use std::path::Path;
     use std::path::PathBuf;
+
+    #[test]
+    fn the_team_and_canary_check_for_updates_more_often() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let hours = |h: u64| std::time::Duration::from_secs(h * 60 * 60);
+        crate::telemetry::set_update_channel(ReleaseChannel::Stable).unwrap();
+        assert_eq!(super::periodic_check_interval(), hours(6));
+        crate::telemetry::set_update_channel(ReleaseChannel::Canary).unwrap();
+        assert_eq!(super::periodic_check_interval(), hours(3));
+        crate::config::set_linear_bug_reports(true).unwrap();
+        assert_eq!(super::periodic_check_interval(), hours(1) / 2);
+    }
 
     #[tokio::test]
     async fn chat_commands_leave_update_checks_to_orx_up() {
