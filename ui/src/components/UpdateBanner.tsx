@@ -291,7 +291,7 @@ export function holdUpdateBanner(held: boolean) {
 
 export function UpdateBanner({ status, hasSidebar = false }: { status: UpdateStatus | null; hasSidebar?: boolean }) {
   const [dismissed, setDismissed] = useState<string | null>(null);
-  const [revealed, setRevealed] = useState<string | null>(null);
+  const [shown, setShown] = useState<string | null>(null);
   const held = useSyncExternalStore(
     (listener) => {
       bannerHeldListeners.add(listener);
@@ -304,8 +304,10 @@ export function UpdateBanner({ status, hasSidebar = false }: { status: UpdateSta
   // the restart, and the banner must name what is actually on disk.
   const version = status?.restartRequired ? status.installedVersion : null;
   const { restarting, error, restart } = useRestartApp(status);
-  if (version && !held && revealed !== version) setRevealed(version);
-  if (!version || revealed !== version || dismissed === version) return null;
+  // A banner already on screen takes a newer version in place; only a new banner waits.
+  const onScreen = shown !== null && dismissed !== shown;
+  if (version !== shown && (!version || !held || onScreen)) setShown(version);
+  if (!version || shown !== version || dismissed === version) return null;
 
   const canary = status?.installedTag?.startsWith("canary-");
   const changes = describeChanges(status?.changes ?? null);

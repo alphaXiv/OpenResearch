@@ -218,5 +218,8 @@ test("an update that lands while the version popup is open waits for it to close
   await act(() => holdUpdateBanner(true));
   await view.rerender(createElement(UpdateBanner, { status: ready }));
   assert.ok(banner(), "opening the popup over a shown banner keeps it");
+
+  await view.rerender(createElement(UpdateBanner, { status: { ...ready, installedVersion: "3.0.0", installedTag: "v3.0.0" } }));
+  assert.ok(banner(), "a newer build replaces a shown banner in place");
   await act(() => holdUpdateBanner(false));
 });
