@@ -1,4 +1,4 @@
-import { useContext, useState } from "react";
+import { useContext, useEffect, useState } from "react";
 import { WorkspaceDomContext } from "../WorkspaceDom";
 import { useWorkspace } from "../workspace";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
@@ -15,7 +15,7 @@ import { m } from "../paraglide/messages.js";
 import { useRuntime } from "../RemoteRuntime";
 import { mutApplyUpdate } from "../queries/settings";
 import { setQueryDevtoolsOpen, useQueryDevtoolsOpen } from "./QueryDevtools";
-import { BuildNotes, describeChanges, releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
+import { BuildNotes, describeChanges, holdUpdateBanner, releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
 import { BrandMark } from "./Wordmark";
 import { Badge, Button, IconButton, Switch, Tooltip } from "./ui";
 
@@ -59,6 +59,12 @@ function Brand() {
   const canary = status?.current.startsWith("canary-") ?? false;
   const dev = !canary && runtime.buildChannel === "development";
   const badge = canary ? m.settings_update_channel_canary() : dev ? m.header_dev_badge() : null;
+
+  useEffect(() => {
+    if (!open) return;
+    holdUpdateBanner(true);
+    return () => holdUpdateBanner(false);
+  }, [open]);
 
   const check = () => {
     setChecking(true);
