@@ -2467,6 +2467,8 @@
   "status_report_no_models": "आपका कोई भी मॉडल स्थिति नहीं लिख सकता। Claude Code, Codex या OpenCode के मॉडल लिख सकते हैं।",
   "status_report_set_up_agents": "एजेंट सेट अप करें",
   "status_report_options": "स्थिति के विकल्प",
+  "status_report_mark_read": "पढ़ा हुआ चिह्नित करें",
+  "status_report_resize": "स्थिति का आकार बदलें",
   "status_report_turn_off": "इस चैट के लिए बंद करें",
   "status_report_turned_off": "इस चैट के लिए स्थिति बंद कर दी गई। साइडबार में चैट के मेनू से इसे फिर चालू करें।",
   "status_report_turn_on": "स्थिति चालू करें",

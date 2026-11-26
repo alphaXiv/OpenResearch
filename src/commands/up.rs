@@ -1528,6 +1528,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             post(refresh_chat_report),
         )
         .route(
+            "/api/chat/sessions/{id}/report/read",
+            post(mark_chat_report_read),
+        )
+        .route(
             "/api/chat/sessions/{id}/report/enabled",
             post(set_chat_report_enabled),
         )
@@ -11056,6 +11060,29 @@ async fn refresh_chat_report(State(state): State<AppState>, Path(id): Path<Strin
             .get_chat_session(&id)?
             .ok_or_else(|| not_found("chat session"))?;
         crate::engine::watch::report::retry(&state.chat, &store, &chat)?
+            .map(Json)
+            .map_err(|why| ApiError(StatusCode::CONFLICT, why))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct ReportReadReq {
+    version: i64,
+}
+
+/// The user marks the version of the status they read.
+async fn mark_chat_report_read(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ReportReadReq>,
+) -> ApiResult {
+    blocking_api(move || {
+        let store = Store::open()?;
+        store
+            .get_chat_session(&id)?
+            .ok_or_else(|| not_found("chat session"))?;
+        crate::engine::watch::report::mark_read(&state.chat, &store, &id, req.version)?
             .map(Json)
             .map_err(|why| ApiError(StatusCode::CONFLICT, why))
     })

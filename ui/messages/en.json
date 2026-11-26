@@ -2467,6 +2467,8 @@
   "status_report_no_models": "None of your models can write a status. Models from Claude Code, Codex or OpenCode can.",
   "status_report_set_up_agents": "Set up agents",
   "status_report_options": "Status options",
+  "status_report_mark_read": "Mark read",
+  "status_report_resize": "Resize status",
   "status_report_turn_off": "Turn off for this chat",
   "status_report_turned_off": "Status turned off for this chat. Turn it back on from the chat's menu in the sidebar.",
   "status_report_turn_on": "Turn on status",

@@ -2467,6 +2467,8 @@
   "status_report_no_models": "మీ మోడల్‌లలో ఏదీ స్థితిని రాయలేదు. Claude Code, Codex లేదా OpenCode మోడల్‌లు రాయగలవు.",
   "status_report_set_up_agents": "ఏజెంట్‌లను సెటప్ చేయండి",
   "status_report_options": "స్థితి ఎంపికలు",
+  "status_report_mark_read": "చదివినట్లు గుర్తించండి",
+  "status_report_resize": "స్థితి పరిమాణాన్ని మార్చండి",
   "status_report_turn_off": "ఈ చాట్‌కు ఆఫ్ చేయండి",
   "status_report_turned_off": "ఈ చాట్‌కు స్థితి ఆఫ్ చేయబడింది. సైడ్‌బార్‌లోని చాట్ మెనూ నుండి మళ్లీ ఆన్ చేయండి.",
   "status_report_turn_on": "స్థితిని ఆన్ చేయండి",

@@ -2467,6 +2467,8 @@
   "status_report_no_models": "Không mô hình nào của bạn viết được trạng thái. Mô hình của Claude Code, Codex hoặc OpenCode thì viết được.",
   "status_report_set_up_agents": "Thiết lập agent",
   "status_report_options": "Tùy chọn trạng thái",
+  "status_report_mark_read": "Đánh dấu đã đọc",
+  "status_report_resize": "Thay đổi kích thước trạng thái",
   "status_report_turn_off": "Tắt cho cuộc trò chuyện này",
   "status_report_turned_off": "Đã tắt trạng thái cho cuộc trò chuyện này. Bật lại từ menu của cuộc trò chuyện ở thanh bên.",
   "status_report_turn_on": "Bật trạng thái",

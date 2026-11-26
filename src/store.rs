@@ -1758,6 +1758,7 @@ impl Store {
             "ALTER TABLE runs ADD COLUMN commit_sha TEXT",
             "ALTER TABLE runs ADD COLUMN result_markdown TEXT",
             "ALTER TABLE runs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE chat_reports ADD COLUMN read_version INTEGER",
             "ALTER TABLE runs ADD COLUMN chat_session_id TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN permission_mode TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN service_tier TEXT",

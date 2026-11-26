@@ -2467,6 +2467,8 @@
   "status_report_no_models": "Żaden z Twoich modeli nie może prowadzić stanu. Potrafią to modele z Claude Code, Codex lub OpenCode.",
   "status_report_set_up_agents": "Skonfiguruj agentów",
   "status_report_options": "Opcje stanu",
+  "status_report_mark_read": "Oznacz jako przeczytane",
+  "status_report_resize": "Zmień rozmiar stanu",
   "status_report_turn_off": "Wyłącz w tym czacie",
   "status_report_turned_off": "Stan wyłączony w tym czacie. Włącz go ponownie w menu czatu na pasku bocznym.",
   "status_report_turn_on": "Włącz stan",

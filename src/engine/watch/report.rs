@@ -59,6 +59,8 @@ the lines that replace them
 >>>>>>> REPLACE
 The SEARCH lines must match the previous report exactly, in one place only. An empty REPLACE deletes them; to add a line, search for a neighbouring line and replace it with that line plus the new one. Reply with only UNCHANGED when the report needs no edit. When "report" is null, reply with the whole report instead. When "condense" is true, reply with the whole report written again shorter, never with edits.
 
+When "read" is given instead of "report", the user read that report and marked it read, and remembers all of it. Reply with a whole new report that holds only what the inputs add to it: never copy a finding, ruled-out idea, number or plan from "read". Mention something from it only where a new result, the agent or the user changed or settled it, and then say only the change. "## Next" keeps only steps the agent is taking now or the user asked for. The rules below about keeping lines of the previous report don't apply; a short report is the goal. Reply with only UNCHANGED when nothing since needs the user's attention.
+
 The report after your edits must follow these rules:
 - The first line is one plain sentence, with no heading marker or bullet, saying what the effort is doing now. Edit it whenever that changed.
 - Then short sections, such as "## Findings" for the results behind the best setting, "## Ruled out" and "## Next". Leave out a section with nothing current in it.
@@ -146,6 +148,8 @@ pub(crate) fn report_json(store: &Store, chat: &str) -> Result<Value> {
     };
     Ok(json!({
         "body": report.body,
+        "version": report.version,
+        "read": report.read,
         "updatedAt": report.updated_at,
         "enabled": enabled,
         "writing": is_writing(chat),
@@ -259,6 +263,22 @@ pub(crate) fn set_enabled(
     wake().notify_one();
     emit(host, &chat.id);
     report_json(store, &chat.id).map(Ok)
+}
+
+/// The user read the report up to `version`: its next update leaves out what that version says.
+pub(crate) fn mark_read(
+    host: &ChatHost,
+    store: &Store,
+    chat: &str,
+    version: i64,
+) -> Result<std::result::Result<Value, String>> {
+    if !store.mark_chat_report_read(chat, version)? {
+        return Ok(Err(
+            "This chat's status has no such version. Reload the page and try again.".into(),
+        ));
+    }
+    emit(host, chat);
+    report_json(store, chat).map(Ok)
 }
 
 /// When the report may next update: the gap after its last update, written or failed.
@@ -442,7 +462,8 @@ async fn write(chat_id: &str, watching: &Watching) -> Result<()> {
             turn_due_at: turn_ready(&store, chat_id, &report)?,
         };
         let given = inputs(&store, &chat, &report)?;
-        (taken, given, report.body)
+        let previous = report.body.filter(|_| !report.read);
+        (taken, given, previous)
     };
     let selected = (
         harness.as_str(),
@@ -513,6 +534,10 @@ async fn update(
                 )))
             }
         };
+        let read = given["read"].is_string();
+        if read && answer.text.trim() == "UNCHANGED" {
+            return Ok(Ended::Unchanged);
+        }
         // Edits under condense are a valid update; the next update condenses instead.
         let condense = given["condense"] == true;
         let edits = answer.text.lines().any(|line| marker(line, '<', "SEARCH"))
@@ -552,7 +577,8 @@ async fn update(
             };
             let cited = cites(&body);
             let kept = previous.map(cites).unwrap_or_default();
-            if cited.is_empty() && !known.runs.is_empty() {
+            // A report after a read one may have no result to cite.
+            if cited.is_empty() && !known.runs.is_empty() && !read {
                 errors.push("it cites no run, though the chat has results to cite".into());
             } else if !kept.is_empty() && cited.is_disjoint(&kept) {
                 errors.push("it keeps none of the runs the previous report cited".into());
@@ -797,8 +823,8 @@ fn inputs(store: &Store, chat: &StoredChatSession, report: &ChatReport) -> Resul
                 said.retain(|key, _| {
                     matches!(
                         key.as_str(),
-                        "run" | "experiment" | "parent" | "status" | "figure" | "measures"
-                    )
+                        "run" | "experiment" | "parent" | "status" | "measures"
+                    ) || key == "figure" && !report.read
                 });
             }
         }
@@ -807,12 +833,13 @@ fn inputs(store: &Store, chat: &StoredChatSession, report: &ChatReport) -> Resul
     Ok(json!({
         "locale": crate::telemetry::dashboard_locale().unwrap_or_else(|| "en".into()),
         "goal": chat.goal.as_deref().map(|goal| field(goal, GOAL_BYTES)),
-        "report": report.body.as_deref().map(|body| field(body, REPORT_BYTES)),
+        "report": report.body.as_deref().filter(|_| !report.read).map(|body| field(body, REPORT_BYTES)),
+        "read": report.body.as_deref().filter(|_| report.read).map(|body| field(body, REPORT_BYTES)),
         "conversation": conversation,
         "notices": notices,
         "runs": runs,
         "milestones": report.notes.iter().map(|(_, note)| field(note, MAX_NOTE * 4)).collect::<Vec<_>>(),
-        "condense": report.body.as_deref().is_some_and(outgrown),
+        "condense": !report.read && report.body.as_deref().is_some_and(outgrown),
     }))
 }
 

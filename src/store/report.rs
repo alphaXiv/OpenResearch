@@ -9,6 +9,10 @@ pub(crate) const NOTES_KEPT: usize = 20;
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ChatReport {
     pub body: Option<String>,
+    /// The id of the newest version, which wrote `body`.
+    pub version: Option<i64>,
+    /// Whether the user marked the newest version read, so the next one leaves out what it says.
+    pub read: bool,
     /// When the inputs of the update that last wrote or confirmed the body were read, in ms.
     pub updated_at: Option<i64>,
     /// None until the report opens or the user chooses; false once the user turned it off.
@@ -49,7 +53,8 @@ impl Store {
             .query_row(
                 "SELECT v.body, MAX(COALESCE(v.written_at, r.confirmed_at),
                                     COALESCE(r.confirmed_at, v.written_at)),
-                        r.error, r.error_at, r.due_at, r.turn_due_at, r.enabled
+                        r.error, r.error_at, r.due_at, r.turn_due_at, r.enabled,
+                        v.id, r.read_version IS NOT NULL AND r.read_version = v.id
                  FROM chat_reports r
                  LEFT JOIN chat_report_versions v ON v.id = (
                      SELECT MAX(id) FROM chat_report_versions
@@ -65,6 +70,8 @@ impl Store {
                         due_at: row.get(4)?,
                         turn_due_at: row.get(5)?,
                         enabled: row.get(6)?,
+                        version: row.get(7)?,
+                        read: row.get::<_, Option<bool>>(8)?.unwrap_or(false),
                         notes: Vec::new(),
                     })
                 },
@@ -79,6 +86,16 @@ impl Store {
         let notes = stmt.query_map([chat], |row| Ok((row.get(0)?, row.get(1)?)))?;
         report.notes = notes.collect::<std::result::Result<_, _>>()?;
         Ok(Some(report))
+    }
+
+    /// Marks the chat's report read up to `version`; false when the chat has no such version.
+    pub(crate) fn mark_chat_report_read(&self, chat: &str, version: i64) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE chat_reports SET read_version = MAX(COALESCE(read_version, 0), ?2)
+             WHERE chat_session_id = ?1 AND EXISTS (
+                 SELECT 1 FROM chat_report_versions WHERE chat_session_id = ?1 AND id = ?2)",
+            params![chat, version],
+        )? > 0)
     }
 
     /// Every version of the chat's report, oldest first, as when it was written and its body.

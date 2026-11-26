@@ -171,7 +171,7 @@ async fn a_milestone_mid_turn_writes_the_report_from_the_chat_its_runs_and_its_n
     let shown = report_json(&store, "chat").unwrap();
     assert_eq!(
         shown,
-        json!({"body": cited, "updatedAt": report.updated_at, "enabled": true, "writing": false, "error": null, "needsModel": null})
+        json!({"body": cited, "version": report.version, "read": false, "updatedAt": report.updated_at, "enabled": true, "writing": false, "error": null, "needsModel": null})
     );
 }
 
@@ -1392,6 +1392,50 @@ async fn unchanged_confirms_the_report_without_a_version() {
     );
     assert!(report.due_at.is_none());
     assert_eq!(store.chat_report_versions("chat").unwrap().len(), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_report_marked_read_is_written_again_with_only_what_changed_since() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let dir = crate::config::home_dir().unwrap().join("claude-calls");
+    let since = "Depth 8 is training.";
+    super::super::tests::fake_claude(&dir, &[since, "UNCHANGED"]);
+    let store = Store::open().unwrap();
+    previously(&store);
+    let version = store.chat_report("chat").unwrap().unwrap().version.unwrap();
+    assert!(!store.mark_chat_report_read("chat", version + 1).unwrap());
+    assert!(store.mark_chat_report_read("chat", version).unwrap());
+    assert!(store.chat_report("chat").unwrap().unwrap().read);
+    let host = host();
+
+    settle(&host).await;
+    let given: Value =
+        serde_json::from_str(prompt(&dir, 1).strip_prefix(PREAMBLE).unwrap()).unwrap();
+    assert_eq!(given["read"], PREVIOUS);
+    assert!(given["report"].is_null());
+    let report = store.chat_report("chat").unwrap().unwrap();
+    assert_eq!(
+        report.body.as_deref(),
+        Some(since),
+        "written whole, not edited"
+    );
+    assert!(!report.read, "a new version is unread");
+
+    store
+        .mark_chat_report_read("chat", report.version.unwrap())
+        .unwrap();
+    store
+        .chat_report_due("chat", None, crate::store::now_ms())
+        .unwrap();
+    age(&store, "chat");
+    settle(&host).await;
+    let report = store.chat_report("chat").unwrap().unwrap();
+    assert_eq!(report.body.as_deref(), Some(since));
+    assert!(report.read, "nothing new keeps it read");
+    assert_eq!(store.chat_report_versions("chat").unwrap().len(), 2);
 }
 
 #[cfg(unix)]

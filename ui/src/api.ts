@@ -258,6 +258,10 @@ export type RunBannerLevel = "line" | "strip";
 export interface ChatReport {
   /** The first line is a one-sentence headline of what the agent is doing now; null until the first write. */
   body: string | null;
+  /** The id of the version `body` holds. */
+  version: number | null;
+  /** The user marked this version read; the next one says only what changed since. */
+  read: boolean;
   updatedAt: number | null;
   /** False once the user turned the status off for this chat; the body is kept. */
   enabled: boolean;
@@ -3522,6 +3526,9 @@ export function createApi(
   const setChatReportEnabled = (sessionId: string, enabled: boolean) =>
     post<ChatReport>(`/api/chat/sessions/${sessionId}/report/enabled`, { enabled });
 
+  const markChatReportRead = (sessionId: string, version: number) =>
+    post<ChatReport>(`/api/chat/sessions/${sessionId}/report/read`, { version });
+
   const refreshChatReport = (sessionId: string) =>
     post<ChatReport>(`/api/chat/sessions/${sessionId}/report/refresh`);
 
@@ -3807,6 +3814,7 @@ export function createApi(
     listChatReportModels,
     chooseChatReportModel,
     refreshChatReport,
+    markChatReportRead,
     getRunMonitor,
     editRunChart,
     dismissShownRun,

@@ -2467,6 +2467,8 @@
   "status_report_no_models": "Ни одна из ваших моделей не может вести статус. Это умеют модели Claude Code, Codex и OpenCode.",
   "status_report_set_up_agents": "Настроить агентов",
   "status_report_options": "Параметры статуса",
+  "status_report_mark_read": "Отметить как прочитанное",
+  "status_report_resize": "Изменить размер статуса",
   "status_report_turn_off": "Отключить в этом чате",
   "status_report_turned_off": "Статус отключён в этом чате. Включить его снова можно в меню чата на боковой панели.",
   "status_report_turn_on": "Включить статус",

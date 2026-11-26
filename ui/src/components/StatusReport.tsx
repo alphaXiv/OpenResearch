@@ -1,12 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { Menu } from "@base-ui/react/menu";
-import { ChevronDown, ChevronUp, Ellipsis, NotebookText, RefreshCw } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, Ellipsis, NotebookText, RefreshCw } from "lucide-react";
 import { useCallback, useContext, useEffect, useId, useReducer, useRef, useState, type KeyboardEvent } from "react";
 import { timeAgo, type ChatReport, type ChatReportChoice, type Harness, type Run } from "../api";
 import { autoDir, fmtClock } from "../i18n";
 import { m } from "../paraglide/messages.js";
-import { mutChooseChatReportModel, mutRefreshChatReport, mutSetChatReportEnabled } from "../queries/chat";
+import { mutChooseChatReportModel, mutMarkChatReportRead, mutRefreshChatReport, mutSetChatReportEnabled } from "../queries/chat";
 import { mutUpdateUiState } from "../queries/settings";
 import type { TabOpenIntent } from "../tabPreview";
 import { useWorkspace } from "../workspace";
@@ -14,11 +14,16 @@ import { WorkspaceDomContext } from "../WorkspaceDom";
 import { FileScopeContext, type OpenFile } from "./FileReference";
 import { Md } from "./Md";
 import { ModelPicker } from "./ModelPicker";
+import { ResizeHandle } from "./ResizeHandle";
 import { InStatus, useCitedRuns } from "./RunFigure";
 import { Button, IconButton, MenuItem, showAlert, Spinner, Tooltip } from "./ui";
 import { cn } from "./ui/cn";
 
 /** Asks for the model a chat's status needs: its own model in one click, or one that can write it from the model picker. */
+const MIN_HEIGHT = 80;
+/** The open card's height the user dragged to, kept for every chat. */
+const HEIGHT_KEY = "status-height";
+
 function ModelOffer({ sessionId, needs, onChoose, onOpenSettings }: {
   sessionId: string;
   needs: NonNullable<ChatReport["needsModel"]>;
@@ -99,6 +104,14 @@ export function StatusReport({ sessionId, onOpenFile, onOpenRunPage, onOpenSetti
   });
   const { portalContainer } = useContext(WorkspaceDomContext);
   const toggleButton = useRef<HTMLButtonElement>(null);
+  const bodyBox = useRef<HTMLDivElement>(null);
+  const [height, setHeight] = useState<number | null>(() => {
+    try {
+      return Number(localStorage.getItem(HEIGHT_KEY)) || null;
+    } catch {
+      return null;
+    }
+  });
   const headlineId = useId();
   const report = query.data;
   const shown = !query.isError && report && report.enabled && (report.body !== null || report.writing || report.error !== null || report.needsModel !== null);
@@ -138,6 +151,7 @@ export function StatusReport({ sessionId, onOpenFile, onOpenRunPage, onOpenSetti
   const written = report.body !== null;
   const expanded = open && written;
   const needs = report.writing ? null : report.needsModel;
+  const version = report.version;
   const folded = written && !expanded && !needs;
   // By value: the rollback after a refusal restores an equal copy, not the same object.
   const refused = refusal?.over === JSON.stringify(report) ? refusal : null;
@@ -152,6 +166,20 @@ export function StatusReport({ sessionId, onOpenFile, onOpenRunPage, onOpenSetti
     } catch {}
   }
 
+  function resize(next: number | null) {
+    setHeight(next);
+    try {
+      if (next === null) localStorage.removeItem(HEIGHT_KEY);
+      else localStorage.setItem(HEIGHT_KEY, String(next));
+    } catch {}
+  }
+
+  function markRead(version: number) {
+    mutMarkChatReportRead.run(workspace, sessionId, version);
+    if (open) toggle();
+    toggleButton.current?.focus();
+  }
+
   function onKeyDown(event: KeyboardEvent) {
     if (event.key !== "Escape" || event.defaultPrevented || !expanded) return;
     event.preventDefault();
@@ -162,7 +190,17 @@ export function StatusReport({ sessionId, onOpenFile, onOpenRunPage, onOpenSetti
 
   return (
     <InStatus value>
-      <section aria-label={m.status_report_label()} className={cn(frame, "status-report")} onKeyDown={onKeyDown}>
+      <section aria-label={m.status_report_label()} className={cn(frame, "status-report relative")} onKeyDown={onKeyDown}>
+        {expanded && (
+          <ResizeHandle
+            label={m.status_report_resize()}
+            height={height}
+            min={MIN_HEIGHT}
+            max={window.innerHeight * 0.8}
+            measure={() => bodyBox.current?.offsetHeight ?? MIN_HEIGHT}
+            onChange={resize}
+          />
+        )}
         <div role="status" className="sr-only">{report.writing ? m.status_report_updating() : updated ? m.status_report_updated() : ""}</div>
         <div className="flex min-h-9 min-w-0 items-center gap-x-2 py-1 ps-3 pe-1.5">
           <span aria-hidden="true" className="flex h-7 shrink-0 items-center text-ink-subtext">
@@ -180,7 +218,7 @@ export function StatusReport({ sessionId, onOpenFile, onOpenRunPage, onOpenSetti
             ) : !written ? (
               <span className="block min-w-0 truncate text-ink-subtext">{report.writing ? m.status_report_first_writing() : m.status_report_none()}</span>
             ) : !expanded && (
-              <div id={headlineId} inert className="min-w-0 flex-1 [&_.md]:leading-normal [&_p]:my-0 [&_p]:truncate">
+              <div id={headlineId} inert className={cn("min-w-0 flex-1 [&_.md]:leading-normal [&_p]:my-0 [&_p]:truncate", report.read && "[&_.md]:text-ink-subtext [&_strong]:text-ink-subtext")}>
                 <Md text={headline} />
               </div>
             )}
@@ -189,6 +227,11 @@ export function StatusReport({ sessionId, onOpenFile, onOpenRunPage, onOpenSetti
             <span className="shrink-0 whitespace-nowrap tabular-nums text-ink-subtext">
               {[fmtClock(report.updatedAt), timeAgo(report.updatedAt)].map(autoDir).join(" · ")}
             </span>
+          )}
+          {written && !report.read && !needs && version !== null && (
+            <Button size="small" variant="ghost" className="shrink-0" onClick={() => markRead(version)}>
+              <Check size={13} aria-hidden="true" />{m.status_report_mark_read()}
+            </Button>
           )}
           <DirectionProvider direction={document.documentElement.dir === "rtl" ? "rtl" : "ltr"}>
             <Menu.Root modal={false}>
@@ -239,7 +282,11 @@ export function StatusReport({ sessionId, onOpenFile, onOpenRunPage, onOpenSetti
         )}
         {/* Figures draw compact (a chart about 200px with its title and frame, images at most 192px), so one fits whole beside some text. */}
         {expanded && (
-          <div className="max-h-[50vh] overflow-y-auto overscroll-y-contain border-t border-border-variant px-3 py-2 [&_img]:max-h-48 [&_img]:w-auto">
+          <div
+            ref={bodyBox}
+            className={cn("overflow-y-auto overscroll-y-contain border-t border-border-variant px-3 py-2 [&_img]:max-h-48 [&_img]:w-auto", height === null && "max-h-[50vh]")}
+            style={{ minHeight: MIN_HEIGHT, height: height ?? undefined }}
+          >
             <Md text={rest ? `${headline}\n\n${rest}` : headline} onOpenFile={onOpenFile} onOpenRun={openExperiment} />
           </div>
         )}

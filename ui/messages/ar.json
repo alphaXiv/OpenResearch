@@ -2467,6 +2467,8 @@
   "status_report_no_models": "لا يستطيع أي من نماذجك كتابة الحالة. تستطيع ذلك نماذج Claude Code أو Codex أو OpenCode.",
   "status_report_set_up_agents": "إعداد الوكلاء",
   "status_report_options": "خيارات الحالة",
+  "status_report_mark_read": "وضع علامة كمقروء",
+  "status_report_resize": "تغيير حجم الحالة",
   "status_report_turn_off": "إيقاف لهذه المحادثة",
   "status_report_turned_off": "أُوقفت الحالة لهذه المحادثة. أعد تشغيلها من قائمة المحادثة في الشريط الجانبي.",
   "status_report_turn_on": "تشغيل الحالة",

@@ -2467,6 +2467,8 @@
   "status_report_no_models": "현황을 작성할 수 있는 모델이 없습니다. Claude Code, Codex 또는 OpenCode의 모델은 작성할 수 있습니다.",
   "status_report_set_up_agents": "에이전트 설정",
   "status_report_options": "현황 옵션",
+  "status_report_mark_read": "읽음으로 표시",
+  "status_report_resize": "현황 크기 조정",
   "status_report_turn_off": "이 채팅에서 끄기",
   "status_report_turned_off": "이 채팅의 현황을 껐습니다. 사이드바의 채팅 메뉴에서 다시 켤 수 있습니다.",
   "status_report_turn_on": "현황 켜기",
