@@ -30,13 +30,16 @@ pub(crate) struct ChatReport {
 }
 
 /// What an update took of its report when it started: when it read its inputs, the newest note it
-/// read and the milestones it covers, which it settles when it ends unless newer ones replaced them.
+/// read, the milestones it covers, and the version it edited when it started unread.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ReportTaken {
     pub read_at: i64,
     pub last_note: Option<i64>,
     pub due_at: Option<i64>,
     pub turn_due_at: Option<i64>,
+    /// Set when the update started from an unread version; if the user marks that version read
+    /// before the write lands, the stale edit is discarded instead of saving old findings back.
+    pub unread_version: Option<i64>,
 }
 
 pub(crate) enum ReportOutcome<'a> {
@@ -244,19 +247,35 @@ impl Store {
         )?)
     }
 
-    /// Records how an update ended and settles what it took.
+    /// Records how an update ended and settles what it took; returns false without writing when
+    /// the update started from an unread version that the user has since marked read.
     pub(crate) fn finish_chat_report(
         &self,
         chat: &str,
         outcome: ReportOutcome,
         taken: ReportTaken,
         now: i64,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let settled = "due_at = CASE WHEN due_at = ?2 THEN NULL ELSE due_at END,
                        turn_due_at = CASE WHEN turn_due_at = ?3 THEN NULL ELSE turn_due_at END";
         let tx = self.begin_immediate()?;
         match outcome {
             ReportOutcome::Written(body) => {
+                if let Some(version) = taken.unread_version {
+                    let read: bool = self
+                        .conn
+                        .query_row(
+                            "SELECT read_version IS NOT NULL AND read_version >= ?2
+                             FROM chat_reports WHERE chat_session_id = ?1",
+                            params![chat, version],
+                            |row| row.get(0),
+                        )
+                        .optional()?
+                        .unwrap_or(false);
+                    if read {
+                        return Ok(false);
+                    }
+                }
                 let changed = self.conn.execute(
                     &format!(
                         "UPDATE chat_reports SET {settled}, error = NULL, error_at = NULL
@@ -299,7 +318,7 @@ impl Store {
             )?;
         }
         tx.commit()?;
-        Ok(())
+        Ok(true)
     }
 
     /// Records why the report cannot update, leaving its milestones due; false when it already

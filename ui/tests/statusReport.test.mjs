@@ -142,6 +142,34 @@ test("dragging the open card's top edge resizes it, for every chat", async () =>
   assert.equal(opened().closest(".overflow-y-auto").style.height, height, "the height is kept");
 });
 
+test("an older server without version or read hides Mark read", async () => {
+  const { version: _v, read: _r, ...legacy } = report();
+  await card({ open: true, report: legacy });
+  assert.ok(opened());
+  assert.equal(find("button", m.status_report_mark_read()), null);
+});
+
+test("a saved height taller than a shorter window is clamped to the available space", async () => {
+  const original = window.innerHeight;
+  localStorage.setItem("status-height", "900");
+  Object.defineProperty(window, "innerHeight", { value: 400, configurable: true, writable: true });
+  try {
+    const view = await card({ open: true, report: report() });
+    const box = opened().closest(".overflow-y-auto");
+    assert.equal(box.style.height, "320px");
+    assert.equal(box.style.maxHeight, "320px");
+
+    Object.defineProperty(window, "innerHeight", { value: 300, configurable: true, writable: true });
+    await act(async () => window.dispatchEvent(new Event("resize")));
+    await settle();
+    assert.equal(box.style.height, "240px");
+    assert.equal(localStorage.getItem("status-height"), "900", "saved height stays intact for taller windows");
+    await view.unmount();
+  } finally {
+    Object.defineProperty(window, "innerHeight", { value: original, configurable: true, writable: true });
+  }
+});
+
 test("a card opened in one chat stays open in that chat for the tab, and folded in another", async () => {
   const state = { report: report() };
   const first = await card(state);

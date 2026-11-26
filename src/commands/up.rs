@@ -15053,8 +15053,24 @@ mod tests {
         .0;
         assert_eq!(
             on,
-            json!({"body": null, "updatedAt": null, "enabled": true, "writing": false, "error": null, "needsModel": null})
+            json!({"body": null, "version": null, "read": false, "updatedAt": null, "enabled": true, "writing": false, "error": null, "needsModel": null})
         );
+        let unknown = mark_chat_report_read(
+            State(state.clone()),
+            Path("missing".into()),
+            Json(ReportReadReq { version: 1 }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unknown.0, StatusCode::NOT_FOUND);
+        let missing = mark_chat_report_read(
+            State(state.clone()),
+            Path("claude".into()),
+            Json(ReportReadReq { version: 1 }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(missing.0, StatusCode::CONFLICT);
         store
             .chat_report_blocked("claude", "Sign in to Claude Code to update the report.", 2)
             .unwrap();

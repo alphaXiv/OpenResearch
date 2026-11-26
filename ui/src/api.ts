@@ -258,10 +258,10 @@ export type RunBannerLevel = "line" | "strip";
 export interface ChatReport {
   /** The first line is a one-sentence headline of what the agent is doing now; null until the first write. */
   body: string | null;
-  /** The id of the version `body` holds. */
-  version: number | null;
-  /** The user marked this version read; the next one says only what changed since. */
-  read: boolean;
+  /** The id of the version `body` holds; absent on older servers. */
+  version?: number | null;
+  /** The user marked this version read; the next one says only what changed since. Absent on older servers. */
+  read?: boolean;
   updatedAt: number | null;
   /** False once the user turned the status off for this chat; the body is kept. */
   enabled: boolean;

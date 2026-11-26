@@ -683,6 +683,7 @@ fn delegates_side_chats_and_deleted_chats_keep_no_report() {
         last_note: None,
         due_at: None,
         turn_due_at: None,
+        unread_version: None,
     };
     for version in ["First.", "Second."] {
         let written = ReportOutcome::Written(version);
@@ -930,6 +931,7 @@ async fn an_update_lists_the_runs_the_previous_report_cites_without_their_result
         last_note: None,
         due_at: taken.due_at,
         turn_due_at: None,
+        unread_version: None,
     };
     store
         .finish_chat_report("chat", ReportOutcome::Written(previous), taken, 2)
@@ -1002,6 +1004,7 @@ async fn a_label_correction_keeps_the_previous_reports_findings() {
         last_note: None,
         due_at: due,
         turn_due_at: None,
+        unread_version: None,
     };
     store
         .finish_chat_report("chat", ReportOutcome::Written(previous), taken, 2)
@@ -1363,6 +1366,7 @@ fn previously(store: &Store) -> StoredChatSession {
         last_note: None,
         due_at: Some(1),
         turn_due_at: None,
+        unread_version: None,
     };
     store
         .finish_chat_report("chat", ReportOutcome::Written(PREVIOUS), taken, 2)
@@ -1435,6 +1439,44 @@ async fn a_report_marked_read_is_written_again_with_only_what_changed_since() {
     let report = store.chat_report("chat").unwrap().unwrap();
     assert_eq!(report.body.as_deref(), Some(since));
     assert!(report.read, "nothing new keeps it read");
+    assert_eq!(store.chat_report_versions("chat").unwrap().len(), 2);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn marking_a_report_read_mid_update_rebuilds_from_the_read_report() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let dir = crate::config::home_dir().unwrap().join("claude-calls");
+    let stale_edit = edit("- Try depth 8.", "- Depth 8 beat depth 4.");
+    let since = "Depth 8 beat depth 4.";
+    super::super::tests::fake_claude(&dir, &[&stale_edit, since]);
+    let store = Store::open().unwrap();
+    previously(&store);
+    let version = store.chat_report("chat").unwrap().unwrap().version.unwrap();
+
+    while_writing(&store, &dir, || {
+        assert!(store.mark_chat_report_read("chat", version).unwrap());
+    })
+    .await;
+
+    assert_eq!(super::super::tests::calls(&dir), 2);
+    let first: Value =
+        serde_json::from_str(prompt(&dir, 1).strip_prefix(PREAMBLE).unwrap()).unwrap();
+    assert_eq!(first["report"], PREVIOUS);
+    assert!(first["read"].is_null());
+    let rebuilt: Value =
+        serde_json::from_str(prompt(&dir, 2).strip_prefix(PREAMBLE).unwrap()).unwrap();
+    assert_eq!(rebuilt["read"], PREVIOUS);
+    assert!(rebuilt["report"].is_null());
+    let report = store.chat_report("chat").unwrap().unwrap();
+    assert_eq!(
+        report.body.as_deref(),
+        Some(since),
+        "stale edit is discarded in favour of the read-mode rewrite"
+    );
+    assert!(!report.read, "the newly written read-mode report is unread");
     assert_eq!(store.chat_report_versions("chat").unwrap().len(), 2);
 }
 
@@ -1580,6 +1622,7 @@ fn overgrown(store: &Store) -> String {
         last_note: None,
         due_at: Some(1),
         turn_due_at: None,
+        unread_version: None,
     };
     store
         .finish_chat_report("chat", ReportOutcome::Written(long.trim()), taken, 2)
@@ -1689,6 +1732,7 @@ async fn a_whole_reply_that_cites_nothing_is_not_a_report() {
         last_note: None,
         due_at: None,
         turn_due_at: None,
+        unread_version: None,
     };
     store
         .finish_chat_report("chat", ReportOutcome::Written(previous), taken, 2)

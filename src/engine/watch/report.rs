@@ -447,46 +447,56 @@ async fn write(chat_id: &str, watching: &Watching) -> Result<()> {
     else {
         return Ok(());
     };
-    let (taken, given, previous) = {
-        let store = Store::open()?;
-        let (Some(report), Some(chat)) = (
-            store.chat_report(chat_id)?,
-            store.get_chat_session(chat_id)?,
-        ) else {
-            return Ok(());
-        };
-        let taken = ReportTaken {
-            read_at: crate::store::now_ms(),
-            last_note: report.notes.last().map(|(id, _)| *id),
-            due_at: report.due_at,
-            turn_due_at: turn_ready(&store, chat_id, &report)?,
-        };
-        let given = inputs(&store, &chat, &report)?;
-        let previous = report.body.filter(|_| !report.read);
-        (taken, given, previous)
-    };
     let selected = (
         harness.as_str(),
         profile.as_deref(),
         model.as_deref(),
         label.as_str(),
     );
-    let ended = update(chat_id, given, previous.as_deref(), selected).await?;
-    let store = Store::open()?;
-    let now = crate::store::now_ms();
-    match ended {
-        Ended::Written(body) => {
-            store.finish_chat_report(chat_id, ReportOutcome::Written(&body), taken, now)?
+    // At most one rebuild, when the user marks the unread source version read mid-update.
+    for attempt in 0..2 {
+        let (taken, given, previous) = {
+            let store = Store::open()?;
+            let (Some(report), Some(chat)) = (
+                store.chat_report(chat_id)?,
+                store.get_chat_session(chat_id)?,
+            ) else {
+                return Ok(());
+            };
+            if attempt > 0 && report.enabled != Some(true) {
+                return Ok(());
+            }
+            let taken = ReportTaken {
+                read_at: crate::store::now_ms(),
+                last_note: report.notes.last().map(|(id, _)| *id),
+                due_at: report.due_at,
+                turn_due_at: turn_ready(&store, chat_id, &report)?,
+                unread_version: (!report.read).then_some(report.version).flatten(),
+            };
+            let given = inputs(&store, &chat, &report)?;
+            let previous = report.body.filter(|_| !report.read);
+            (taken, given, previous)
+        };
+        let ended = update(chat_id, given, previous.as_deref(), selected).await?;
+        let store = Store::open()?;
+        let now = crate::store::now_ms();
+        match ended {
+            Ended::Written(body) => {
+                if !store.finish_chat_report(chat_id, ReportOutcome::Written(&body), taken, now)? {
+                    continue;
+                }
+            }
+            Ended::Unchanged => {
+                store.finish_chat_report(chat_id, ReportOutcome::Unchanged, taken, now)?;
+            }
+            Ended::Blocked(why) => {
+                store.chat_report_blocked(chat_id, &why, now)?;
+            }
+            Ended::Failed(why) => {
+                store.finish_chat_report(chat_id, ReportOutcome::Failed(&why), taken, now)?;
+            }
         }
-        Ended::Unchanged => {
-            store.finish_chat_report(chat_id, ReportOutcome::Unchanged, taken, now)?
-        }
-        Ended::Blocked(why) => {
-            store.chat_report_blocked(chat_id, &why, now)?;
-        }
-        Ended::Failed(why) => {
-            store.finish_chat_report(chat_id, ReportOutcome::Failed(&why), taken, now)?
-        }
+        break;
     }
     Ok(())
 }
