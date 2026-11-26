@@ -2386,6 +2386,10 @@ struct TurnState {
     usage_limited: bool,
     /// Any real output or tool activity makes transparent resubmission unsafe.
     had_activity: bool,
+    /// An `assistant` event this turn already stamped `cache_warmed_at`.
+    cache_warmed_this_turn: bool,
+    /// An `assistant` event this turn already reported `cache_ttl_secs`.
+    cache_ttl_seen_this_turn: bool,
     /// The last non-empty assistant text block — the plan, if the model wrote
     /// one as plain text. A resumed turn reads it back from the transcript.
     #[serde(skip)]
@@ -2852,6 +2856,8 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                 let cache_ttl_secs = claude_cache_ttl_secs(usage);
                 let cache_warmed_at = (cache_ttl_secs.is_some() || claude_cache_touched(usage))
                     .then(crate::store::now_ms);
+                state.cache_ttl_seen_this_turn |= cache_ttl_secs.is_some();
+                state.cache_warmed_this_turn |= cache_warmed_at.is_some();
                 ctx.report_usage(ContextUsage {
                     used_tokens: used,
                     context_window: None,
@@ -2996,7 +3002,8 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                     }
                 }
             }
-            state.had_activity |= report_result_usage(ctx, event).is_some_and(|used| used > 0);
+            state.had_activity |=
+                report_result_usage(ctx, state, event).is_some_and(|used| used > 0);
             if !state.pending_tasks.is_empty() {
                 return false;
             }
@@ -3176,7 +3183,7 @@ fn claude_cache_touched(usage: Option<&Value>) -> bool {
 /// largest entry, so subagent models don't win); occupancy comes from the
 /// `assistant` usage already captured this turn, else the last
 /// `usage.iterations[]` entry, else the top-level `usage` aggregate.
-fn report_result_usage(ctx: &mut TurnCtx, event: &Value) -> Option<u64> {
+fn report_result_usage(ctx: &mut TurnCtx, state: &TurnState, event: &Value) -> Option<u64> {
     let model_usage = event.get("modelUsage").and_then(Value::as_object);
     let entry = model_usage.and_then(|map| {
         map.get(ctx.model.as_deref().unwrap_or_default())
@@ -3211,19 +3218,13 @@ fn report_result_usage(ctx: &mut TurnCtx, event: &Value) -> Option<u64> {
         .map(|u| u.used_tokens)
         .or(event_used);
     if let Some(used) = used {
-        let already_warmed = ctx
-            .context_usage
-            .as_ref()
-            .and_then(|u| u.cache_warmed_at)
-            .is_some();
-        let cache_ttl_secs = ctx
-            .context_usage
-            .as_ref()
-            .and_then(|u| u.cache_ttl_secs)
-            .or_else(|| event_used.and_then(|_| claude_cache_ttl_secs(last_usage)));
-        let cache_warmed_at = (!already_warmed
+        let result_ttl = event_used.and_then(|_| claude_cache_ttl_secs(last_usage));
+        let cache_ttl_secs = (!state.cache_ttl_seen_this_turn)
+            .then_some(result_ttl)
+            .flatten();
+        let cache_warmed_at = (!state.cache_warmed_this_turn
             && event_used.is_some()
-            && (cache_ttl_secs.is_some() || claude_cache_touched(last_usage)))
+            && (result_ttl.is_some() || claude_cache_touched(last_usage)))
         .then(crate::store::now_ms);
         ctx.report_usage(ContextUsage {
             used_tokens: used,
@@ -5728,6 +5729,38 @@ mod tests {
             &assistant(r#"{"ephemeral_5m_input_tokens":900,"ephemeral_1h_input_tokens":0}"#),
         );
         assert_eq!(ttl(&ctx), Some(300));
+
+        // A new turn whose usage arrives only on `result` still refreshes the prior
+        // turn's saved cache clock and updates the bucket if Claude switched it.
+        ctx.context_usage.as_mut().unwrap().cache_warmed_at = Some(1);
+        let result_only: Value = serde_json::from_str(
+            r#"{"type":"result","subtype":"success","num_turns":1,
+                 "usage":{"input_tokens":3,"cache_creation_input_tokens":900,"cache_read_input_tokens":100,"output_tokens":4,
+                   "cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":900}}}"#,
+        )
+        .unwrap();
+        apply_event(&mut ctx, &mut TurnState::default(), &result_only);
+        assert_eq!(
+            ttl(&ctx),
+            Some(3600),
+            "result-only fallback updates cache_ttl_secs even when a prior turn saved one"
+        );
+        assert!(
+            warmed_at(&ctx).is_some_and(|at| at > 1),
+            "result-only fallback refreshes cache_warmed_at from the prior turn"
+        );
+
+        // When an `assistant` event already warmed the cache this turn, the later
+        // `result` event keeps that timestamp rather than advancing it.
+        let mut turn = TurnState::default();
+        apply_event(&mut ctx, &mut turn, &pure_hit);
+        ctx.context_usage.as_mut().unwrap().cache_warmed_at = Some(42);
+        apply_event(&mut ctx, &mut turn, &result_only);
+        assert_eq!(
+            warmed_at(&ctx),
+            Some(42),
+            "terminal result keeps the assistant event's warm time within the same turn"
+        );
     }
 
     #[test]
@@ -5903,7 +5936,10 @@ mod tests {
             "is_error": true,
             "result": "Not logged in"
         });
-        assert_eq!(report_result_usage(&mut ctx, &result), None);
+        assert_eq!(
+            report_result_usage(&mut ctx, &TurnState::default(), &result),
+            None
+        );
         assert_eq!(
             ctx.context_usage.expect("prior usage retained").used_tokens,
             123
