@@ -39,7 +39,7 @@ export type ChatEvent =
   | { type: "message"; sessionId: string; message: ChatMessage }
   | { type: "busy"; sessionId: string; busy: boolean }
   | { type: "background"; sessionId: string }
-  | { type: "usage"; sessionId: string; usage: ContextUsage }
+  | { type: "usage"; sessionId: string; usage: ContextUsage | null }
   | { type: "queued"; sessionId: string; items: QueuedMessage[] }
   /** A different fork of a turn is now the branch on screen. */
   | { type: "branch"; sessionId: string; activeLeafId: string | null }
@@ -433,8 +433,8 @@ export function createEvents(client: WorkspaceClient) {
           if (d?.sessionId) emitChat({ type: "background", sessionId: d.sessionId });
         });
         es.addEventListener("chat.usage", (e) => {
-          const d = parse<{ sessionId: string; usage: ContextUsage }>(e as MessageEvent);
-          if (d?.sessionId && d.usage) emitChat({ type: "usage", sessionId: d.sessionId, usage: d.usage });
+          const d = parse<{ sessionId: string; usage: ContextUsage | null }>(e as MessageEvent);
+          if (d?.sessionId && d.usage !== undefined) emitChat({ type: "usage", sessionId: d.sessionId, usage: d.usage });
         });
         es.addEventListener("chat.queued", (e) => {
           const d = parse<{ sessionId: string; items: QueuedMessage[] }>(e as MessageEvent);

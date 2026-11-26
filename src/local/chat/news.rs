@@ -287,13 +287,89 @@ pub fn mark_told(store: &Store, subscriber: &str, target: &str) -> Result<()> {
     Ok(())
 }
 
+/// Claims, renders, and delivers `items` to `session_id` under `guard`.
+async fn deliver_claimed_news(
+    chat: &Arc<ChatHost>,
+    session_id: &str,
+    items: Vec<News>,
+    mut guard: TurnGuard,
+) -> Result<()> {
+    let prepared: Result<_> = (|| {
+        let store = Store::open()?;
+        let mut claimed = Vec::new();
+        for item in items {
+            if let Some(token) = item.claim(&store)? {
+                claimed.push((item, token));
+            }
+        }
+        if claimed.is_empty() {
+            return Ok(None);
+        }
+        match messages(&store, claimed.iter().map(|(item, _)| item)) {
+            Ok(pieces) => Ok(Some((claimed, pieces))),
+            Err(error) => {
+                for (item, token) in &claimed {
+                    item.settle(&store, token, false)?;
+                }
+                Err(error)
+            }
+        }
+    })();
+    let (claimed, pieces) = match prepared {
+        Ok(Some(ready)) => ready,
+        Ok(None) => {
+            guard.release().await;
+            return Ok(());
+        }
+        Err(error) => {
+            guard.release().await;
+            return Err(error);
+        }
+    };
+    let submitted = chat.send_orx_messages(session_id, pieces, guard).await;
+    let told = matches!(submitted, Ok(TurnSubmission::Started(_)));
+    {
+        let store = Store::open()?;
+        for (item, token) in &claimed {
+            item.settle(&store, token, told)?;
+        }
+    }
+    if let Err(error) = submitted {
+        if !chat.is_busy(session_id).await {
+            eprintln!("orx up: news for {session_id}: {error}");
+        }
+    }
+    Ok(())
+}
+
+/// Re-reads and delivers all news currently owed to `session_id` after a
+/// background compaction finishes.
+async fn deliver_session_news(
+    chat: &Arc<ChatHost>,
+    session_id: &str,
+    guard: TurnGuard,
+) -> Result<()> {
+    let pending = {
+        let store = Store::open()?;
+        chat_news(&store, Some(session_id))?
+    };
+    let mut items = Vec::new();
+    for item in pending {
+        if matches!(item, News::Answer(_)) && chat.is_busy(item.target()).await {
+            continue;
+        }
+        items.push(item);
+    }
+    deliver_claimed_news(chat, session_id, items, guard).await
+}
+
 /// Starts each idle chat's next turn with all the news it is owed. A busy
 /// chat keeps its news until it is idle. Nothing is told while the data
 /// directory moves.
 pub(super) async fn deliver_news(
     chat: &Arc<ChatHost>,
     store: Store,
-    data_dir_move_in_progress: Option<&AtomicBool>,
+    data_dir_move_in_progress: Option<&Arc<AtomicBool>>,
 ) -> Result<()> {
     let moving = || data_dir_move_in_progress.is_some_and(|flag| flag.load(Ordering::SeqCst));
     if moving() {
@@ -320,36 +396,29 @@ pub(super) async fn deliver_news(
             guard.release().await;
             return Ok(());
         }
-        let mut claimed = Vec::new();
-        for item in items {
-            if let Some(token) = item.claim(&store)? {
-                claimed.push((item, token));
+        if let Some(plan) = chat.plan_resume_compaction(&store, &session_id, false) {
+            let session = session_id.clone();
+            let moving_flag = data_dir_move_in_progress.cloned();
+            match chat
+                .spawn_resume_compaction(plan, guard, move |chat, mut guard| async move {
+                    if moving_flag
+                        .as_ref()
+                        .is_some_and(|flag| flag.load(Ordering::SeqCst))
+                    {
+                        guard.release().await;
+                        return;
+                    }
+                    if let Err(error) = deliver_session_news(&chat, &session, guard).await {
+                        eprintln!("orx up: news for {session}: {error}");
+                    }
+                })
+                .await
+            {
+                Ok(()) => continue,
+                Err(returned_guard) => guard = returned_guard,
             }
         }
-        if claimed.is_empty() {
-            guard.release().await;
-            continue;
-        }
-        let pieces = match messages(&store, claimed.iter().map(|(item, _)| item)) {
-            Ok(pieces) => pieces,
-            Err(error) => {
-                guard.release().await;
-                for (item, token) in &claimed {
-                    item.settle(&store, token, false)?;
-                }
-                return Err(error);
-            }
-        };
-        let submitted = chat.send_orx_messages(&session_id, pieces, guard).await;
-        let told = matches!(submitted, Ok(TurnSubmission::Started(_)));
-        for (item, token) in &claimed {
-            item.settle(&store, token, told)?;
-        }
-        if let Err(error) = submitted {
-            if !chat.is_busy(&session_id).await {
-                eprintln!("orx up: news for {session_id}: {error}");
-            }
-        }
+        deliver_claimed_news(chat, &session_id, items, guard).await?;
     }
     Ok(())
 }

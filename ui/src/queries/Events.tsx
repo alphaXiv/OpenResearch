@@ -206,7 +206,7 @@ export function QueryEvents() {
       } else if (event.type === "sessionDeleted") {
         removeSession(event.sessionId);
       } else if (event.type === "busy" || event.type === "usage") {
-        const update = (row: ChatSession) => row.id !== event.sessionId ? row : event.type === "busy" ? { ...row, busy: event.busy } : { ...row, contextUsage: event.usage };
+        const update = (row: ChatSession) => row.id !== event.sessionId ? row : event.type === "busy" ? { ...row, busy: event.busy } : { ...row, contextUsage: event.usage ?? undefined };
         queryClient.setQueriesData<ChatSession[]>({ queryKey: [...scope, "listChatSessions"] }, (rows) => rows?.map(update));
         editSidebarLists(queryClient, [...scope, "listSidebarChatSessions"], (data) => ({
           ...data, pages: data.pages.map((page) => ({ ...page, sessions: page.sessions.map(update) })),

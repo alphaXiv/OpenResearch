@@ -147,7 +147,7 @@ export function createChatQueries(
     const off = onChatEvent((event) => {
       if (event.type === "busy" || event.type === "usage") {
         indicators.set(event.sessionId, { ...indicators.get(event.sessionId),
-          ...(event.type === "busy" ? { busy: event.busy } : { contextUsage: event.usage }),
+          ...(event.type === "busy" ? { busy: event.busy } : { contextUsage: event.usage ?? undefined }),
         });
       }
     });

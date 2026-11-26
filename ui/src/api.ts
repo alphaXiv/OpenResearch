@@ -1794,6 +1794,10 @@ export interface ContextUsage {
   contextWindow?: number;
   /** Tokens at which the agent compacts on its own; absent when it doesn't say or has auto-compaction off. */
   compactAt?: number;
+  /** Seconds the provider keeps the chat's prompt cache after a request; absent when the agent doesn't say. */
+  cacheTtlSecs?: number;
+  /** Unix-ms timestamp of the latest model response that warmed or refreshed the prompt cache. */
+  cacheWarmedAt?: number;
 }
 
 /** `GET /api/usage`: the machine's agent plans and the last seven days of OpenResearch's spend. */
