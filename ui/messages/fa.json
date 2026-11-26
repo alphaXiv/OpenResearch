@@ -2467,6 +2467,8 @@
   "status_report_no_models": "هیچ‌یک از مدل‌های شما نمی‌تواند وضعیت بنویسد. مدل‌های Claude Code، Codex یا OpenCode می‌توانند.",
   "status_report_set_up_agents": "راه‌اندازی عامل‌ها",
   "status_report_options": "گزینه‌های وضعیت",
+  "status_report_mark_read": "علامت‌گذاری به‌عنوان خوانده‌شده",
+  "status_report_resize": "تغییر اندازه وضعیت",
   "status_report_turn_off": "خاموش کردن برای این گفتگو",
   "status_report_turned_off": "وضعیت برای این گفتگو خاموش شد. از منوی گفتگو در نوار کناری دوباره روشنش کنید.",
   "status_report_turn_on": "روشن کردن وضعیت",

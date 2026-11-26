@@ -2467,6 +2467,8 @@
   "status_report_no_models": "你的模型都无法撰写进展。Claude Code、Codex 或 OpenCode 的模型可以。",
   "status_report_set_up_agents": "设置智能体",
   "status_report_options": "进展选项",
+  "status_report_mark_read": "标为已读",
+  "status_report_resize": "调整进展大小",
   "status_report_turn_off": "在此对话中关闭",
   "status_report_turned_off": "已在此对话中关闭进展。可在侧边栏的对话菜单中重新开启。",
   "status_report_turn_on": "开启进展",

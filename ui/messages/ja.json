@@ -2467,6 +2467,8 @@
   "status_report_no_models": "状況を書けるモデルがありません。Claude Code、Codex、OpenCode のモデルなら書けます。",
   "status_report_set_up_agents": "エージェントを設定",
   "status_report_options": "状況のオプション",
+  "status_report_mark_read": "既読にする",
+  "status_report_resize": "状況のサイズを変更",
   "status_report_turn_off": "このチャットでオフにする",
   "status_report_turned_off": "このチャットの状況をオフにしました。サイドバーのチャットのメニューから再びオンにできます。",
   "status_report_turn_on": "状況をオンにする",

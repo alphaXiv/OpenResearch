@@ -27,7 +27,7 @@ const body = [
   "## Next",
   "Rerun 3e-4 with three seeds.",
 ].join("\n");
-const report = (extra = {}) => ({ body, updatedAt: now - 120_000, enabled: true, needsModel: null, writing: false, error: null, ...extra });
+const report = (extra = {}) => ({ body, version: 1, read: false, updatedAt: now - 120_000, enabled: true, needsModel: null, writing: false, error: null, ...extra });
 
 /** Serves chat s's status as `state.report` holds it; `state.refuse` answers a write with an error. Every request is kept. */
 function backend(state, routes = {}) {
@@ -49,6 +49,10 @@ function backend(state, routes = {}) {
       state.report = { ...state.report, enabled: body.enabled };
       return state.report;
     }
+    if (request === "POST /api/chat/sessions/s/report/read") {
+      state.report = { ...state.report, read: state.report.version === body.version };
+      return state.report;
+    }
     if (request === "POST /api/chat/sessions/s/report/refresh") {
       state.report = { ...state.report, writing: false, error: null };
       return state.report;
@@ -57,7 +61,10 @@ function backend(state, routes = {}) {
   return requests;
 }
 
-afterEach(() => sessionStorage.clear());
+afterEach(() => {
+  sessionStorage.clear();
+  localStorage.clear();
+});
 
 /** Chat s's card, opened earlier in this tab when `state.open`. */
 async function card(state, routes) {
@@ -102,6 +109,65 @@ test("folded, the card shows the first line, the time and its age; the chevron a
   assert.equal(opened(), null);
   assert.equal(document.activeElement, button(m.common_show_more()), "focus lands on the chevron");
   await unmount();
+});
+
+test("Mark read folds the card until a newer version arrives", async () => {
+  const state = { open: true, report: report() };
+  const { requests } = await card(state);
+  assert.ok(opened());
+
+  await click(find("button", m.status_report_mark_read()));
+  assert.deepEqual(requests.filter((r) => r.request.endsWith("/report/read")).map((r) => r.body), [{ version: 1 }]);
+  assert.equal(opened(), null, "reading folds it");
+  assert.equal(document.activeElement, button(m.common_show_more()), "focus lands on the chevron");
+  assert.equal(find("button", m.status_report_mark_read()), null);
+  assert.ok(section().textContent.includes("Comparing the best two learning rates."), "the folded line still says what it read");
+
+  await emit({ sessionId: "s", report: report({ body: "Seeds agree on 3e-4.", version: 2, updatedAt: Date.now() }) });
+  assert.ok(find("button", m.status_report_mark_read()), "a newer version is unread");
+});
+
+test("dragging the open card's top edge resizes it, for every chat", async () => {
+  const state = { open: true, report: report() };
+  const first = await card(state);
+  const grip = find(`[role="separator"][aria-label="${m.status_report_resize()}"]`);
+  await act(async () => grip.focus());
+  await press("ArrowDown");
+  await settle();
+  const height = opened().closest(".overflow-y-auto").style.height;
+  assert.match(height, /^\d+px$/);
+  await first.unmount();
+
+  await card(state);
+  assert.equal(opened().closest(".overflow-y-auto").style.height, height, "the height is kept");
+});
+
+test("an older server without version or read hides Mark read", async () => {
+  const { version: _v, read: _r, ...legacy } = report();
+  await card({ open: true, report: legacy });
+  assert.ok(opened());
+  assert.equal(find("button", m.status_report_mark_read()), null);
+});
+
+test("a saved height taller than a shorter window is clamped to the available space", async () => {
+  const original = window.innerHeight;
+  localStorage.setItem("status-height", "900");
+  Object.defineProperty(window, "innerHeight", { value: 400, configurable: true, writable: true });
+  try {
+    const view = await card({ open: true, report: report() });
+    const box = opened().closest(".overflow-y-auto");
+    assert.equal(box.style.height, "320px");
+    assert.equal(box.style.maxHeight, "320px");
+
+    Object.defineProperty(window, "innerHeight", { value: 300, configurable: true, writable: true });
+    await act(async () => window.dispatchEvent(new Event("resize")));
+    await settle();
+    assert.equal(box.style.height, "240px");
+    assert.equal(localStorage.getItem("status-height"), "900", "saved height stays intact for taller windows");
+    await view.unmount();
+  } finally {
+    Object.defineProperty(window, "innerHeight", { value: original, configurable: true, writable: true });
+  }
 });
 
 test("a card opened in one chat stays open in that chat for the tab, and folded in another", async () => {

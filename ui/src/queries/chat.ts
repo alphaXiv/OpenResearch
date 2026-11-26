@@ -683,6 +683,17 @@ export const mutRefreshChatReport = mutations.define({
   describeResult: null,
 });
 
+export const mutMarkChatReportRead = mutations.define({
+  id: "chat/report/read",
+  mutate: (ws: Workspace, sessionId: string, version: number) => ws.api.markChatReportRead(sessionId, version),
+  optimistic({ helpers, args: [ws, sessionId, version] }) {
+    helpers(ws.queryClient).updateExisting(ws.queries.getChatReportQuery(sessionId), (report) => report && { ...report, read: report.version === version });
+  },
+  key: ({ args: [ws, sessionId] }) => [ws.identity, sessionId],
+  describe: "mark the status read",
+  describeResult: null,
+});
+
 /** Turning it off hides the card at once; turning it on shows it when the server's reply or event lands. */
 export const mutSetChatReportEnabled = mutations.define({
   id: "chat/report/enabled",

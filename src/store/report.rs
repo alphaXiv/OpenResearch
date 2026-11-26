@@ -9,6 +9,10 @@ pub(crate) const NOTES_KEPT: usize = 20;
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ChatReport {
     pub body: Option<String>,
+    /// The id of the newest version, which wrote `body`.
+    pub version: Option<i64>,
+    /// Whether the user marked the newest version read, so the next one leaves out what it says.
+    pub read: bool,
     /// When the inputs of the update that last wrote or confirmed the body were read, in ms.
     pub updated_at: Option<i64>,
     /// None until the report opens or the user chooses; false once the user turned it off.
@@ -26,13 +30,16 @@ pub(crate) struct ChatReport {
 }
 
 /// What an update took of its report when it started: when it read its inputs, the newest note it
-/// read and the milestones it covers, which it settles when it ends unless newer ones replaced them.
+/// read, the milestones it covers, and the version it edited when it started unread.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ReportTaken {
     pub read_at: i64,
     pub last_note: Option<i64>,
     pub due_at: Option<i64>,
     pub turn_due_at: Option<i64>,
+    /// Set when the update started from an unread version; if the user marks that version read
+    /// before the write lands, the stale edit is discarded instead of saving old findings back.
+    pub unread_version: Option<i64>,
 }
 
 pub(crate) enum ReportOutcome<'a> {
@@ -49,7 +56,8 @@ impl Store {
             .query_row(
                 "SELECT v.body, MAX(COALESCE(v.written_at, r.confirmed_at),
                                     COALESCE(r.confirmed_at, v.written_at)),
-                        r.error, r.error_at, r.due_at, r.turn_due_at, r.enabled
+                        r.error, r.error_at, r.due_at, r.turn_due_at, r.enabled,
+                        v.id, r.read_version IS NOT NULL AND r.read_version = v.id
                  FROM chat_reports r
                  LEFT JOIN chat_report_versions v ON v.id = (
                      SELECT MAX(id) FROM chat_report_versions
@@ -65,6 +73,8 @@ impl Store {
                         due_at: row.get(4)?,
                         turn_due_at: row.get(5)?,
                         enabled: row.get(6)?,
+                        version: row.get(7)?,
+                        read: row.get::<_, Option<bool>>(8)?.unwrap_or(false),
                         notes: Vec::new(),
                     })
                 },
@@ -79,6 +89,16 @@ impl Store {
         let notes = stmt.query_map([chat], |row| Ok((row.get(0)?, row.get(1)?)))?;
         report.notes = notes.collect::<std::result::Result<_, _>>()?;
         Ok(Some(report))
+    }
+
+    /// Marks the chat's report read up to `version`; false when the chat has no such version.
+    pub(crate) fn mark_chat_report_read(&self, chat: &str, version: i64) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE chat_reports SET read_version = MAX(COALESCE(read_version, 0), ?2)
+             WHERE chat_session_id = ?1 AND EXISTS (
+                 SELECT 1 FROM chat_report_versions WHERE chat_session_id = ?1 AND id = ?2)",
+            params![chat, version],
+        )? > 0)
     }
 
     /// Every version of the chat's report, oldest first, as when it was written and its body.
@@ -227,19 +247,35 @@ impl Store {
         )?)
     }
 
-    /// Records how an update ended and settles what it took.
+    /// Records how an update ended and settles what it took; returns false without writing when
+    /// the update started from an unread version that the user has since marked read.
     pub(crate) fn finish_chat_report(
         &self,
         chat: &str,
         outcome: ReportOutcome,
         taken: ReportTaken,
         now: i64,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let settled = "due_at = CASE WHEN due_at = ?2 THEN NULL ELSE due_at END,
                        turn_due_at = CASE WHEN turn_due_at = ?3 THEN NULL ELSE turn_due_at END";
         let tx = self.begin_immediate()?;
         match outcome {
             ReportOutcome::Written(body) => {
+                if let Some(version) = taken.unread_version {
+                    let read: bool = self
+                        .conn
+                        .query_row(
+                            "SELECT read_version IS NOT NULL AND read_version >= ?2
+                             FROM chat_reports WHERE chat_session_id = ?1",
+                            params![chat, version],
+                            |row| row.get(0),
+                        )
+                        .optional()?
+                        .unwrap_or(false);
+                    if read {
+                        return Ok(false);
+                    }
+                }
                 let changed = self.conn.execute(
                     &format!(
                         "UPDATE chat_reports SET {settled}, error = NULL, error_at = NULL
@@ -282,7 +318,7 @@ impl Store {
             )?;
         }
         tx.commit()?;
-        Ok(())
+        Ok(true)
     }
 
     /// Records why the report cannot update, leaving its milestones due; false when it already

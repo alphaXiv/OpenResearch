@@ -2467,6 +2467,8 @@
   "status_report_no_models": "Modellerinizin hiçbiri durum yazamıyor. Claude Code, Codex veya OpenCode modelleri yazabilir.",
   "status_report_set_up_agents": "Ajanları kur",
   "status_report_options": "Durum seçenekleri",
+  "status_report_mark_read": "Okundu olarak işaretle",
+  "status_report_resize": "Durumu yeniden boyutlandır",
   "status_report_turn_off": "Bu sohbette kapat",
   "status_report_turned_off": "Bu sohbetin durumu kapatıldı. Kenar çubuğundaki sohbet menüsünden yeniden açabilirsiniz.",
   "status_report_turn_on": "Durumu aç",

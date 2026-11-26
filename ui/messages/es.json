@@ -2467,6 +2467,8 @@
   "status_report_no_models": "Ninguno de tus modelos puede escribir un estado. Los de Claude Code, Codex u OpenCode sí pueden.",
   "status_report_set_up_agents": "Configurar agentes",
   "status_report_options": "Opciones del estado",
+  "status_report_mark_read": "Marcar como leído",
+  "status_report_resize": "Cambiar el tamaño del estado",
   "status_report_turn_off": "Desactivar en este chat",
   "status_report_turned_off": "Estado desactivado en este chat. Vuelve a activarlo desde el menú del chat en la barra lateral.",
   "status_report_turn_on": "Activar el estado",
