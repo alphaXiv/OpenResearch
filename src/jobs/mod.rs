@@ -3,6 +3,7 @@
 //! A run launched by orx 0.2 keeps its handle in `backend_json` as a [`BackendDescriptor`], which
 //! the engine reads to watch or adopt it.
 
+pub mod boxd;
 pub mod huggingface;
 pub mod kubernetes;
 pub mod localbox;

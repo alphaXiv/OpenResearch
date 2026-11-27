@@ -49,6 +49,8 @@ Modal checks the local SDK and credential presence; it does not verify token
 validity with Modal.
 Vercel Sandbox likewise checks the local SDK and that `VERCEL_OIDC_TOKEN`, or
 all of `VERCEL_TOKEN`, `VERCEL_TEAM_ID` and `VERCEL_PROJECT_ID`, are present.
+boxd checks `BOXD_API_KEY` with boxd and that the org allows the requested size;
+`orx compute connect boxd` prompts for the key without echoing it.
 
 HF, Tinker and Modal credentials can come from
 `orx compute configure modal --credentials-file -` (stdin; likewise `hf` and

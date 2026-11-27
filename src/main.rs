@@ -750,7 +750,8 @@ pub struct ExpRunArgs {
     /// cluster), `ssh` (a detached process on one of your own boxes), `slurm`
     /// (a batch job on your Slurm cluster, submitted via its login node),
     /// `ray` (a job on your Ray cluster, via the Ray Jobs API), `vercel` (a
-    /// CPU-only Vercel Sandbox microVM on your own Vercel project), `openresearch`
+    /// CPU-only Vercel Sandbox microVM on your own Vercel project), `boxd` (a
+    /// CPU-only boxd machine, deleted when the run ends), `openresearch`
     /// (an ephemeral OpenResearch GPU/CPU box billed to your org; needs
     /// `orx login`), `tinker` (a local controller using remote Tinker model
     /// compute), or `local` (a detached process on this machine). k8s,
@@ -769,7 +770,8 @@ pub struct ExpRunArgs {
     /// entrypoint resources (`cpu:2`, `gpu:1`, `gpu:1,mem:8GiB`; omit to reserve
     /// nothing). With `--backend vercel`: optional vCPUs (cpu = 2, cpu-<n> or
     /// <n>: 1 or an even number up to 32; 2 GB memory each; plans cap this at
-    /// 4 on Hobby, 8 on Pro, and 32 on Enterprise). With `--backend openresearch`: a GPU id from `orx compute`
+    /// 4 on Hobby, 8 on Pro, and 32 on Enterprise). With `--backend boxd`: cpu (the org's
+    /// default size), or 1, 2, 4 or 8 vCPUs with 4 GiB each. With `--backend openresearch`: a GPU id from `orx compute`
     /// (h100_sxm, or h100_sxm:2 for two) or a CPU flavor (cpu5c/cpu5g/cpu5m, or
     /// cpu5c:32 for the vCPU tier). Not used by k8s (see --manifest) or ssh
     /// (see --host).
@@ -799,11 +801,11 @@ pub struct ExpRunArgs {
     /// Docker image for the job (with `--backend hf/modal`). Defaults to
     /// python:3.12 on CPU flavors, a CUDA pytorch image otherwise. With
     /// `--backend vercel`, a Vercel Container Registry image (default
-    /// vercel/sandbox/python:3.14). With
+    /// vercel/sandbox/python:3.14). Refused by `--backend boxd`. With
     /// `--backend k8s`, set the image in the manifest instead.
     #[arg(long)]
     pub image: Option<String>,
-    /// Job timeout (with `--backend hf/modal/vercel/k8s/slurm/openresearch`): 90s,
+    /// Job timeout (with `--backend hf/modal/vercel/boxd/k8s/slurm/openresearch`): 90s,
     /// 30m, 4h, 1d. Default 4h (HF's own default is only 30 minutes; Vercel
     /// defaults to 40m on Hobby so a 45-minute session still includes 5 minutes
     /// to read logs and the exit status, and caps a session at 24h otherwise). With

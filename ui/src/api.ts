@@ -599,6 +599,13 @@ export interface HfSettings {
   orgs?: { name: string; plan: string | null; canPay: boolean | null; role: string | null }[];
 }
 
+export interface BoxdSettings {
+  maskedKey: string | null;
+  validationStatus: "missing" | "valid" | "invalid" | "unknown";
+  processEnv: boolean;
+  error?: string;
+}
+
 export interface TinkerSettings {
   maskedKey: string | null;
   validationStatus: "missing" | "valid" | "invalid" | "billingRequired";
@@ -989,6 +996,7 @@ export type ComputeTargetId =
   | "slurm"
   | "ray"
   | "vercel"
+  | "boxd"
   | "openresearch";
 
 /** Cheap fs/env probe only — "worth trying", not "healthy". Deep health lives
@@ -2787,6 +2795,8 @@ export function createApi(
   const saveHfNamespace = (namespace: string | null) => post<HfSettings>("/api/settings/hf/namespace", { namespace });
 
   const getTinkerSettings = (signal?: AbortSignal) => get<TinkerSettings>("/api/settings/tinker", signal);
+  const getBoxdSettings = (signal?: AbortSignal) => get<BoxdSettings>("/api/settings/boxd", signal);
+  const saveBoxdKey = (key: string) => post<BoxdSettings>("/api/settings/boxd", { key });
   const saveTinkerKey = (key: string) => post<TinkerSettings>("/api/settings/tinker", { key });
 
   const getUpdateStatus = (signal?: AbortSignal) => get<UpdateStatus>("/api/update", signal);
@@ -3651,6 +3661,8 @@ export function createApi(
     saveHfNamespace,
     getTinkerSettings,
     saveTinkerKey,
+    getBoxdSettings,
+    saveBoxdKey,
     getUpdateStatus,
     getUsage,
     refreshUsage,

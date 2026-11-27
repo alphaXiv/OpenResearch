@@ -494,6 +494,40 @@ backend_adapter!(
 );
 
 backend_adapter!(
+    BoxdCompute,
+    "boxd",
+    "boxd",
+    true,
+    true,
+    false,
+    "upload to the machine",
+    false,
+    preflight | args | {
+        use crate::jobs::boxd;
+        let setup = boxd::resolve_flavor(args.flavor.as_deref()).and_then(|vcpus| {
+            Ok((
+                vcpus,
+                boxd::configured_region()?,
+                boxd::Account::from_env()?,
+            ))
+        });
+        let (vcpus, _, account) = match setup {
+            Ok(setup) => setup,
+            Err(error) => return Ok(not_ready(error.to_string())),
+        };
+        let defaults = account.client("")?.org_defaults().await?;
+        match boxd::check_size(vcpus, &defaults) {
+            Ok(()) => ready(),
+            Err(error) => Ok(not_ready(error.to_string())),
+        }
+    },
+    prepare | args,
+    source,
+    run_id,
+    command | crate::local::boxd::launch_spec(args, source, run_id, command).await
+);
+
+backend_adapter!(
     KubernetesCompute,
     "k8s",
     "Kubernetes",
@@ -636,6 +670,7 @@ pub fn backend(id: &str) -> Result<Box<dyn ComputeBackend>> {
         "slurm" => Ok(Box::new(SlurmCompute)),
         "ray" => Ok(Box::new(RayCompute)),
         "vercel" => Ok(Box::new(VercelCompute)),
+        "boxd" => Ok(Box::new(BoxdCompute)),
         "openresearch" => Ok(Box::new(OpenResearchCompute)),
         _ => Err(anyhow!("Unknown compute backend '{id}'.")),
     }
@@ -757,7 +792,7 @@ pub fn validate_run_args(args: &crate::ExpRunArgs) -> Result<()> {
                 "Unknown --backend '{}'. Local experiments support: hf (Hugging Face Jobs), \
                  modal (Modal serverless GPUs), k8s (your Kubernetes cluster), ssh (your own box), \
                  slurm (your Slurm cluster), ray (a Ray Jobs cluster), \
-                 vercel (Vercel Sandbox microVMs), \
+                 vercel (Vercel Sandbox microVMs), boxd (an isolated boxd machine), \
                  openresearch (an ephemeral OpenResearch box), tinker (local controller with remote model compute), \
                  local (this machine).",
                 backend

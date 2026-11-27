@@ -3,7 +3,7 @@ use std::process::Command;
 
 /// Variables that would lead a launched `orx` or agent to the developer's own
 /// state, credentials or session: `config::REDIRECT_VARS` and `PROVIDER_VARS`.
-const CLEARED: [&str; 53] = [
+const CLEARED: [&str; 54] = [
     "ORX_DATA_DIR",
     "ORX_CACHE_DIR",
     "OPENCODE_CONFIG",
@@ -49,6 +49,7 @@ const CLEARED: [&str; 53] = [
     "TINKER_API_KEY",
     "VERCEL_TOKEN",
     "VERCEL_OIDC_TOKEN",
+    "BOXD_API_KEY",
     "CLAUDECODE",
     "CLAUDE_CODE_ENTRYPOINT",
     "CODEX_THREAD_ID",

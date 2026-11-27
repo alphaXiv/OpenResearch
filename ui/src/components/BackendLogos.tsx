@@ -14,6 +14,8 @@ export function backendName(kind: string): string {
       return "Modal";
     case "vercel_job":
       return "Vercel Sandbox";
+    case "boxd_job":
+      return "boxd";
     case "hf_job":
       return "Hugging Face";
     case "k8s_job":
@@ -165,6 +167,15 @@ function VercelLogo({ size = 16 }: { size?: number }) {
   );
 }
 
+// boxd's mark in one color, so it follows the theme like Vercel's.
+function BoxdLogo({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="-2 -2 32 32" fill="currentColor" aria-hidden="true">
+      <path d="M2 0h24a2 2 0 0 1 2 2v24a2 2 0 0 1-2 2H7.6a2 2 0 0 1-2-2v-1.6a2 2 0 0 0-2-2H2a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2z" />
+    </svg>
+  );
+}
+
 /** The logo glyph for a backend kind. */
 export function BackendLogo({ kind, size = 16 }: { kind: string; size?: number }) {
   switch (kind) {
@@ -172,6 +183,8 @@ export function BackendLogo({ kind, size = 16 }: { kind: string; size?: number }
       return <ModalLogo size={size} />;
     case "vercel_job":
       return <VercelLogo size={size} />;
+    case "boxd_job":
+      return <BoxdLogo size={size} />;
     case "hf_job":
       return <HuggingFaceLogo size={size} />;
     case "k8s_job":

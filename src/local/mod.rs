@@ -14,6 +14,7 @@ pub mod agent_skills;
 #[cfg(test)]
 pub(crate) mod agent_text;
 pub mod bash;
+pub mod boxd;
 pub mod browser_cookies;
 pub mod chat;
 pub mod claude;
@@ -110,15 +111,24 @@ pub const BACKENDS: &[&str] = &[
     "slurm",
     "ray",
     "vercel",
+    "boxd",
     "openresearch",
 ];
 
 /// Backends whose launches take a `--flavor` (hf/modal/openresearch require
-/// one; vercel's is an optional vCPU count; slurm's is an optional GRES spec;
+/// one; vercel's and boxd's are an optional vCPU count; slurm's is an optional GRES spec;
 /// ray's is optional resource hints).
 /// k8s (manifest), ssh (host), and local (this machine's hardware) have no
 /// flavor axis.
-pub const FLAVORED_BACKENDS: &[&str] = &["hf", "modal", "slurm", "ray", "vercel", "openresearch"];
+pub const FLAVORED_BACKENDS: &[&str] = &[
+    "hf",
+    "modal",
+    "slurm",
+    "ray",
+    "vercel",
+    "boxd",
+    "openresearch",
+];
 
 /// The subset whose launches FAIL without a `--flavor` — the playbook warns
 /// about these when they're the default with no saved flavor.

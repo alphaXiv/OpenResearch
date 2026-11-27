@@ -786,7 +786,7 @@ fn estimate_input(
         ends_at: life.ends_at().map(|at| at as f64),
         machine_cost_unknown: matches!(
             life.kind.as_str(),
-            "openresearch_job" | "hf_job" | "modal_job" | "vercel_job"
+            "openresearch_job" | "hf_job" | "modal_job" | "vercel_job" | "boxd_job"
         ),
     };
     let empty;

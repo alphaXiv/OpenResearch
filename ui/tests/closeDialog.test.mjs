@@ -71,7 +71,7 @@ test("each pending chat and experiment is listed by name under what quitting doe
 });
 
 test("an experiment that needs OpenResearch open says why, and only a force quit stops it", async () => {
-  const backends = { local_job: m.close_pending_reason_local(), tinker_job: m.close_pending_reason_tinker(), vercel_job: m.close_pending_reason_vercel(), openresearch_job: m.close_pending_reason_box() };
+  const backends = { local_job: m.close_pending_reason_local(), tinker_job: m.close_pending_reason_tinker(), vercel_job: m.close_pending_reason_vercel(), openresearch_job: m.close_pending_reason_box(), boxd_job: m.close_pending_reason_boxd() };
   const sent = await requestClose({ agents: [], runs: Object.keys(backends).map((backend) => run(backend, "needsApp", backend)) });
 
   assert.deepEqual(listed(m.close_pending_needs_open()), Object.entries(backends).map(([name, reason]) => `${name}${reason}Scaling laws`));

@@ -165,7 +165,7 @@ export function runApiProvider(run: Pick<Run, "backend">): string | null {
   if (typeof handle === "object" && handle !== null && "type" in handle && handle.type === "Api" && "provider" in handle && typeof handle.provider === "string") return handle.provider;
   const descriptor = typeof handle === "object" && handle !== null && "descriptor" in handle ? handle.descriptor : run.backend;
   const kind = typeof descriptor === "object" && descriptor !== null && "kind" in descriptor ? descriptor.kind : null;
-  return typeof kind === "string" && ["hf_job", "ray_job", "vercel_job", "modal_job", "k8s_job"].includes(kind) ? kind : null;
+  return typeof kind === "string" && ["hf_job", "ray_job", "vercel_job", "boxd_job", "modal_job", "k8s_job"].includes(kind) ? kind : null;
 }
 
 /** The host whose Connect this run is waiting on, if any. */

@@ -23,6 +23,7 @@ const needsAppReasons: Record<string, () => string> = {
   tinker_job: m.close_pending_reason_tinker,
   vercel_job: m.close_pending_reason_vercel,
   openresearch_job: m.close_pending_reason_box,
+  boxd_job: m.close_pending_reason_boxd,
 };
 
 function PendingRow({ icon, name, project, detail, disabled, onOpen }: {
