@@ -697,7 +697,11 @@ fn observation_error(error: crate::error::Error) -> Observation {
     .iter()
     .any(|rejection| detail.contains(rejection));
 
-    if http_auth || sdk_auth {
+    let boxd_auth = error
+        .downcast_ref::<crate::jobs::boxd::AuthRejected>()
+        .is_some();
+
+    if http_auth || sdk_auth || boxd_auth {
         Observation::NeedsAuth { cause }
     } else {
         Observation::Unreachable { cause }

@@ -261,6 +261,9 @@ fn close_alert_description(work: &crate::store::PendingWork) -> String {
             Some("openresearch_job") => {
                 "without OpenResearch, the result is lost when the box shuts down"
             }
+            Some("boxd_job") => {
+                "without OpenResearch, the machine keeps billing after the job ends, until OpenResearch deletes it"
+            }
             _ => return run.name.clone(),
         };
         format!("{}: {reason}", run.name)

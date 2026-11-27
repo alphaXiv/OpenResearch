@@ -44,7 +44,7 @@ the same elapsed time when the run reports no steps; between two of the
 parent's reports it is read off the line joining them.
 
 `projectedFinishPastLimit` requires a run with a time limit. OpenResearch,
-Hugging Face Jobs, Modal, Kubernetes, and Vercel supply one by default. For
+Hugging Face Jobs, Modal, Kubernetes, Vercel, and boxd supply one by default. For
 Slurm, pass `--timeout` or set a time limit in the Slurm settings. Local, SSH,
 Ray, and Tinker launches with this rule are refused.
 

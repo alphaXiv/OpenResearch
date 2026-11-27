@@ -11,5 +11,6 @@ export const TARGET_LABELS: Record<ComputeTargetId, () => string> = {
   slurm: m.compute_target_slurm,
   ray: m.compute_target_ray,
   vercel: m.compute_target_vercel,
+  boxd: m.compute_target_boxd,
   openresearch: m.compute_target_openresearch,
 };

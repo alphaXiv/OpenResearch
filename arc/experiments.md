@@ -30,7 +30,7 @@ Launching returns a **handle**, stored on the run with everything a later proces
 | this machine, Tinker | a detached `orx-host wrap` |
 | SSH, Slurm | the user's hosts, under `orx-host` ([remote](remote.md)) |
 | Kubernetes, Ray | the user's cluster |
-| Hugging Face Jobs, Modal, Vercel | hosted services |
+| Hugging Face Jobs, Modal, Vercel, boxd | hosted services |
 | an OpenResearch box | a rented machine ([below](#managed-rentals)) |
 
 A default flavor applies only to its own backend and never leaks onto an explicitly chosen one.

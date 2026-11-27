@@ -2625,7 +2625,9 @@ impl Store {
                 (true, _, _) if unreported => AfterQuit::Reports,
                 (true, _, _) => continue,
                 (false, Some("local_job" | "tinker_job"), _)
-                | (false, Some("vercel_job" | "openresearch_job"), true) => AfterQuit::NeedsApp,
+                | (false, Some("vercel_job" | "boxd_job" | "openresearch_job"), true) => {
+                    AfterQuit::NeedsApp
+                }
                 (false, _, _) => AfterQuit::Continues,
             };
             runs.push(PendingRun {

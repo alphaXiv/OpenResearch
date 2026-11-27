@@ -3311,6 +3311,87 @@ esac
     ));
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn boxd_runs_through_the_engine_and_deletes_its_machine() {
+    if !crate::config::in_test_child(&[]) {
+        return;
+    }
+    let fake = crate::jobs::boxd::tests::Fake::start().await;
+    fake.configure_env();
+    let root = fake.root.join("engine");
+    let engine = engine(&root);
+    let metadata = BackendDescriptor::parse(r#"{"kind":"boxd_job"}"#).unwrap();
+    let launch = LaunchSpec {
+        kind: "boxd_job".into(),
+        target: None,
+        options: json!({
+            "name": "orx-run", "vcpus": null, "timeout_seconds": 600, "region": "nyc",
+            "labels": {"team": "ml"}, "source_archive": null,
+            "script": "echo \"$KEEP\"; echo \"${BOXD_API_KEY:-none}\"; sleep 30",
+            "env": {"BOXD_API_KEY": "leaked-key", "BOXD_TOKEN": "leaked", "KEEP": "yes"}
+        }),
+    };
+    let account = crate::engine::handle::ApiAccount {
+        target: None,
+        context: None,
+    };
+    let build = super::api::provider("boxd_job").unwrap().build;
+    let adapter = build(&account, Arc::new(TestClock::new()), root.join("spools")).unwrap();
+    let backend = adapter.as_ref();
+    let submission = pending("run", &metadata, &launch);
+    engine.submit(backend, submission).await.unwrap();
+    let run = engine.load("run").unwrap().0;
+    let watched = WatchedRun {
+        id: run.id.clone(),
+        handle: handle_of(&run).unwrap(),
+    };
+    let Handle::Api { provider, ids, .. } = &watched.handle else {
+        panic!("not an API handle: {:?}", watched.handle);
+    };
+    // The org's default size is recorded as made: the fake makes 2 vCPUs.
+    assert!(provider == "boxd_job" && ids[1..] == ["nyc", "2"]);
+    let (ids, vm) = (ids.clone(), ids[0].clone());
+    {
+        let state = fake.state();
+        let labels = &state.creates[0].labels;
+        assert!(state.creates[0].isolated && labels["or_run"] == "run" && labels["team"] == "ml");
+        let (path, env) = &state.uploads[0];
+        let env = String::from_utf8_lossy(env);
+        assert!(path.ends_with("/env.sh") && env.contains("KEEP='yes'"));
+        assert!(!env.contains("BOXD_"), "{env}");
+    }
+    let intent = RunIntent {
+        run: run.clone(),
+        launch: launch.clone(),
+        spec_digest: "digest".into(),
+        attempt: 1,
+    };
+    assert!(matches!(adapter.recover(&intent).await,
+        Recovery::Found(Handle::Api { ids: ref found, .. }) if *found == ids));
+    engine.cancel(backend, "run", "stop").await.unwrap();
+    let watching = std::slice::from_ref(&watched);
+    engine
+        .observe_runs(backend, watching, Duration::from_secs(5))
+        .await;
+    assert_eq!(engine.load("run").unwrap().0.status, "cancelled");
+    adapter.drain_log(&watched).await.unwrap();
+    let page = adapter
+        .read_log(&watched, LogFile::Log, ByteRange { start: 0, end: 9 }, None)
+        .await
+        .unwrap();
+    assert!(
+        matches!(&page, LogPage::Data { bytes, .. } if bytes == b"yes\nnone\n"),
+        "{page:?}"
+    );
+    adapter.finish(&watched).await.unwrap();
+    assert_eq!(fake.state().destroyed, [vm]);
+    // Priced at the size it was made at, with its machine gone.
+    let quote = adapter.quote(&watched, &launch).await.unwrap();
+    let price = crate::jobs::boxd::hourly_price(2).amount_micros;
+    assert_eq!(quote.map(|quote| quote.amount_micros), Some(price));
+}
+
 #[tokio::test]
 async fn providers_reject_credentials_and_preserve_numeric_exits() {
     let Some(root) = isolated().await else {

@@ -12,11 +12,11 @@ use crate::store::{BilledRun, Cost, Store};
 
 /// Backends that bill for running time and have a price to read. The user's own machines and
 /// clusters cost nothing orx can see; Vercel and Tinker have no per-run price.
-pub(crate) const BILLED: [&str; 3] = ["openresearch_job", "hf_job", "modal_job"];
+pub(crate) const BILLED: [&str; 4] = ["openresearch_job", "hf_job", "modal_job", "boxd_job"];
 
 /// Billed backends whose price is a list price, still readable after a run ends; a box's price
 /// went with the box.
-pub(crate) const LIST_PRICED: [&str; 2] = ["hf_job", "modal_job"];
+pub(crate) const LIST_PRICED: [&str; 3] = ["hf_job", "modal_job", "boxd_job"];
 
 const HOUR: i64 = 3_600_000;
 /// How long after an hour ends Modal's report is read for it, since it can lag.

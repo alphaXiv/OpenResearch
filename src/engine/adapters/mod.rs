@@ -27,6 +27,7 @@ providers! {
     )),
     ray => ("ray_job", |account| ray::RayAccount { address: account.target()?.into() }),
     vercel => ("vercel_job", |_account| vercel::VercelAccount),
+    boxd => ("boxd_job", |_account| boxd::BoxdAccount),
 }
 
 #[cfg(all(test, unix))]

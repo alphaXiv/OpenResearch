@@ -30,6 +30,12 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     staleTime: 300_000,
   });
 
+  const getBoxdSettingsQuery = () => queryOptions({
+    queryKey: workspaceKey("getBoxdSettings"),
+    queryFn: ({ signal }) => api.getBoxdSettings(signal),
+    staleTime: 30_000,
+  });
+
   const getK8sSettingsQuery = () => queryOptions({
     queryKey: workspaceKey("getK8sSettings"),
     queryFn: ({ signal }) => api.getK8sSettings(signal),
@@ -380,6 +386,7 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, events:
     getFileManagerQuery,
     getHfSettingsQuery,
     getTinkerSettingsQuery,
+    getBoxdSettingsQuery,
     getK8sSettingsQuery,
     getModalSettingsQuery,
     getVercelSettingsQuery,
@@ -494,6 +501,17 @@ export const mutSaveVercelSetup = mutations.define({
     onSuccess((saved) => ws.setScopedQueryData(ws.queries.getVercelSettingsQuery().queryKey, saved));
   },
   describe: "save the Vercel settings",
+  describeResult: null,
+  refetchOnSuccess: false,
+});
+
+export const mutSaveBoxdKey = mutations.define({
+  id: "settings/boxd",
+  mutate: (ws: Workspace, key: string) => ws.api.saveBoxdKey(key),
+  optimistic({ args: [ws], onSuccess }) {
+    onSuccess((saved) => ws.setScopedQueryData(ws.queries.getBoxdSettingsQuery().queryKey, saved));
+  },
+  describe: "save the boxd API key",
   describeResult: null,
   refetchOnSuccess: false,
 });

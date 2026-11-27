@@ -155,6 +155,7 @@ pub enum Backend {
     Tinker,
     K8s,
     Vercel,
+    Boxd,
     Openresearch,
 }
 impl Backend {
@@ -169,6 +170,7 @@ impl Backend {
             Self::Tinker => "tinker",
             Self::K8s => "k8s",
             Self::Vercel => "vercel",
+            Self::Boxd => "boxd",
             Self::Openresearch => "openresearch",
         }
     }
@@ -370,7 +372,7 @@ impl ConfigureArgs {
             "k8s" => &["context", "namespace"],
             "ray" => &["address"],
             "hf" => &["token", "namespace"],
-            "tinker" => &["key"],
+            "tinker" | "boxd" => &["key"],
             "modal" => &["tokenId", "tokenSecret"],
             _ => return Err(anyhow!("{backend} has no editable settings.")),
         };
@@ -707,6 +709,10 @@ async fn connect(args: &CheckArgs) -> Result<()> {
                  VERCEL_OIDC_TOKEN from `vercel env pull`) from the environment or Settings → \
                  Environment. Check them with `orx compute test vercel`."
             );
+        }
+        Backend::Boxd => {
+            settings::configure("boxd", json!({"key": secret_prompt("boxd API key").await?}))
+                .await?;
         }
         Backend::Local | Backend::Ray | Backend::K8s | Backend::Ssh | Backend::Slurm => {}
     }

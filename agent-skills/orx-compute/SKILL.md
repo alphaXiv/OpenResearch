@@ -74,6 +74,7 @@ If an installed reference cannot be read, `orx skill compute/<name>` prints
 - references/slurm.md — Slurm (`slurm`), including `--cpus`, `--mem` and `--flavor cpu`
 - references/ray.md — Ray Jobs (`ray`)
 - references/vercel.md — Vercel Sandbox (`vercel`)
+- references/boxd.md — boxd (`boxd`)
 - references/openresearch.md — OpenResearch (`openresearch`)
 - references/tinker.md — Tinker (`tinker`)
 - references/local.md — this machine (`local`)

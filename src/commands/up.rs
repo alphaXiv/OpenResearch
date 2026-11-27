@@ -1260,6 +1260,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>, reach: up_remote::Re
             "/api/settings/vercel",
             get(vercel_settings).post(set_vercel),
         )
+        .route("/api/settings/boxd", get(boxd_settings).post(set_boxd))
         .route("/api/settings/vercel/scopes", post(vercel_scopes_route))
         .route("/api/settings/env", get(env_settings).post(set_env_var))
         .route(
@@ -14653,7 +14654,8 @@ mod tests {
             .map(|target| target["id"].as_str().unwrap())
             .collect();
         let vercel = ids.iter().position(|id| *id == "vercel").unwrap();
-        assert_eq!(ids[vercel + 1], "openresearch");
+        assert_eq!(ids[vercel + 1], "boxd");
+        assert_eq!(ids[vercel + 2], "openresearch");
         assert!(ids.iter().position(|id| *id == "ray").unwrap() < vercel);
     }
 

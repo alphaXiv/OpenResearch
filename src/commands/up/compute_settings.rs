@@ -465,6 +465,52 @@ pub(super) async fn set_vercel(Json(req): Json<SetVercelReq>) -> ApiResult {
 
 // --- modal settings -----------------------------------------------------------
 
+// --- boxd settings ------------------------------------------------------------
+
+use crate::jobs::boxd;
+
+pub(super) async fn boxd_settings() -> ApiResult {
+    let key = boxd::credential(boxd::API_KEY);
+    let mut value = json!({
+        "validationStatus": "missing",
+        "processEnv": matches!(key, Some((_, "env"))),
+        "maskedKey": key.as_ref().map(|(key, _)| mask_token(key)),
+    });
+    let Some((key, _)) = key else {
+        return Ok(Json(value));
+    };
+    let checked = async { boxd::Account::new(key).client("")?.org_defaults().await };
+    match checked.await {
+        Ok(_) => value["validationStatus"] = json!("valid"),
+        Err(error) => {
+            let rejected = error.downcast_ref::<boxd::AuthRejected>().is_some();
+            value["validationStatus"] = json!(if rejected { "invalid" } else { "unknown" });
+            value["error"] = json!(error.to_string());
+        }
+    }
+    Ok(Json(value))
+}
+
+#[derive(Deserialize)]
+pub(super) struct SetBoxdKeyReq {
+    key: String,
+}
+
+/// Saves a key only once boxd accepts it.
+pub(super) async fn set_boxd(Json(req): Json<SetBoxdKeyReq>) -> ApiResult {
+    let key = req.key.trim().to_string();
+    if key.is_empty() {
+        return Err(bad_request("Enter a boxd API key."));
+    }
+    if let Err(error) = boxd::Account::new(key.clone()).client("")?.check().await {
+        return Err(bad_request(format!("{error} Nothing was saved.")));
+    }
+    tokio::task::spawn_blocking(move || crate::config::write_synced_env_var(boxd::API_KEY, &key))
+        .await
+        .map_err(|e| anyhow!("env write task failed: {e}"))??;
+    boxd_settings().await
+}
+
 use crate::jobs::modal;
 
 pub(super) fn modal_settings_json() -> crate::error::Result<Value> {
@@ -1674,6 +1720,8 @@ pub(super) fn compute_settings_json(ssh: SshReadiness) -> Value {
     let tinker = crate::jobs::tinker::resolve_api_key_with_source().ok();
     let modal_source = crate::jobs::modal::token_source();
     let vercel_source = crate::jobs::vercel::token_source();
+    let boxd_source =
+        crate::jobs::boxd::credential(crate::jobs::boxd::API_KEY).map(|(_, source)| source);
     let k8s_settings = k8s::load_settings().ok().flatten();
     let ssh_hosts = list_ssh_hosts().len();
     let slurm_settings = crate::jobs::slurm::load_settings().ok().flatten();
@@ -1783,6 +1831,16 @@ pub(super) fn compute_settings_json(ssh: SshReadiness) -> Value {
                 Some("env") => "VERCEL_* env vars",
                 Some("syncedEnv") => "Token from Environment tab",
                 _ => "No token",
+            },
+        },
+        {
+            "id": "boxd",
+            "configured": boxd_source.is_some(),
+            "fromEnvironmentTab": boxd_source == Some("syncedEnv"),
+            "summary": match boxd_source {
+                Some("env") => "BOXD_API_KEY env var",
+                Some("syncedEnv") => "Key from Environment tab",
+                _ => "No API key",
             },
         },
         {
@@ -2038,6 +2096,7 @@ pub(crate) async fn show(backend: &str) -> Result<Value> {
         "hf" => Ok(hf_settings().await),
         "modal" => modal_settings().await,
         "vercel" => vercel_settings().await,
+        "boxd" => boxd_settings().await,
         "tinker" => tinker_settings().await,
         "k8s" => k8s_settings().await,
         "openresearch" => openresearch_settings().await,
@@ -2096,6 +2155,7 @@ pub(crate) async fn configure(backend: &str, body: Value) -> Result<Value> {
             "hf" => &["HF_TOKEN"],
             "tinker" => &["TINKER_API_KEY"],
             "modal" => &["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"],
+            "boxd" => &[crate::jobs::boxd::API_KEY],
             _ => return Err(anyhow!("No saved credentials for {backend}.")),
         };
         for key in keys {
@@ -2163,6 +2223,7 @@ pub(crate) async fn configure(backend: &str, body: Value) -> Result<Value> {
         }
         "modal" => set_modal_token(Json(serde_json::from_value(body)?)).await,
         "tinker" => set_tinker_key(Json(serde_json::from_value(body)?)).await,
+        "boxd" => set_boxd(Json(serde_json::from_value(body)?)).await,
         _ => {
             return Err(anyhow!(
                 "{backend} has no saved configuration; use compute connect or default set."
@@ -2232,7 +2293,7 @@ pub(crate) async fn check(
                 && value["jobsWrite"] != false
                 && value["sourceStaging"] == true
         }
-        "tinker" => value["validationStatus"] == "valid",
+        "tinker" | "boxd" => value["validationStatus"] == "valid",
         "openresearch" => {
             value["loggedIn"] == true
                 && value["sshKeyStatus"] == "matched"

@@ -291,7 +291,7 @@ pub(crate) const REDIRECT_VARS: [&str; 12] = [
 /// The credentials, endpoints and models agents and backends read, and the
 /// markers of an agent's shell; a test child sees only those its test sets.
 #[cfg(test)]
-pub(crate) const PROVIDER_VARS: [&str; 42] = [
+pub(crate) const PROVIDER_VARS: [&str; 43] = [
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
@@ -326,6 +326,7 @@ pub(crate) const PROVIDER_VARS: [&str; 42] = [
     "TINKER_API_KEY",
     "VERCEL_TOKEN",
     "VERCEL_OIDC_TOKEN",
+    "BOXD_API_KEY",
     "CLAUDECODE",
     "CLAUDE_CODE_ENTRYPOINT",
     "CODEX_THREAD_ID",

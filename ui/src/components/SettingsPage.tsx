@@ -55,6 +55,7 @@ import {
   mutSaveRaySettings,
   mutSaveSlurmSettings,
   mutSaveTinkerKey,
+  mutSaveBoxdKey,
   mutSaveVercelSetup,
   mutSetAutoUpdate,
   mutSetComputeDefault,
@@ -2711,6 +2712,7 @@ const TARGET_CARD_DESCRIPTIONS: Record<ComputeTargetId, () => string> = {
   slurm: m.compute_description_slurm,
   ray: m.compute_description_ray,
   vercel: m.compute_description_vercel,
+  boxd: m.compute_description_boxd,
   openresearch: m.compute_description_openresearch,
 };
 
@@ -2725,6 +2727,7 @@ const TARGET_KIND: Record<ComputeTargetId, string> = {
   slurm: "slurm_job",
   ray: "ray_job",
   vercel: "vercel_job",
+  boxd: "boxd_job",
   openresearch: "openresearch_job",
 };
 
@@ -2735,6 +2738,7 @@ const FLAVORED_TARGETS: ComputeTargetId[] = [
   "slurm",
   "ray",
   "vercel",
+  "boxd",
   "openresearch",
 ];
 /** Of those, the ones where a launch *requires* a flavor. */
@@ -2746,10 +2750,11 @@ const FLAVOR_SUGGESTIONS: Partial<Record<ComputeTargetId, string[]>> = {
   slurm: ["cpu", "gpu", "h100:1", "h100:2", "a100:4"],
   ray: ["cpu", "cpu:2", "gpu", "gpu:1", "gpu:1,cpu:4", "gpu:1,mem:8GiB"],
   vercel: ["cpu", "cpu-1", "cpu-4", "cpu-8", "cpu-16", "cpu-32"],
+  boxd: ["cpu", "cpu-1", "cpu-2", "cpu-4", "cpu-8"],
   openresearch: ["h100_sxm", "h100_sxm:2", "cpu5c", "cpu5g", "cpu5m"],
 };
 
-const QUICK_SETUP_TARGETS: ComputeTargetId[] = ["tinker", "hf", "modal", "ray", "k8s", "vercel"];
+const QUICK_SETUP_TARGETS: ComputeTargetId[] = ["tinker", "hf", "modal", "ray", "k8s", "vercel", "boxd"];
 
 const TARGET_USAGE: Partial<Record<ComputeTargetId, () => string>> = {
   tinker: m.compute_usage_tinker,
@@ -3106,7 +3111,7 @@ function TargetTile({
       <span id={summaryId} className="mt-2 line-clamp-2 min-h-8 text-xs leading-normal text-subtext">
         {target.fromEnvironmentTab ? (
           <>
-            {target.id === "tinker" ? m.settings_key_from() : m.settings_token_from()}{" "}
+            {target.id === "tinker" || target.id === "boxd" ? m.settings_key_from() : m.settings_token_from()}{" "}
             <button
               type="button"
               className="relative z-20 text-accent-blue-strong underline-offset-2 hover:underline"
@@ -3217,6 +3222,7 @@ function QuickSetupDialog({ targetId, projectId, remote, cancel, isDisabled, onE
       {targetId === "ray" && <RaySection />}
       {targetId === "k8s" && <K8sSection onEditState={updateEditState} />}
       {targetId === "vercel" && <VercelSection />}
+      {targetId === "boxd" && <BoxdSection />}
     </DialogContent>;
 }
 
@@ -3433,6 +3439,77 @@ function TinkerSection({ target }: { target: ComputeTargetSummary }) {
         {error && <p className="m-0 text-sm text-accent-red">{error}</p>}
         <div className="flex justify-end gap-2">
           <Button type="button" disabled={saving || checking} onClick={() => void refresh()}>
+            <RefreshCw size={14} /> {checking ? m.common_checking() : m.settings_check_again()}
+          </Button>
+          <Button variant="primary" type="submit" disabled={!apiKey.trim() || saving || checking}>
+            {saving ? m.settings_validating() : m.common_save()}
+          </Button>
+        </div>
+      </form>
+    </>
+  );
+}
+
+// --- compute (boxd) ------------------------------------------------------------
+
+function BoxdSection() {
+  const workspace = useWorkspace();
+  const { getBoxdSettingsQuery } = workspace.queries;
+  const settingsQuery = useQuery(getBoxdSettingsQuery());
+  const s = settingsQuery.data ?? null;
+  const [apiKey, setApiKey] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [actionError, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const checking = settingsQuery.isPending || refreshing;
+  const error = actionError ?? settingsQuery.error?.message ?? s?.error ?? null;
+
+  async function run(action: () => Promise<unknown>, setBusy: (busy: boolean) => void) {
+    setBusy(true);
+    setError(null);
+    try {
+      await action();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function submit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!apiKey.trim() || saving || checking) return;
+    void run(async () => {
+      await mutSaveBoxdKey.runAsHeadlessPromise(workspace, apiKey.trim(), {});
+      setApiKey("");
+    }, setSaving);
+  }
+
+  return (
+    <>
+      {!s && checking ? <LoadingRow><Spinner /> {m.common_checking()}</LoadingRow> : s && <dl className="m-0 flex items-center justify-between gap-4 text-sm">
+        <dt className="font-medium text-subtext">{m.settings_page_status()}</dt>
+        <dd className="m-0">
+          <Badge variant={s.validationStatus === "valid" ? "success" : s.validationStatus === "invalid" ? "error" : "warning"}>
+            {s.validationStatus === "valid" ? m.settings_page_ready()
+              : s.validationStatus === "invalid" ? m.settings_tinker_invalid_key()
+                : s.validationStatus === "unknown" ? m.settings_vercel_cant_connect()
+                  : m.settings_page_not_configured()}
+          </Badge>
+        </dd>
+      </dl>}
+      {s?.processEnv && <p className="mt-2 mb-0 text-sm text-subtext">{m.settings_boxd_env_override()}</p>}
+      <form className="mt-5 flex flex-col gap-4" onSubmit={submit}>
+        <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
+          {s?.maskedKey ? m.settings_replace_key() : m.onboarding_api_key()}
+          <Input type="password" value={apiKey} placeholder={s?.maskedKey ?? "bxd_…"} onChange={(event) => setApiKey(event.target.value)} autoComplete="new-password" />
+        </label>
+        <a className="self-start text-sm text-subtext underline" href="https://boxd.sh?ref=OpenResearch" target="_blank" rel="noreferrer">
+          {m.settings_boxd_create_key()}
+        </a>
+        {error && <p className="m-0 text-sm text-accent-red break-words">{error}</p>}
+        <div className="flex justify-end gap-2">
+          <Button type="button" disabled={saving || checking} onClick={() => void run(() => workspace.queryClient.fetchQuery({ ...getBoxdSettingsQuery(), staleTime: 0 }), setRefreshing)}>
             <RefreshCw size={14} /> {checking ? m.common_checking() : m.settings_check_again()}
           </Button>
           <Button variant="primary" type="submit" disabled={!apiKey.trim() || saving || checking}>

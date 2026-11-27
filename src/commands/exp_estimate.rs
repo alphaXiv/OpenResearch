@@ -118,6 +118,11 @@ async fn price(backend: &str, args: &crate::ExpRunArgs) -> Result<Option<Quote>>
     };
     let quote = match backend {
         "hf" => hf::hardware_price(&hf::endpoint(), flavor()?).await?,
+        "boxd" => crate::jobs::boxd::hourly_price(
+            crate::jobs::boxd::resolve_flavor(Some(flavor()?))?.ok_or_else(|| {
+                anyhow!("pass the --flavor the run will use as cpu-<n>: boxd's default size is set per org")
+            })?,
+        ),
         // Estimates are plan-mode reads: use Modal's interpreter as set up, never install one.
         "modal" => modal::hourly_price(&modal::resolve_flavor(flavor()?)).await?,
         "openresearch" => {
